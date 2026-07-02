@@ -8,5 +8,9 @@ contextBridge.exposeInMainWorld('electron', {
   pickFolder: () => ipcRenderer.invoke('pick-folder'),
   openPath:   (p) => ipcRenderer.invoke('open-path', p),
   listDir:    (p) => ipcRenderer.invoke('list-dir', p ?? null),
-  onMediaKey: (cb) => ipcRenderer.on('media-key', (_, key) => cb(key)),
+  onMediaKey:        (cb) => ipcRenderer.on('media-key',        (_, key)     => cb(key)),
+  onUpdateAvailable: (cb) => ipcRenderer.on('update-available',  (_, version) => cb(version)),
+  onUpdateProgress:  (cb) => ipcRenderer.on('update-progress',   (_, pct)     => cb(pct)),
+  onUpdateDownloaded:(cb) => ipcRenderer.on('update-downloaded', ()           => cb()),
+  installUpdate:     ()   => ipcRenderer.send('install-update'),
 })

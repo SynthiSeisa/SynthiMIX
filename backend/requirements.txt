@@ -1,0 +1,8 @@
+fastapi==0.115.5
+starlette==0.41.2
+uvicorn==0.32.0
+websockets==13.1
+h11==0.14.0
+anyio==4.6.2
+mutagen==1.47.0
+Pillow==11.0.0

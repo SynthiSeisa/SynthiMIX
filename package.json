@@ -48,6 +48,11 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "SynthiMIX"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "SynthiSeisa",
+      "repo": "SynthiMIX"
     }
   }
 }

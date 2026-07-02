@@ -39,6 +39,7 @@ export const skipNextCrossfade  = writable(false)  // set true before any user-i
 export const playlistContent = writable({})   // { [path]: track[] }
 export const selectionOwner  = writable('')   // '' | 'library' | 'queue' — only one panel may have a selection at a time
 export const notes           = writable('')   // free-text scratchpad, persisted on the backend
+export const remoteStatus    = writable(null) // null | {running, ip, port, url, error}
 
 // ── appSettings — persisted in localStorage ───────────────────────────────────
 const APP_SETTINGS_DEFAULTS = {
@@ -183,6 +184,7 @@ function connect() {
       case 'auto_remove_played': autoRemovePlayed.set(msg.enabled); break
       case 'logs': backendLogs.set(msg.lines ?? []); break
       case 'notes': notes.set(msg.text ?? ''); break
+      case 'remote_status': remoteStatus.set(msg); break
       case 'track_meta_update':
         library.update(l => l.map(t => t.path === msg.track?.path ? { ...t, ...msg.track } : t))
         break

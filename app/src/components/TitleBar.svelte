@@ -70,6 +70,17 @@
     ['Entf',       'Markierten Queue-Eintrag entfernen'],
     ['F11',        'Vollbild umschalten'],
   ]
+
+  // ── Auto-Update ───────────────────────────────────────────────────────────
+  let updateVersion   = $state(null)   // z.B. "1.3.0"
+  let updateProgress  = $state(null)   // 0-100 während Download
+  let updateReady     = $state(false)  // Download abgeschlossen
+
+  $effect(() => {
+    win.onUpdateAvailable?.((v) => { updateVersion = v })
+    win.onUpdateProgress?.((p) => { updateProgress = p })
+    win.onUpdateDownloaded?.(() => { updateReady = true; updateProgress = null })
+  })
 </script>
 
 <div class="titlebar">
@@ -88,6 +99,21 @@
     <span class="version">v1.2</span>
   </div>
   <div class="tb-actions" style="-webkit-app-region:no-drag">
+
+    {#if updateReady}
+      <button class="update-btn ready" onclick={() => win.installUpdate?.()} title="Update installieren und neu starten">
+        ↑ v{updateVersion} installieren
+      </button>
+    {:else if updateProgress !== null}
+      <span class="update-btn downloading">
+        ↓ {updateProgress}%
+      </span>
+    {:else if updateVersion}
+      <span class="update-btn available" title="Update wird heruntergeladen…">
+        ↓ v{updateVersion}
+      </span>
+    {/if}
+
     <div class="log-wrap">
       <button class="tb-btn tb-log" onclick={() => { logOpen = !logOpen; helpOpen = false; notesOpen = false }} title="Backend-Log">⬛</button>
       {#if logOpen}
@@ -172,6 +198,17 @@
   .nm-synthi { color: #e07800; }
   .nm-mix    { color: #3b82f6; }
   .version   { font-size: 9px; color: #2a3a54; margin-left: 2px; align-self: flex-end; margin-bottom: 3px; }
+
+  /* Update-Benachrichtigung */
+  .update-btn {
+    font-size: 10px; font-weight: 600; border-radius: 3px;
+    padding: 3px 8px; cursor: default; white-space: nowrap;
+    border: 1px solid transparent; letter-spacing: 0.05em;
+  }
+  .update-btn.available    { color: #60a0e0; border-color: #1a3a60; background: #0d1a2e; }
+  .update-btn.downloading  { color: #60c060; border-color: #1a3a1a; background: #0d1a0d; }
+  .update-btn.ready        { color: #fff; border-color: #2a7a2a; background: #1a5a1a; cursor: pointer; }
+  .update-btn.ready:hover  { background: #1e6e1e; }
 
   .tb-actions { display:flex; align-items:center; gap:4px; margin-left:auto; -webkit-app-region:no-drag; }
   .tb-btn { background:none; border:none; color:#3a5070; font-size:14px; width:28px; height:28px; cursor:pointer; border-radius:3px; display:flex; align-items:center; justify-content:center; transition:color .1s, background .1s; }

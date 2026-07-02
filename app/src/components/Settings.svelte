@@ -1,7 +1,7 @@
 <script>
   import { settings, settingsOpen, appSettings, send, toolsInfo, updateProgress,
            loudnormOnDl, loudnormTarget, loudnormTp, autoMixEnabled, playMode,
-           playlistFolderEnabled, dlFilenameFormat, downloadDir } from '../stores/ws.js'
+           playlistFolderEnabled, dlFilenameFormat, downloadDir, remoteStatus } from '../stores/ws.js'
 
   let tab = $state('playback')
 
@@ -10,6 +10,7 @@
     { id: 'fade',     label: 'Blend',      icon: '⇌' },
     { id: 'download', label: 'Download',   icon: '↓' },
     { id: 'system',   label: 'System',     icon: '⚙' },
+    { id: 'remote',   label: 'Remote',     icon: '⊕' },
     { id: 'info',     label: 'Info',       icon: 'ℹ' },
   ]
 
@@ -356,6 +357,41 @@
             {/if}
           </div>
 
+        <!-- ── REMOTE ─────────────────────────────────────────────────── -->
+        {:else if tab === 'remote'}
+
+          <div class="group">
+            <div class="group-title">Handy-Fernbedienung</div>
+            <p class="remote-desc">Startet einen lokalen Server im WLAN. Öffne die angezeigte URL im Browser deines Handys — kein Internet, keine App nötig.</p>
+
+            {#if $remoteStatus?.running}
+              <div class="remote-status on">
+                <span class="remote-dot on"></span>
+                Server läuft
+              </div>
+              <div class="remote-url">
+                <span class="url-label">URL:</span>
+                <span class="url-val">{$remoteStatus.url}</span>
+              </div>
+              <div class="remote-hint">Im Handy-Browser öffnen (gleiches WLAN)</div>
+              <button class="action-btn danger" onclick={() => send({ type: 'remote_stop' })}>Server stoppen</button>
+            {:else}
+              <div class="remote-status off">
+                <span class="remote-dot off"></span>
+                {$remoteStatus?.error ? 'Fehler: ' + $remoteStatus.error : 'Gestoppt'}
+              </div>
+              <button class="action-btn" onclick={() => send({ type: 'remote_start' })}>Server starten</button>
+            {/if}
+          </div>
+
+          <div class="group">
+            <div class="group-title">Funktionen</div>
+            <div class="info-row">📱 Aktueller Track + Steuerung (Play/Pause/Skip)</div>
+            <div class="info-row">🔊 Lautstärke regulieren</div>
+            <div class="info-row">📋 Warteschlange anzeigen, Reihenfolge ändern, Tracks entfernen</div>
+            <div class="info-row">🔍 Bibliothek durchsuchen und Tracks hinzufügen</div>
+          </div>
+
         <!-- ── INFO ───────────────────────────────────────────────────── -->
         {:else if tab === 'info'}
 
@@ -578,4 +614,21 @@
     background: #0a1020; border-radius: 3px; padding: 4px 8px;
   }
   .shortcuts td:last-child { color: #5a7090; padding-left: 14px; }
+
+  /* ── Remote Tab ─────────────────────────────────────────────────────────── */
+  .remote-desc { font-size: 11px; color: #5a7090; line-height: 1.6; margin-bottom: 10px; }
+  .remote-status { display: flex; align-items: center; gap: 7px; font-size: 12px; margin-bottom: 10px; }
+  .remote-status.on { color: #75d595; }
+  .remote-status.off { color: #5a7090; }
+  .remote-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .remote-dot.on  { background: #75d595; }
+  .remote-dot.off { background: #3a5070; }
+  .remote-url { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .url-label { font-size: 10px; color: #4a6080; flex-shrink: 0; }
+  .url-val   { font-size: 13px; color: #60a0e0; font-family: monospace; font-weight: 600; }
+  .remote-hint { font-size: 10px; color: #3a5070; margin-bottom: 12px; }
+  .action-btn.danger { border-color: #5a1a1a; color: #c05050; }
+  .action-btn.danger:hover { border-color: #c05050; color: #e07070; }
+  .info-row { font-size: 12px; color: #5a7090; padding: 5px 0; border-bottom: 1px solid #0e1a28; }
+  .info-row:last-child { border-bottom: none; }
 </style>

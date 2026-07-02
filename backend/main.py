@@ -124,6 +124,9 @@ app = FastAPI(lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 clients: set[WebSocket] = set()
+_remote_clients: set[WebSocket] = set()
+_remote_server: Any = None
+_remote_port = 8080
 _dl_procs: dict[int, Any] = {}  # session_id → asyncio.Process (for kill support)
 
 _state: dict[str, Any] = {
@@ -162,6 +165,8 @@ async def broadcast(msg: dict):
 async def push_queue():
     await broadcast({"type": "queue", "items": _state["queue"],
                      "current_idx": _state["current_idx"]})
+    if _remote_clients:
+        asyncio.create_task(_broadcast_remote_state())
 
 async def push_player():
     await broadcast({
@@ -175,6 +180,8 @@ async def push_player():
             "repeat":      _state.get("repeat", 0),
         }
     })
+    if _remote_clients:
+        asyncio.create_task(_broadcast_remote_state())
 
 _dl_last_push: float = 0.0
 
@@ -864,6 +871,13 @@ async def _do_automix(last_title: str):
     finally:
         _automix_running = False
 
+LIVE_RE = re.compile(
+    r'\b(live\s*(at|in|from|version|performance|session|recording|concert|show)?'
+    r'|concert|tour\s*\d{4}?|unplugged|acoustic\s+live|live\s+acoustic'
+    r'|at\s+the\s+\w+\s+(?:arena|stadium|festival|hall|theater|theatre))\b',
+    re.IGNORECASE
+)
+
 MIX_RE = re.compile(
     r'\b(dj\s+mix|mixed\s+by|continuous\s+mix|megamix|mashup|mixtape|'
     r'hour\s+mix|\d+\s*h(our|r)?\s*mix|full\s+mix|best\s+of\s+mix|'
@@ -1083,12 +1097,15 @@ async def _do_automix_inner(last_title: str):
             # plain-YouTube fallback, since ytmsearch alone rarely surfaces these
             if NON_MUSIC_RE.search(r_title):
                 continue
+            # Skip live recordings / concert performances
+            if LIVE_RE.search(r_title):
+                continue
             # Skip playlists / full albums
             if _is_playlist(u):
                 continue
             dur = r.get("duration") or 0
-            # Skip very long tracks (>20 min = likely a mix) and very short clips/shorts (<40s)
-            if dur > 1200 or (dur and dur < 40):
+            # Skip tracks over 8 min (likely a mix/medley) and very short clips (<40s)
+            if dur > 480 or (dur and dur < 40):
                 continue
             # Unverified (plain-YouTube fallback) results: require a Topic-channel or
             # audio/lyrics title match — otherwise too easy to grab non-music uploads
@@ -1391,6 +1408,15 @@ async def handle_message(ws: WebSocket, msg: dict):
 
     elif t == "resume":
         _state["playing"] = True
+        ci = _state["current_idx"]
+        if 0 <= ci < len(_state["queue"]):
+            track = _state["queue"][ci]
+            if not track.get("played"):
+                track["played"]    = True
+                track["played_at"] = int(time.time())
+                track["play_count"] = track.get("play_count", 0) + 1
+                save_queue()
+                await push_queue()
         await push_player()
 
     elif t == "seek":
@@ -1427,9 +1453,11 @@ async def handle_message(ws: WebSocket, msg: dict):
             pass
 
     elif t == "set_volume":
-        _state["volume"] = msg.get("value", 80)
+        _state["volume"] = min(100, max(0, int(float(msg.get("value", 80)))))
         save_settings()
         await broadcast({"type": "settings", "volume": _state["volume"], "crossfade_s": _state["crossfade_s"]})
+        if _remote_clients:
+            asyncio.create_task(_broadcast_remote_state())
 
     elif t == "set_crossfade":
         _state["crossfade_s"] = msg.get("seconds", 4)
@@ -1805,6 +1833,13 @@ async def handle_message(ws: WebSocket, msg: dict):
             lt["play_count"] = 0
         save_library()
         await push_library()
+
+    elif t == "remote_start":
+        await _start_remote_server(ws)
+
+    elif t == "remote_stop":
+        await _stop_remote_server()
+        await broadcast({"type": "remote_status", "running": False})
 
     elif t == "get_notes":
         await ws.send_text(json.dumps({"type": "notes", "text": _state["notes"]}))
@@ -2197,6 +2232,12 @@ async def _audit_playlist_for_videos(playlist_url: str) -> list[dict]:
         results = await _run_search_cmd([YTDLP, f"ytmsearch5:{query}"] + search_base)
         if not results:
             continue
+        # Filter live recordings and overlong tracks before scoring
+        results = [r for r in results
+                   if not LIVE_RE.search(r.get("title", ""))
+                   and 0 < (r.get("duration") or 0) <= 480]
+        if not results:
+            continue
         # Prefer Topic channel or audio/lyric in title, penalise video
         results.sort(key=lambda r: r["_score"], reverse=True)
         best = results[0]
@@ -2575,6 +2616,341 @@ async def websocket_endpoint(ws: WebSocket):
         clients.discard(ws)
     except Exception:
         clients.discard(ws)
+
+# ── Remote Control Server ──────────────────────────────────────────────────────
+import socket as _socket
+from fastapi.responses import HTMLResponse
+
+def _get_local_ip() -> str:
+    try:
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return '127.0.0.1'
+
+_REMOTE_HTML = """<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>SynthiMIX Remote</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0a0f1a;color:#c8d8f0;font-family:system-ui,sans-serif}
+.hdr{background:#0d1625;padding:10px 14px;border-bottom:1px solid #1a2838;display:flex;align-items:center;gap:8px;position:sticky;top:0;z-index:50}
+.logo{color:#e07800;font-weight:700;font-size:14px}.logo span{color:#3b82f6}
+.sub{font-size:10px;color:#4a6080}
+.dot{width:8px;height:8px;border-radius:50%;background:#d57575;margin-left:auto;transition:background .3s}
+.dot.on{background:#75d595}
+.np{padding:12px 14px 8px;background:#080c14;text-align:center;border-bottom:1px solid #0e1a28}
+.np-t{font-size:16px;font-weight:600;color:#f0c070;min-height:22px;word-break:break-word}
+.np-a{font-size:12px;color:#7090b0;min-height:16px;margin-top:3px}
+.ctrls{display:flex;justify-content:center;gap:20px;padding:14px}
+.btn{background:#1a2838;border:none;border-radius:50%;color:#c8d8f0;font-size:18px;width:46px;height:46px;cursor:pointer;display:flex;align-items:center;justify-content:center}
+.btn.big{background:#e07800;color:#fff;font-size:22px;width:54px;height:54px}
+.btn:active{opacity:.6}
+.vol{padding:4px 16px 12px}
+.vol-h{font-size:10px;color:#7090b0;margin-bottom:4px;display:flex;justify-content:space-between}
+input[type=range]{width:100%;accent-color:#e07800;height:24px}
+.sec{border-top:1px solid #1a2838;padding:10px 14px 4px}
+.sec-h{font-size:10px;font-weight:700;letter-spacing:.1em;color:#4a6080;margin-bottom:8px}
+.q-wrap{max-height:45vh;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.qi{display:flex;align-items:center;gap:6px;padding:8px 2px;border-bottom:1px solid #0e1a28;min-height:48px;user-select:none}
+.qi.cur{background:#12200a}
+.dh{color:#2a3a54;font-size:20px;padding:4px 8px;flex-shrink:0;touch-action:none;line-height:1;cursor:grab}
+.qi-info{flex:1;min-width:0}
+.qi-t{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qi-t.a{color:#f0a040;font-weight:600}
+.qi-t.p{color:#3a5070}
+.qi-d{font-size:10px;color:#3a5070;margin-top:2px}
+.rmb{background:none;border:none;color:#5a2a2a;font-size:18px;width:36px;height:36px;cursor:pointer;flex-shrink:0;padding:0}
+.rmb:active{color:#c05050}
+.s-row{display:flex;gap:6px;margin-bottom:8px}
+.inp{flex:1;background:#1a2838;border:1px solid #2a3848;border-radius:6px;color:#c8d8f0;font-size:14px;padding:8px 10px;outline:none}
+.inp::placeholder{color:#4a6080}
+.ri{display:flex;align-items:center;gap:8px;padding:8px 2px;border-bottom:1px solid #0e1a28;min-height:48px}
+.ri-info{flex:1;min-width:0}
+.ri-t{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ri-a{font-size:10px;color:#4a6080;margin-top:2px}
+.add-b{background:#0d2010;border:1px solid #1a4020;border-radius:6px;color:#75d595;font-size:18px;width:36px;height:36px;cursor:pointer;flex-shrink:0;padding:0}
+.add-b:active{background:#1a3820}
+.empty{padding:14px 2px;color:#4a6080;font-size:12px;text-align:center}
+</style>
+</head>
+<body>
+<div class="hdr">
+  <span class="logo">Synthi<span>MIX</span></span>
+  <span class="sub">Remote</span>
+  <div id="dot" class="dot"></div>
+</div>
+<div class="np">
+  <div id="npT" class="np-t">&#8211;</div>
+  <div id="npA" class="np-a">&#8211;</div>
+</div>
+<div class="ctrls">
+  <button class="btn" onclick="send({type:'play_prev'})">&#9198;</button>
+  <button id="pb" class="btn big" onclick="toggle()">&#9654;</button>
+  <button class="btn" onclick="send({type:'play_next'})">&#9197;</button>
+</div>
+<div class="vol">
+  <div class="vol-h"><span>Lautst&#228;rke</span><span id="vv">80%</span></div>
+  <input type="range" id="vr" min="0" max="100" value="80" oninput="onVol(this.value)" onchange="flushVol()">
+</div>
+<div class="sec">
+  <div class="sec-h">WARTESCHLANGE &nbsp;<span id="qc" style="font-weight:400;color:#3a5070">0</span></div>
+  <div id="qw" class="q-wrap"><div id="ql"></div></div>
+</div>
+<div class="sec" style="padding-bottom:20px">
+  <div class="sec-h">BIBLIOTHEK</div>
+  <div class="s-row"><input class="inp" id="si" placeholder="Titel oder K&#252;nstler&#8230;" type="search" oninput="onS(this.value)"></div>
+  <div id="sr"></div>
+</div>
+<script>
+var st={playing:false,current_idx:-1,volume:80,queue:[]},ws,_vt,_res=[]
+function conn(){
+  ws=new WebSocket('ws://'+location.hostname+':8080/ws')
+  ws.onopen=function(){dot(true)}
+  ws.onclose=function(){dot(false);setTimeout(conn,2000)}
+  ws.onerror=function(){ws.close()}
+  ws.onmessage=function(e){
+    var m=JSON.parse(e.data)
+    if(m.type==='state'){st=m;render()}
+    else if(m.type==='search_results'){showRes(m.results||[])}
+  }
+}
+function dot(on){document.getElementById('dot').className='dot'+(on?' on':'')}
+function send(o){if(ws&&ws.readyState===1)ws.send(JSON.stringify(o))}
+function toggle(){send({type:st.playing?'pause':'resume'})}
+var _pv=null
+function onVol(v){document.getElementById('vv').textContent=v+'%';_pv=+v;clearTimeout(_vt);_vt=setTimeout(flushVol,120)}
+function flushVol(){if(_pv!=null){send({type:'set_volume',value:_pv});_pv=null}}
+function fmt(s){if(!s)return'';var m=Math.floor(s/60);return m+':'+(Math.floor(s%60)+'').padStart(2,'0')}
+function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function rm(i){if(confirm('Entfernen?'))send({type:'queue_remove',index:i})}
+function addLib(i){if(_res[i]){send({type:'queue_append',path:_res[i].path});document.getElementById('si').value='';document.getElementById('sr').innerHTML='';_res=[]}}
+var _st=null
+function onS(q){clearTimeout(_st);if(!q.trim()){document.getElementById('sr').innerHTML='';return}_st=setTimeout(function(){send({type:'search_library',query:q})},300)}
+function showRes(rs){
+  _res=rs
+  var el=document.getElementById('sr')
+  if(!rs.length){el.innerHTML='<div class=empty>Keine Ergebnisse</div>';return}
+  el.innerHTML=rs.map(function(r,i){
+    return'<div class=ri><div class=ri-info><div class=ri-t>'+esc(r.title||'&#8211;')+'</div><div class=ri-a>'+esc(r.artist||'')+(r.duration_sec?' &middot; '+fmt(r.duration_sec):'')+'</div></div><button class=add-b onclick="addLib('+i+')">+</button></div>'
+  }).join('')
+}
+/* ── Touch drag-to-reorder ─────────────────────────────────────────────── */
+var dg={on:false,idx:-1,ghost:null,gy0:0,gy1:0,dropAt:-1,scInt:null,timer:null}
+function dhStart(e,i){
+  e.preventDefault()
+  var t=e.touches[0]
+  dg.idx=i;dg.gy0=t.clientY;dg.on=false
+  dg.timer=setTimeout(function(){dhAct(i)},160)
+}
+function dhAct(i){
+  dg.on=true
+  var rows=document.querySelectorAll('.qi'),src=rows[i];if(!src)return
+  var rect=src.getBoundingClientRect()
+  var g=document.createElement('div')
+  g.style.cssText='position:fixed;left:0;right:0;top:'+rect.top+'px;height:'+rect.height+'px;background:#1e3050;border:1px solid #3b82f6;border-radius:4px;z-index:999;pointer-events:none;display:flex;align-items:center;padding:0 50px 0 14px;opacity:.92;font-size:13px;color:#c8d8f0;overflow:hidden'
+  var info=src.querySelector('.qi-info');if(info)g.innerHTML=info.outerHTML
+  document.body.appendChild(g)
+  dg.ghost=g;dg.gy1=rect.top;dg.dropAt=i
+  src.style.opacity='.2';showLine(i)
+}
+function dhMove(e){
+  var t=e.touches[0]
+  if(!dg.on){if(Math.abs(t.clientY-dg.gy0)>10){clearTimeout(dg.timer);dg.timer=null}return}
+  e.preventDefault()
+  var dy=t.clientY-dg.gy0
+  if(dg.ghost)dg.ghost.style.top=(dg.gy1+dy)+'px'
+  var rows=document.querySelectorAll('.qi'),drop=0
+  for(var i=0;i<rows.length;i++){var r=rows[i].getBoundingClientRect();if(t.clientY>r.top+r.height/2)drop=i+1}
+  if(drop!==dg.dropAt){dg.dropAt=drop;showLine(drop)}
+  clearInterval(dg.scInt);dg.scInt=null
+  var qw=document.getElementById('qw'),qr=qw.getBoundingClientRect()
+  if(t.clientY<qr.top+65)dg.scInt=setInterval(function(){qw.scrollTop-=8},20)
+  else if(t.clientY>qr.bottom-65)dg.scInt=setInterval(function(){qw.scrollTop+=8},20)
+}
+function dhEnd(e){
+  clearTimeout(dg.timer);clearInterval(dg.scInt);dg.timer=null;dg.scInt=null
+  if(!dg.on){dg.on=false;return}
+  dg.on=false
+  if(dg.ghost){dg.ghost.remove();dg.ghost=null}
+  hideLine()
+  var rows=document.querySelectorAll('.qi')
+  for(var i=0;i<rows.length;i++)rows[i].style.opacity=''
+  var from=dg.idx,to=dg.dropAt>from?dg.dropAt-1:dg.dropAt
+  if(to>=0&&from!==to)send({type:'queue_move',from:from,to:to})
+}
+function showLine(i){
+  var dl=document.getElementById('dl')
+  if(!dl){dl=document.createElement('div');dl.id='dl';dl.style.cssText='position:fixed;left:0;right:0;height:3px;background:#3b82f6;z-index:1000;pointer-events:none';document.body.appendChild(dl)}
+  var rows=document.querySelectorAll('.qi'),ref=rows[Math.min(i,rows.length-1)]
+  if(!ref){dl.style.display='none';return}
+  var r=ref.getBoundingClientRect()
+  dl.style.top=(i<rows.length?r.top:r.bottom)+'px';dl.style.display='block'
+}
+function hideLine(){var d=document.getElementById('dl');if(d)d.style.display='none'}
+/* ── Render ─────────────────────────────────────────────────────────────── */
+function render(){
+  var q=st.queue||[],ci=st.current_idx,cur=q[ci]
+  document.getElementById('npT').textContent=cur&&cur.title?cur.title:'–'
+  document.getElementById('npA').textContent=cur&&cur.artist?cur.artist:''
+  document.getElementById('pb').innerHTML=st.playing?'⏸':'▶'
+  document.getElementById('vr').value=st.volume
+  document.getElementById('vv').textContent=st.volume+'%'
+  document.getElementById('qc').textContent=q.length
+  document.getElementById('ql').innerHTML=q.length?q.map(function(t,i){
+    var a=i===ci,p=t.played&&!a
+    return'<div class="qi'+(a?' cur':'')+'"><div class=dh ontouchstart="dhStart(event,'+i+')" ontouchmove="dhMove(event)" ontouchend="dhEnd(event)">☰</div><div class=qi-info><div class="qi-t'+(a?' a':p?' p':'')+'">'+esc(t.title||'–')+'</div><div class=qi-d>'+fmt(t.duration_sec)+'</div></div><button class=rmb onclick="rm('+i+')">✕</button></div>'
+  }).join(''):'<div class=empty>Warteschlange leer</div>'
+}
+conn()
+</script>
+</body>
+</html>"""
+
+remote_app = FastAPI()
+remote_app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+@remote_app.get("/")
+async def remote_index():
+    return HTMLResponse(_REMOTE_HTML)
+
+@remote_app.websocket("/ws")
+async def remote_ws_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    _remote_clients.add(websocket)
+    try:
+        await _send_remote_state(websocket)
+        while True:
+            msg = await websocket.receive_json()
+            t = msg.get("type", "")
+            if t == "queue_move":
+                q = _state["queue"]
+                fi, ti = int(msg.get("from", 0)), int(msg.get("to", 0))
+                if 0 <= fi < len(q) and 0 <= ti < len(q) and fi != ti:
+                    item = q.pop(fi)
+                    q.insert(ti, item)
+                    ci = _state.get("current_idx", -1)
+                    if ci == fi:            _state["current_idx"] = ti
+                    elif fi < ci <= ti:     _state["current_idx"] = ci - 1
+                    elif ti <= ci < fi:     _state["current_idx"] = ci + 1
+                    save_queue()
+                    await push_queue()
+            elif t == "queue_remove":
+                idx = int(msg.get("index", -1))
+                q = _state["queue"]
+                if 0 <= idx < len(q):
+                    q.pop(idx)
+                    ci = _state.get("current_idx", -1)
+                    if idx < ci:   _state["current_idx"] = ci - 1
+                    elif idx == ci: _state["current_idx"] = min(ci, len(q) - 1)
+                    save_queue()
+                    await push_queue()
+            elif t == "queue_append":
+                path = msg.get("path", "")
+                lib = _state.get("library", [])
+                td = next((x for x in lib if x.get("path") == path), None)
+                if td and not _queue_is_duplicate(path, td.get("title", "")):
+                    _state["queue"].append({
+                        "path": path,
+                        "title": td.get("title") or Path(path).stem,
+                        "duration_sec": td.get("duration_sec", 0),
+                        "lufs": td.get("lufs", -99.0),
+                        "bpm": td.get("bpm", 0),
+                        "bitrate_kbps": td.get("bitrate_kbps", 0),
+                        "played": False,
+                    })
+                    save_queue()
+                    await push_queue()
+            elif t == "search_library":
+                query = (msg.get("query") or "").lower()
+                if query and query != "__clear__":
+                    lib = _state.get("library", [])
+                    results = [
+                        {"title": x.get("title",""), "artist": x.get("artist",""),
+                         "path": x.get("path",""), "duration_sec": x.get("duration_sec",0)}
+                        for x in lib
+                        if query in (x.get("title","") or "").lower()
+                        or query in (x.get("artist","") or "").lower()
+                    ][:30]
+                    await websocket.send_text(json.dumps({"type": "search_results", "results": results}))
+            elif t in ("pause", "resume", "play_at", "play_next", "play_prev", "set_volume"):
+                await handle_message(websocket, msg)
+    except Exception:
+        pass
+    finally:
+        _remote_clients.discard(websocket)
+
+async def _send_remote_state(ws: WebSocket):
+    q = _state.get("queue", [])
+    await ws.send_text(json.dumps({
+        "type": "state",
+        "playing":     _state.get("playing", False),
+        "current_idx": _state.get("current_idx", -1),
+        "volume":      _state.get("volume", 80),
+        "queue": [{"title": t.get("title",""), "artist": t.get("artist",""),
+                   "duration_sec": t.get("duration_sec", 0),
+                   "played": t.get("played", False),
+                   "path": t.get("path","")} for t in q],
+    }))
+
+async def _broadcast_remote_state():
+    if not _remote_clients:
+        return
+    q = _state.get("queue", [])
+    payload = json.dumps({
+        "type": "state",
+        "playing":     _state.get("playing", False),
+        "current_idx": _state.get("current_idx", -1),
+        "volume":      _state.get("volume", 80),
+        "queue": [{"title": t.get("title",""), "artist": t.get("artist",""),
+                   "duration_sec": t.get("duration_sec", 0),
+                   "played": t.get("played", False),
+                   "path": t.get("path","")} for t in q],
+    })
+    dead = set()
+    for ws in _remote_clients:
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            dead.add(ws)
+    _remote_clients.difference_update(dead)
+
+async def _start_remote_server(requester: WebSocket):
+    global _remote_server
+    if _remote_server is not None:
+        ip = _get_local_ip()
+        await requester.send_text(json.dumps({
+            "type": "remote_status", "running": True,
+            "ip": ip, "port": _remote_port,
+            "url": f"http://{ip}:{_remote_port}"
+        }))
+        return
+    try:
+        ip = _get_local_ip()
+        config = uvicorn.Config(remote_app, host="0.0.0.0", port=_remote_port, log_level="warning")
+        _remote_server = uvicorn.Server(config)
+        asyncio.create_task(_remote_server.serve())
+        print(f"[remote] gestartet auf http://{ip}:{_remote_port}", flush=True)
+        await broadcast({"type": "remote_status", "running": True,
+                         "ip": ip, "port": _remote_port,
+                         "url": f"http://{ip}:{_remote_port}"})
+    except Exception as e:
+        print(f"[remote] Fehler beim Starten: {e}", flush=True)
+        await requester.send_text(json.dumps({"type": "remote_status", "running": False, "error": str(e)}))
+
+async def _stop_remote_server():
+    global _remote_server
+    if _remote_server:
+        _remote_server.should_exit = True
+        _remote_server = None
+        print("[remote] gestoppt", flush=True)
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8765, log_level="warning")

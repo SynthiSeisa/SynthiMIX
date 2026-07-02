@@ -33,6 +33,7 @@ if (-not $SkipBackend) {
 
     Remove-Item "$root\backend\dist" -Recurse -Force -ErrorAction SilentlyContinue
     Push-Location "$root\backend"
+    pip install -r requirements.txt --quiet
     pyinstaller backend.spec --distpath dist --workpath build --noconfirm
     if ($LASTEXITCODE -ne 0) { Pop-Location; Fail "PyInstaller fehlgeschlagen" }
     Pop-Location

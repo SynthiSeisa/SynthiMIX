@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, globalShortcut } = require('electron')
 const path = require('path')
 const { spawn } = require('child_process')
+const { autoUpdater } = require('electron-updater')
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 
@@ -95,9 +96,35 @@ function registerMediaKeys() {
   })
 }
 
+function setupAutoUpdater() {
+  autoUpdater.autoDownload = true
+  autoUpdater.autoInstallOnAppQuit = true
+
+  autoUpdater.on('update-available', (info) => {
+    mainWindow?.webContents.send('update-available', info.version)
+  })
+  autoUpdater.on('download-progress', (p) => {
+    mainWindow?.webContents.send('update-progress', Math.round(p.percent))
+  })
+  autoUpdater.on('update-downloaded', () => {
+    mainWindow?.webContents.send('update-downloaded')
+  })
+  autoUpdater.on('error', (err) => {
+    console.log('[updater] Fehler:', err.message)
+  })
+}
+
 app.whenReady().then(() => {
   if (!process.env.YTDL_DEV) startPythonBackend()
-  setTimeout(() => { createWindow(); registerMediaKeys() }, process.env.YTDL_DEV ? 0 : 1200)
+  setTimeout(() => {
+    createWindow()
+    registerMediaKeys()
+    if (app.isPackaged) {
+      setupAutoUpdater()
+      // Update-Check 10 Sekunden nach Start (Backend muss erst hochfahren)
+      setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 10000)
+    }
+  }, process.env.YTDL_DEV ? 0 : 1200)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -110,6 +137,9 @@ app.on('window-all-closed', () => {
   if (pythonProcess) { try { pythonProcess.kill() } catch (e) {} }
   if (process.platform !== 'darwin') app.quit()
 })
+
+// Update installieren
+ipcMain.on('install-update', () => autoUpdater.quitAndInstall())
 
 // Window controls
 ipcMain.on('win-minimize', () => mainWindow?.minimize())
