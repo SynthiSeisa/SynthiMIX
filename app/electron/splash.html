@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #060a10;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    overflow: hidden;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    user-select: none;
+  }
+  .logo-wrap {
+    opacity: 0;
+    transform: scale(0.7);
+    animation: pop 0.55s cubic-bezier(.34,1.56,.64,1) 0.1s forwards;
+  }
+  @keyframes pop {
+    to { opacity: 1; transform: scale(1); }
+  }
+  svg { width: 88px; height: 88px; display: block; }
+  .name {
+    margin-top: 14px;
+    font-size: 22px; font-weight: 700; letter-spacing: 0.1em;
+    opacity: 0;
+    animation: fadein 0.4s ease 0.5s forwards;
+  }
+  @keyframes fadein { to { opacity: 1; } }
+  .synthi { color: #e07800; }
+  .mix    { color: #3b82f6; }
+  .ver {
+    margin-top: 5px;
+    font-size: 11px; color: #2a3a54; letter-spacing: 0.05em;
+    opacity: 0;
+    animation: fadein 0.4s ease 0.7s forwards;
+  }
+  .dots {
+    margin-top: 28px;
+    display: flex; gap: 6px;
+    opacity: 0;
+    animation: fadein 0.4s ease 0.9s forwards;
+  }
+  .dot {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: #1a2838;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  .dot:nth-child(2) { animation-delay: 0.2s; }
+  .dot:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes pulse {
+    0%,100% { background: #1a2838; }
+    50%      { background: #e07800; }
+  }
+</style>
+</head>
+<body>
+<div class="logo-wrap">
+  <svg viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="20" cy="20" r="19" fill="#0d1a2e"/>
+    <rect x="5"  y="16" width="4" height="9"  rx="1.5" fill="#e07800"/>
+    <rect x="11" y="10" width="4" height="15" rx="1.5" fill="#e07800"/>
+    <rect x="17" y="13" width="4" height="12" rx="1.5" fill="#f59332"/>
+    <rect x="23" y="7"  width="4" height="18" rx="1.5" fill="#e07800"/>
+    <rect x="29" y="11" width="4" height="14" rx="1.5" fill="#f59332"/>
+    <line x1="20" y1="29" x2="20" y2="35" stroke="#3b82f6" stroke-width="2" stroke-linecap="round"/>
+    <polyline points="16,32 20,36 24,32" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+</div>
+<div class="name"><span class="synthi">Synthi</span><span class="mix">MIX</span></div>
+<div class="ver">v1.2</div>
+<div class="dots">
+  <div class="dot"></div><div class="dot"></div><div class="dot"></div>
+</div>
+<script>
+  // Startup chime: two ascending tones
+  try {
+    const ctx = new AudioContext()
+    function tone(freq, start, dur, vol) {
+      const o = ctx.createOscillator()
+      const g = ctx.createGain()
+      o.connect(g); g.connect(ctx.destination)
+      o.type = 'sine'; o.frequency.value = freq
+      g.gain.setValueAtTime(0, ctx.currentTime + start)
+      g.gain.linearRampToValueAtTime(vol, ctx.currentTime + start + 0.02)
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur)
+      o.start(ctx.currentTime + start)
+      o.stop(ctx.currentTime + start + dur + 0.05)
+    }
+    tone(440, 0.05, 0.25, 0.18)   // A4
+    tone(554, 0.20, 0.25, 0.15)   // C#5
+    tone(659, 0.35, 0.40, 0.12)   // E5
+  } catch(e) {}
+</script>
+</body>
+</html>

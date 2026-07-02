@@ -1,0 +1,39 @@
+# ── Node / Electron ──────────────────────────────────────────────────────────
+node_modules/
+app/node_modules/
+app/dist/
+dist-installer/
+
+# ── Python / PyInstaller ──────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+backend/dist/
+backend/build/
+backend/*.spec.bak
+
+# ── Laufzeit-Daten (werden beim Start neu generiert) ─────────────────────────
+library_cache.json
+queue_cache.json
+history.json
+play_log.json
+notes.json
+playlists/
+art_cache/
+downloads/
+
+# ── Binaries (werden separat bereitgestellt) ──────────────────────────────────
+bin/ffmpeg.exe
+bin/ffprobe.exe
+bin/yt-dlp.exe
+
+# ── Build-Ausgaben ────────────────────────────────────────────────────────────
+1_Installer/
+2_Portable-App/
+
+# ── Dev / Tools ───────────────────────────────────────────────────────────────
+4_Dev-Daten/
+*.tmp
+*.log
+.env

@@ -1,0 +1,53 @@
+{
+  "name": "yt-downloader",
+  "version": "1.2.0",
+  "private": true,
+  "main": "app/electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:frontend": "cd app && npm run build",
+    "build:installer": "electron-builder --win --x64",
+    "build": "npm run build:frontend && npm run build:installer"
+  },
+  "devDependencies": {
+    "electron": "^36.3.2",
+    "electron-builder": "^25.1.8"
+  },
+  "allowScripts": {
+    "electron@36.9.5": true,
+    "electron-builder@25.1.8": true
+  },
+  "build": {
+    "appId": "com.synthimix.app",
+    "productName": "SynthiMIX",
+    "copyright": "Copyright © 2026",
+    "directories": {
+      "app": "app",
+      "output": "dist-installer",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "backend/dist/backend",
+        "to": "backend",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "SynthiMIX"
+    }
+  }
+}
