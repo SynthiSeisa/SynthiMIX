@@ -1,6 +1,6 @@
 # SynthiMIX
 
-DJ-Tool zum Verwalten, Analysieren und Herunterladen von Musik.  
+AuroMIX Musik-Tool zum Verwalten, Analysieren und Herunterladen von Musik.  
 Gebaut mit Electron + Svelte + Python (FastAPI).
 
 ## Features
