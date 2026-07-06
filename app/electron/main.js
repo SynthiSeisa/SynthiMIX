@@ -102,11 +102,12 @@ function registerMediaKeys() {
 }
 
 function setupAutoUpdater() {
-  autoUpdater.autoDownload = true
+  autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true
 
   autoUpdater.on('update-available', (info) => {
-    mainWindow?.webContents.send('update-available', info.version)
+    const size = info.files?.[0]?.size ?? null
+    mainWindow?.webContents.send('update-available', info.version, size)
   })
   autoUpdater.on('download-progress', (p) => {
     mainWindow?.webContents.send('update-progress', Math.round(p.percent))
@@ -144,8 +145,9 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-// Update installieren
-ipcMain.on('install-update', () => autoUpdater.quitAndInstall())
+// Update herunterladen / installieren
+ipcMain.on('download-update', () => autoUpdater.downloadUpdate().catch(() => {}))
+ipcMain.on('install-update',  () => autoUpdater.quitAndInstall())
 
 // Window controls
 ipcMain.on('win-minimize', () => mainWindow?.minimize())

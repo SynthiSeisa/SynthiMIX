@@ -41,7 +41,8 @@ export const skipNextCrossfade  = writable(false)  // set true before any user-i
 export const playlistContent = writable({})   // { [path]: track[] }
 export const selectionOwner  = writable('')   // '' | 'library' | 'queue' — only one panel may have a selection at a time
 export const notes           = writable('')   // free-text scratchpad, persisted on the backend
-export const remoteStatus    = writable(null) // null | {running, ip, port, url, error}
+export const remoteStatus      = writable(null)  // null | {running, ip, port, url, error}
+export const remoteAutostart   = writable(false)
 
 // ── appSettings — persisted in localStorage ───────────────────────────────────
 const APP_SETTINGS_DEFAULTS = {
@@ -151,6 +152,7 @@ function connect() {
         if (msg.download_dir              !== undefined) downloadDir.set(msg.download_dir)
         if (msg.auto_scan_interval_min    !== undefined) autoScanIntervalMin.set(msg.auto_scan_interval_min)
         if (msg.favorites                 !== undefined) favorites.set(msg.favorites)
+        if (msg.remote_autostart          !== undefined) remoteAutostart.set(msg.remote_autostart)
         // bpm_analysis is authoritative from backend — overrides localStorage
         if (msg.bpm_analysis              !== undefined)
           appSettings.update(s => ({ ...s, bpmAnalysis: msg.bpm_analysis }))

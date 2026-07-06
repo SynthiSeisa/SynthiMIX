@@ -72,15 +72,23 @@
   ]
 
   // ── Auto-Update ───────────────────────────────────────────────────────────
-  let updateVersion   = $state(null)
-  let updateProgress  = $state(null)
-  let updateReady     = $state(false)
-  let updateDismissed = $state(false)
+  let updateVersion     = $state(null)
+  let updateSize        = $state(null)
+  let updateProgress    = $state(null)
+  let updateDownloading = $state(false)
+  let updateReady       = $state(false)
+  let updateDismissed   = $state(false)
+
+  function formatSize(bytes) {
+    if (!bytes) return ''
+    const mb = bytes / (1024 * 1024)
+    return mb >= 1000 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`
+  }
 
   $effect(() => {
-    win.onUpdateAvailable?.((v) => { updateVersion = v; updateDismissed = false })
+    win.onUpdateAvailable?.((v, size) => { updateVersion = v; updateSize = size; updateDismissed = false })
     win.onUpdateProgress?.((p) => { updateProgress = p })
-    win.onUpdateDownloaded?.(() => { updateReady = true; updateProgress = null })
+    win.onUpdateDownloaded?.(() => { updateReady = true; updateDownloading = false; updateProgress = null })
     win.onUpdateError?.((msg) => { console.warn('[updater]', msg) })
   })
 </script>
@@ -98,7 +106,7 @@
       <polyline points="16,32 20,36 24,32" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
     <span class="app-name"><span class="nm-synthi">Synthi</span><span class="nm-mix">MIX</span></span>
-    <span class="version">v1.3.3</span>
+    <span class="version">v1.3.4</span>
   </div>
   <div class="tb-actions" style="-webkit-app-region:no-drag">
 
@@ -178,25 +186,36 @@
   </div>
 </div>
 
-{#if updateReady && !updateDismissed}
+{#if updateVersion && !updateDismissed}
   <div class="upd-overlay" onclick={() => updateDismissed = true} role="dialog">
     <div class="upd-dialog" onclick={(e) => e.stopPropagation()}>
-      <div class="upd-icon">&#8679;</div>
+      <div class="upd-icon">{#if updateReady}&#8679;{:else if updateDownloading}&#8595;{:else}&#8679;{/if}</div>
       <div class="upd-body">
-        <div class="upd-title">Update bereit</div>
-        <div class="upd-sub">SynthiMIX <strong>v{updateVersion}</strong> wurde heruntergeladen und kann jetzt installiert werden. Die App wird kurz neu gestartet.</div>
+        {#if updateReady}
+          <div class="upd-title">Update bereit</div>
+          <div class="upd-sub">SynthiMIX <strong>v{updateVersion}</strong> wurde heruntergeladen und kann jetzt installiert werden.</div>
+        {:else if updateDownloading}
+          <div class="upd-title">Wird heruntergeladen&#8230;</div>
+          <div class="upd-sub">SynthiMIX <strong>v{updateVersion}</strong>{updateSize ? ` · ${formatSize(updateSize)}` : ''}</div>
+          <div class="upd-bar"><div class="upd-bar-fill" style="width:{updateProgress ?? 0}%"></div></div>
+          <div class="upd-pct">{updateProgress ?? 0}%</div>
+        {:else}
+          <div class="upd-title">Update verfügbar</div>
+          <div class="upd-sub">SynthiMIX <strong>v{updateVersion}</strong> ist bereit zum Herunterladen{updateSize ? ` (${formatSize(updateSize)})` : ''}.</div>
+        {/if}
       </div>
       <div class="upd-actions">
-        <button class="upd-later" onclick={() => updateDismissed = true}>Später</button>
-        <button class="upd-install" onclick={() => win.installUpdate?.()}>Jetzt installieren &amp; neu starten</button>
+        {#if updateReady}
+          <button class="upd-later" onclick={() => updateDismissed = true}>Später</button>
+          <button class="upd-install" onclick={() => win.installUpdate?.()}>Jetzt installieren &amp; neu starten</button>
+        {:else if updateDownloading}
+          <button class="upd-later" onclick={() => updateDismissed = true}>Im Hintergrund</button>
+        {:else}
+          <button class="upd-later" onclick={() => updateDismissed = true}>Später</button>
+          <button class="upd-install" onclick={() => { updateDownloading = true; win.downloadUpdate?.() }}>Herunterladen</button>
+        {/if}
       </div>
     </div>
-  </div>
-{:else if updateVersion && !updateReady && !updateDismissed}
-  <div class="upd-toast">
-    <span class="upd-toast-ico">&#8595;</span>
-    <span>v{updateVersion} wird heruntergeladen{updateProgress !== null ? ` · ${updateProgress}%` : '…'}</span>
-    <button class="upd-toast-close" onclick={() => updateDismissed = true}>&#10005;</button>
   </div>
 {/if}
 
@@ -383,16 +402,15 @@
   }
   .upd-install:hover { background: #122e16; border-color: #3aba3a; color: #6ae070; }
 
-  .upd-toast {
-    position: fixed; bottom: 16px; right: 16px; z-index: 9000;
-    background: #07101c; border: 1px solid #1a3050; border-radius: 6px;
-    padding: 8px 12px; display: flex; align-items: center; gap: 8px;
-    font-size: 11px; color: #5a8ab0; box-shadow: 0 4px 16px rgba(0,0,0,.7);
+  .upd-bar {
+    height: 4px; background: #0c1828; border-radius: 2px; overflow: hidden;
+    margin-top: 10px;
   }
-  .upd-toast-ico { color: #3a7ab0; font-size: 14px; }
-  .upd-toast-close {
-    background: none; border: none; color: #3a5068; cursor: pointer;
-    padding: 0 2px; font-size: 12px; line-height: 1;
+  .upd-bar-fill {
+    height: 100%; background: #2a6aaa; border-radius: 2px;
+    transition: width .3s ease;
   }
-  .upd-toast-close:hover { color: #c04040; }
+  .upd-pct {
+    font-size: 10px; color: #3a5878; text-align: center; margin-top: 4px;
+  }
 </style>

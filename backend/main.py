@@ -359,6 +359,7 @@ def load_settings():
     _state["download_dir"]            = str(raw.get("download_dir", str(BASE_DIR / "Downloads")))
     _state["auto_scan_interval_min"]  = int(raw.get("auto_scan_interval_min", 0))
     _state["favorites"]               = list(raw.get("favorites", []))
+    _state["remote_autostart"]        = bool(raw.get("remote_autostart", False))
 
 def save_settings():
     _save_json(SETTINGS_FILE, {
@@ -376,6 +377,7 @@ def save_settings():
         "download_dir":            _state.get("download_dir", str(BASE_DIR / "Downloads")),
         "auto_scan_interval_min":  _state.get("auto_scan_interval_min", 0),
         "favorites":               _state.get("favorites", []),
+        "remote_autostart":        _state.get("remote_autostart", False),
     })
 
 def load_history():
@@ -1281,7 +1283,10 @@ async def handle_message(ws: WebSocket, msg: dict):
             "download_dir":            _state.get("download_dir", str(BASE_DIR / "Downloads")),
             "auto_scan_interval_min":  _state.get("auto_scan_interval_min", 0),
             "favorites":               _state.get("favorites", []),
+            "remote_autostart":        _state.get("remote_autostart", False),
         }))
+        if _state.get("remote_autostart") and _remote_server is None:
+            asyncio.create_task(_start_remote_server(ws))
 
     elif t == "queue_add":
         track = {
@@ -1971,6 +1976,11 @@ async def handle_message(ws: WebSocket, msg: dict):
 
     elif t == "remote_stop":
         await _stop_remote_server()
+
+    elif t == "set_remote_autostart":
+        _state["remote_autostart"] = bool(msg.get("value", False))
+        save_settings()
+        await ws.send_text(json.dumps({"type": "settings", "remote_autostart": _state["remote_autostart"]}))
         await broadcast({"type": "remote_status", "running": False})
 
     elif t == "get_notes":

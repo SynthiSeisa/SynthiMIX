@@ -2,7 +2,7 @@
   import { settings, settingsOpen, appSettings, send, toolsInfo, updateProgress,
            loudnormOnDl, loudnormTarget, loudnormTp, autoMixEnabled, playMode,
            playlistFolderEnabled, dlFilenameFormat, downloadDir, remoteStatus,
-           autoScanIntervalMin, scanRecursive } from '../stores/ws.js'
+           autoScanIntervalMin, scanRecursive, remoteAutostart } from '../stores/ws.js'
 
   let tab = $state('playback')
 
@@ -452,6 +452,11 @@
           <div class="group">
             <div class="group-title">Handy-Fernbedienung</div>
             <p class="remote-desc">Startet einen lokalen Server im WLAN. Öffne die angezeigte URL im Browser deines Handys — kein Internet, keine App nötig.</p>
+            <label class="row-toggle">
+              <span class="row-label">Bei Start automatisch starten</span>
+              <input type="checkbox" checked={$remoteAutostart}
+                onchange={(e) => send({ type: 'set_remote_autostart', value: e.target.checked })} />
+            </label>
 
             {#if $remoteStatus?.running}
               <div class="remote-status on">
