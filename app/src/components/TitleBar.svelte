@@ -73,11 +73,12 @@
 
   // â”€â”€ Auto-Update â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   let updateVersion   = $state(null)   // z.B. "1.3.0"
-  let updateProgress  = $state(null)   // 0-100 wÃ¤hrend Download
+  let updateProgress  = $state(null)   // 0-100 während Download
   let updateReady     = $state(false)  // Download abgeschlossen
+  let updateDismissed = $state(false)  // Nutzer hat "Später" geklickt
 
   $effect(() => {
-    win.onUpdateAvailable?.((v) => { updateVersion = v })
+    win.onUpdateAvailable?.((v) => { updateVersion = v; updateDismissed = false })
     win.onUpdateProgress?.((p) => { updateProgress = p })
     win.onUpdateDownloaded?.(() => { updateReady = true; updateProgress = null })
   })
@@ -100,17 +101,13 @@
   </div>
   <div class="tb-actions" style="-webkit-app-region:no-drag">
 
-    {#if updateReady}
+    {#if updateReady && updateDismissed}
       <button class="update-btn ready" onclick={() => win.installUpdate?.()} title="Update installieren und neu starten">
-        â†‘ v{updateVersion} installieren
+        ↑ v{updateVersion} installieren
       </button>
-    {:else if updateProgress !== null}
+    {:else if updateProgress !== null && updateDismissed}
       <span class="update-btn downloading">
-        â†“ {updateProgress}%
-      </span>
-    {:else if updateVersion}
-      <span class="update-btn available" title="Update wird heruntergeladenâ€¦">
-        â†“ v{updateVersion}
+        ↓ {updateProgress}%
       </span>
     {/if}
 
@@ -343,4 +340,58 @@
   }
   .controls button:hover { background: #141e30; color: #8a9ab4; }
   .controls button.close:hover { background: #6a1a1a; color: #ff6060; }
+
+  /* ── Update-Popup ────────────────────────────────────────────────────────── */
+  .upd-overlay {
+    position: fixed; inset: 0; z-index: 9000;
+    background: rgba(0,0,0,.55); backdrop-filter: blur(2px);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .upd-dialog {
+    background: #07101c; border: 1px solid #1a3050; border-radius: 8px;
+    padding: 24px 28px; max-width: 420px; width: 90%;
+    box-shadow: 0 20px 60px rgba(0,0,0,.9);
+    display: flex; flex-direction: column; gap: 16px;
+  }
+  .upd-icon {
+    font-size: 32px; color: #3a8a40; text-align: center; line-height: 1;
+  }
+  .upd-body { text-align: center; }
+  .upd-title {
+    font-size: 14px; font-weight: 700; letter-spacing: .08em;
+    color: #c8dff0; margin-bottom: 8px;
+  }
+  .upd-sub {
+    font-size: 11px; color: #5a7a98; line-height: 1.6;
+  }
+  .upd-sub strong { color: #8ab0cc; }
+  .upd-actions {
+    display: flex; gap: 10px; justify-content: center;
+  }
+  .upd-later {
+    padding: 7px 18px; background: #0a1018; border: 1px solid #1a2838;
+    border-radius: 4px; color: #4a6080; font-size: 11px; cursor: pointer;
+    transition: border-color .1s, color .1s;
+  }
+  .upd-later:hover { border-color: #3a5878; color: #8aaac8; }
+  .upd-install {
+    padding: 7px 20px; background: #0e2a12; border: 1px solid #2a7a2a;
+    border-radius: 4px; color: #4ac050; font-size: 11px; font-weight: 600;
+    cursor: pointer; transition: background .1s, border-color .1s, color .1s;
+  }
+  .upd-install:hover { background: #122e16; border-color: #3aba3a; color: #6ae070; }
+
+  /* Toast während Download */
+  .upd-toast {
+    position: fixed; bottom: 16px; right: 16px; z-index: 9000;
+    background: #07101c; border: 1px solid #1a3050; border-radius: 6px;
+    padding: 8px 12px; display: flex; align-items: center; gap: 8px;
+    font-size: 11px; color: #5a8ab0; box-shadow: 0 4px 16px rgba(0,0,0,.7);
+  }
+  .upd-toast-ico { color: #3a7ab0; font-size: 14px; }
+  .upd-toast-close {
+    background: none; border: none; color: #3a5068; cursor: pointer;
+    padding: 0 2px; font-size: 12px; line-height: 1;
+  }
+  .upd-toast-close:hover { color: #c04040; }
 </style>
