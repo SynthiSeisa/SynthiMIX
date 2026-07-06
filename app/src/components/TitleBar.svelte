@@ -1,4 +1,4 @@
-﻿<script>
+<script>
   import { settingsOpen, send, backendLogs, notes } from '../stores/ws.js'
   const win = window.electron ?? {}
 
@@ -8,7 +8,7 @@
   let autoRefresh = $state(true)
   let logEl = $state(null)
 
-  // â”€â”€ Notizblock â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Notizblock ────────────────────────────────────────────────────────────
   let notesOpen = $state(false)
   let notesSaved = $state(true)
 
@@ -62,20 +62,20 @@
 
   const shortcuts = [
     ['Space',      'Pause / Fortsetzen'],
-    ['â† / â†’',     'Â±5 Sekunden springen'],
-    ['Strg + â†’',  'NÃ¤chster Track'],
-    ['Strg + â†',  'Track-Anfang / Vorheriger'],
-    ['N',          'NÃ¤chster Track'],
+    ['← / →',     '±5 Sekunden springen'],
+    ['Strg + →',  'Nächster Track'],
+    ['Strg + ←',  'Track-Anfang / Vorheriger'],
+    ['N',          'Nächster Track'],
     ['P',          'Vorheriger Track'],
     ['Entf',       'Markierten Queue-Eintrag entfernen'],
     ['F11',        'Vollbild umschalten'],
   ]
 
-  // â”€â”€ Auto-Update â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  let updateVersion   = $state(null)   // z.B. "1.3.0"
-  let updateProgress  = $state(null)   // 0-100 während Download
-  let updateReady     = $state(false)  // Download abgeschlossen
-  let updateDismissed = $state(false)  // Nutzer hat "Später" geklickt
+  // ── Auto-Update ───────────────────────────────────────────────────────────
+  let updateVersion   = $state(null)
+  let updateProgress  = $state(null)
+  let updateReady     = $state(false)
+  let updateDismissed = $state(false)
 
   $effect(() => {
     win.onUpdateAvailable?.((v) => { updateVersion = v; updateDismissed = false })
@@ -103,28 +103,27 @@
 
     {#if updateReady && updateDismissed}
       <button class="update-btn ready" onclick={() => win.installUpdate?.()} title="Update installieren und neu starten">
-        ↑ v{updateVersion} installieren
+        &#8593; v{updateVersion} installieren
       </button>
     {:else if updateProgress !== null && updateDismissed}
       <span class="update-btn downloading">
-        ↓ {updateProgress}%
+        &#8595; {updateProgress}%
       </span>
     {/if}
 
     <div class="log-wrap">
-      <button class="tb-btn tb-log" onclick={() => { logOpen = !logOpen; helpOpen = false; notesOpen = false }} title="Backend-Log">â¬›</button>
+      <button class="tb-btn tb-log" onclick={() => { logOpen = !logOpen; helpOpen = false; notesOpen = false }} title="Backend-Log">&#11035;</button>
       {#if logOpen}
         <div class="log-panel">
           <div class="log-hdr">
             <span>BACKEND LOG</span>
-            <input class="log-filter" bind:value={logFilter} placeholder="Filterâ€¦" />
+            <input class="log-filter" bind:value={logFilter} placeholder="Filter&#8230;" />
             <label class="log-auto">
               <input type="checkbox" bind:checked={autoRefresh} />
               live
             </label>
-            <button onclick={() => send({ type: 'get_logs' })}>â†º</button>
-            <button onclick={() => navigator.clipboard.writeText(filteredLogs.join('\n'))} title="Alles kopieren">âŽ˜</button>
-            <button onclick={() => logOpen = false}>âœ•</button>
+            <button onclick={() => send({ type: 'get_logs' })}>&#8635;</button>
+            <button onclick={() => logOpen = false}>&#10005;</button>
           </div>
           <div class="log-body" bind:this={logEl}>
             {#each filteredLogs as line}
@@ -137,36 +136,28 @@
       {/if}
     </div>
     <div class="notes-wrap">
-      <button class="tb-btn tb-notes" onclick={() => { notesOpen = !notesOpen; helpOpen = false; logOpen = false }} title="Notizblock">
-        <svg viewBox="0 0 14 14" width="13" height="13" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <rect x="1.5" y="1.5" width="9" height="11" rx="1" stroke="currentColor" stroke-width="1.2"/>
-          <line x1="4" y1="5" x2="8.5" y2="5" stroke="currentColor" stroke-width="1"/>
-          <line x1="4" y1="7.2" x2="8.5" y2="7.2" stroke="currentColor" stroke-width="1"/>
-          <line x1="4" y1="9.4" x2="7" y2="9.4" stroke="currentColor" stroke-width="1"/>
-          <path d="M10.5 8.5 L12.5 6.5 L13.5 7.5 L11.5 9.5 L10 10 Z" fill="currentColor"/>
-        </svg>
-      </button>
+      <button class="tb-btn" onclick={() => { notesOpen = !notesOpen; helpOpen = false; logOpen = false }} title="Notizblock">&#128221;</button>
       {#if notesOpen}
         <div class="notes-panel">
           <div class="notes-hdr">
             <span>NOTIZBLOCK</span>
-            <span class="notes-status">{notesSaved ? 'gespeichert' : 'speichertâ€¦'}</span>
-            <button onclick={() => notesOpen = false}>âœ•</button>
+            <span class="notes-status">{notesSaved ? 'gespeichert' : 'speichert&#8230;'}</span>
+            <button onclick={() => notesOpen = false}>&#10005;</button>
           </div>
-          <textarea class="notes-body" placeholder="Bugs, Ideen, Probleme wÃ¤hrend des Sets notierenâ€¦"
+          <textarea class="notes-body" placeholder="Bugs, Ideen, Probleme w&#228;hrend des Sets notieren&#8230;"
                     value={$notes} oninput={onNotesInput}></textarea>
         </div>
       {/if}
     </div>
     <div class="help-wrap">
-      <button class="tb-btn tb-help" onclick={() => { helpOpen = !helpOpen; notesOpen = false }} title="TastenkÃ¼rzel">?</button>
+      <button class="tb-btn tb-help" onclick={() => { helpOpen = !helpOpen; notesOpen = false }} title="Tastenkürzel">?</button>
       {#if helpOpen}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="help-backdrop" onclick={() => helpOpen = false}></div>
         <div class="help-panel">
           <div class="help-hdr">
-            <span>TASTENKÃœRZEL</span>
-            <button onclick={() => helpOpen = false}>âœ•</button>
+            <span>TASTENKÜRZEL</span>
+            <button onclick={() => helpOpen = false}>&#10005;</button>
           </div>
           {#each shortcuts as [key, desc]}
             <div class="help-row">
@@ -177,14 +168,36 @@
         </div>
       {/if}
     </div>
-    <button class="tb-btn" onclick={() => settingsOpen.set(true)} title="Einstellungen">âš™</button>
+    <button class="tb-btn" onclick={() => settingsOpen.set(true)} title="Einstellungen">&#9881;</button>
   </div>
   <div class="controls" role="toolbar">
-    <button onclick={() => win.minimize?.()} aria-label="Minimieren">â”€</button>
-    <button onclick={() => win.maximize?.()} aria-label="Maximieren">â–¡</button>
-    <button class="close" onclick={() => win.close?.()} aria-label="SchlieÃŸen">âœ•</button>
+    <button onclick={() => win.minimize?.()} aria-label="Minimieren">&#9472;</button>
+    <button onclick={() => win.maximize?.()} aria-label="Maximieren">&#9633;</button>
+    <button class="close" onclick={() => win.close?.()} aria-label="Schließen">&#10005;</button>
   </div>
 </div>
+
+{#if updateReady && !updateDismissed}
+  <div class="upd-overlay" onclick={() => updateDismissed = true} role="dialog">
+    <div class="upd-dialog" onclick={(e) => e.stopPropagation()}>
+      <div class="upd-icon">&#8679;</div>
+      <div class="upd-body">
+        <div class="upd-title">Update bereit</div>
+        <div class="upd-sub">SynthiMIX <strong>v{updateVersion}</strong> wurde heruntergeladen und kann jetzt installiert werden. Die App wird kurz neu gestartet.</div>
+      </div>
+      <div class="upd-actions">
+        <button class="upd-later" onclick={() => updateDismissed = true}>Später</button>
+        <button class="upd-install" onclick={() => win.installUpdate?.()}>Jetzt installieren &amp; neu starten</button>
+      </div>
+    </div>
+  </div>
+{:else if updateVersion && !updateReady && !updateDismissed}
+  <div class="upd-toast">
+    <span class="upd-toast-ico">&#8595;</span>
+    <span>v{updateVersion} wird heruntergeladen{updateProgress !== null ? ` · ${updateProgress}%` : '…'}</span>
+    <button class="upd-toast-close" onclick={() => updateDismissed = true}>&#10005;</button>
+  </div>
+{/if}
 
 <style>
   .titlebar {
@@ -205,7 +218,6 @@
   .nm-mix    { color: #3b82f6; }
   .version   { font-size: 9px; color: #2a3a54; margin-left: 2px; align-self: flex-end; margin-bottom: 3px; }
 
-  /* Update-Benachrichtigung */
   .update-btn {
     font-size: 10px; font-weight: 600; border-radius: 3px;
     padding: 3px 8px; cursor: default; white-space: nowrap;
@@ -221,10 +233,8 @@
   .tb-btn:hover { color:#c8d8f0; background:#141e30; }
   .tb-help { font-size:11px; font-weight:700; border:1px solid #1a2838; border-radius:50%; width:18px; height:18px; }
 
-  /* Log button */
   .tb-log { font-size: 8px; }
 
-  /* Log panel */
   .log-wrap { position: relative; }
   .log-panel {
     position: absolute; top: calc(100% + 6px); right: 0;
@@ -254,11 +264,10 @@
   .log-body {
     overflow-y: auto; flex: 1; padding: 4px 0;
     font-family: 'Consolas', 'Courier New', monospace; font-size: 10px;
-    user-select: text; -webkit-user-select: text;
   }
   .log-line {
     padding: 1px 10px; white-space: pre-wrap; word-break: break-all;
-    line-height: 1.5; user-select: text; -webkit-user-select: text;
+    line-height: 1.5;
   }
   .log-info    { color: #3a5870; }
   .log-analyze { color: #5a8a5a; }
@@ -266,7 +275,6 @@
   .log-err     { color: #c04040; background: #0e0606; }
   .log-empty   { padding: 20px; text-align: center; color: #2a3a54; font-size: 11px; }
 
-  /* Notizblock */
   .notes-wrap { position: relative; }
   .notes-panel {
     position: absolute; top: calc(100% + 6px); right: 0;
@@ -297,7 +305,6 @@
   }
   .notes-body::placeholder { color: #2a3a54; }
 
-  /* Help popup */
   .help-wrap { position: relative; }
   .help-backdrop { position: fixed; inset: 0; z-index: 900; }
   .help-panel {
@@ -353,21 +360,15 @@
     box-shadow: 0 20px 60px rgba(0,0,0,.9);
     display: flex; flex-direction: column; gap: 16px;
   }
-  .upd-icon {
-    font-size: 32px; color: #3a8a40; text-align: center; line-height: 1;
-  }
+  .upd-icon { font-size: 32px; color: #3a8a40; text-align: center; line-height: 1; }
   .upd-body { text-align: center; }
   .upd-title {
     font-size: 14px; font-weight: 700; letter-spacing: .08em;
     color: #c8dff0; margin-bottom: 8px;
   }
-  .upd-sub {
-    font-size: 11px; color: #5a7a98; line-height: 1.6;
-  }
+  .upd-sub { font-size: 11px; color: #5a7a98; line-height: 1.6; }
   .upd-sub strong { color: #8ab0cc; }
-  .upd-actions {
-    display: flex; gap: 10px; justify-content: center;
-  }
+  .upd-actions { display: flex; gap: 10px; justify-content: center; }
   .upd-later {
     padding: 7px 18px; background: #0a1018; border: 1px solid #1a2838;
     border-radius: 4px; color: #4a6080; font-size: 11px; cursor: pointer;
@@ -381,7 +382,6 @@
   }
   .upd-install:hover { background: #122e16; border-color: #3aba3a; color: #6ae070; }
 
-  /* Toast während Download */
   .upd-toast {
     position: fixed; bottom: 16px; right: 16px; z-index: 9000;
     background: #07101c; border: 1px solid #1a3050; border-radius: 6px;
