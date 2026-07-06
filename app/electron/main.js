@@ -41,6 +41,11 @@ function createSplash() {
     webPreferences: { contextIsolation: true }
   })
   splash.loadFile(path.join(__dirname, 'splash.html'))
+  splash.webContents.on('did-finish-load', () => {
+    splash.webContents.executeJavaScript(
+      `document.querySelector('.ver').textContent = 'v${app.getVersion()}'`
+    )
+  })
   return splash
 }
 
@@ -111,6 +116,7 @@ function setupAutoUpdater() {
   })
   autoUpdater.on('error', (err) => {
     console.log('[updater] Fehler:', err.message)
+    mainWindow?.webContents.send('update-error', err.message)
   })
 }
 

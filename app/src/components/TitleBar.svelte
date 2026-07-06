@@ -81,6 +81,7 @@
     win.onUpdateAvailable?.((v) => { updateVersion = v; updateDismissed = false })
     win.onUpdateProgress?.((p) => { updateProgress = p })
     win.onUpdateDownloaded?.(() => { updateReady = true; updateProgress = null })
+    win.onUpdateError?.((msg) => { console.warn('[updater]', msg) })
   })
 </script>
 
@@ -97,7 +98,7 @@
       <polyline points="16,32 20,36 24,32" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
     <span class="app-name"><span class="nm-synthi">Synthi</span><span class="nm-mix">MIX</span></span>
-    <span class="version">v1.3.1</span>
+    <span class="version">v1.3.2</span>
   </div>
   <div class="tb-actions" style="-webkit-app-region:no-drag">
 
