@@ -2272,7 +2272,7 @@ def _ytdlp_cmd(url: str, fmt_id: str, out_dir: str, playlist_folder: str | None 
                 f"ffmpeg:-af loudnorm=I={t}:TP={tp}:LRA=11"]
 
     if is_search:
-        cmd.append(f"ytsearch1:{url}")   # exactly 1 search result
+        cmd.append(f"ytmsearch1:{url}")  # YouTube Music search → prefers audio over video
     else:
         cmd.append(url)
     return cmd
@@ -2399,6 +2399,23 @@ async def _audit_playlist_for_videos(playlist_url: str) -> list[dict]:
     return entries
 
 
+_MV_TITLE_RE = re.compile(
+    r'\b(official\s+(?:music\s+)?video|music\s+video|official\s+mv|\bmv\b)\b',
+    re.IGNORECASE
+)
+
+def _is_unwanted_result(item: dict) -> bool:
+    """True for full albums (>10 min) and music videos (not from Topic channels)."""
+    duration = item.get("duration") or 0
+    if duration > 600:          # longer than 10 min → likely full album / DJ mix
+        return True
+    title    = item.get("title", "")
+    uploader = (item.get("uploader") or "").lower()
+    is_topic = "- topic" in uploader
+    if _MV_TITLE_RE.search(title) and not is_topic:
+        return True             # official music video (Topic channels only release audio)
+    return False
+
 async def do_search(query: str, ws: WebSocket):
     base_args = ["--flat-playlist", "-j", "--no-playlist", "--quiet"]
     if FFMPEG_DIR:
@@ -2408,6 +2425,7 @@ async def do_search(query: str, ws: WebSocket):
     if not results:
         results = await _run_search_cmd([YTDLP, f"ytsearch10:{query}"] + base_args)
 
+    results = [r for r in results if not _is_unwanted_result(r)]
     results.sort(key=lambda r: r["_score"], reverse=True)
     for r in results:
         del r["_score"]

@@ -98,7 +98,7 @@
       <polyline points="16,32 20,36 24,32" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
     <span class="app-name"><span class="nm-synthi">Synthi</span><span class="nm-mix">MIX</span></span>
-    <span class="version">v1.3.2</span>
+    <span class="version">v1.3.3</span>
   </div>
   <div class="tb-actions" style="-webkit-app-region:no-drag">
 
@@ -282,7 +282,7 @@
     background: #040810; border: 1px solid #1a2d48;
     border-radius: 5px; z-index: 1000; width: 360px;
     box-shadow: 0 8px 28px rgba(0,0,0,.9);
-    display: flex; flex-direction: column;
+    display: flex; flex-direction: column; overflow: hidden;
   }
   .notes-hdr {
     display: flex; align-items: center; gap: 6px;
