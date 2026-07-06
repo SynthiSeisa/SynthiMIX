@@ -1,5 +1,5 @@
 <script>
-  let { groups = [], onclose, onremove } = $props()
+  let { groups = [], onclose, onremove, playlistMode = false } = $props()
 
   // Local copy so user actions (keep/skip) can remove groups without affecting the parent
   let remaining = $state([])
@@ -15,7 +15,10 @@
   const checkedCount = $derived(checked.size)
   function deleteChecked() {
     if (checked.size === 0) return
-    if (!confirm(`${checked.size} ausgewählte Kopien dauerhaft von der Festplatte löschen?`)) return
+    const msg = playlistMode
+      ? `${checked.size} ausgewählte Kopien aus der Playlist entfernen?`
+      : `${checked.size} ausgewählte Kopien dauerhaft von der Festplatte löschen?`
+    if (!confirm(msg)) return
     for (const p of checked) onremove(p)
     const del = checked
     remaining = remaining.map(g => ({
@@ -110,7 +113,10 @@
 
   function removeAllLower() {
     const count = groups.reduce((n, g) => n + g.others.length, 0)
-    if (!confirm(`${count} niedrigwertige Kopien dauerhaft von der Festplatte löschen?`)) return
+    const msg = playlistMode
+      ? `${count} niedrigwertige Kopien aus der Playlist entfernen?`
+      : `${count} niedrigwertige Kopien dauerhaft von der Festplatte löschen?`
+    if (!confirm(msg)) return
     for (const g of remaining) g.others.forEach(t => onremove(t.path))
     onclose()
   }
@@ -127,11 +133,11 @@
               title="Nach Ordner gruppieren statt nach Song">
         📁 Nach Ordner
       </button>
-      <button class="remove-all-btn" onclick={removeAllLower}>✕ Alle Kopien löschen</button>
+      <button class="remove-all-btn" onclick={removeAllLower}>{playlistMode ? '✕ Alle Kopien aus Playlist' : '✕ Alle Kopien löschen'}</button>
       <button class="close-btn" onclick={onclose}>✕</button>
     </div>
 
-    {#if folderGroups.length > 0}
+    {#if folderGroups.length > 0 && !playlistMode}
       <div class="folder-bar">
         <span class="folder-bar-label">Ordner komplett löschen:</span>
         {#each folderGroups as f}
@@ -188,7 +194,7 @@
                   <button class="keep-btn" onclick={() => keepOnly(group, track)}
                           title="Diese behalten, alle anderen in der Gruppe löschen">Behalten</button>
                   <button class="del-btn" onclick={() => removeTrack(group, track)}
-                          title="Diese Datei dauerhaft von der Festplatte löschen">🗑 Von Platte löschen</button>
+                          title={playlistMode ? 'Aus Playlist entfernen' : 'Diese Datei dauerhaft von der Festplatte löschen'}>{playlistMode ? '✕ Aus Playlist' : '🗑 Von Platte löschen'}</button>
                 </div>
               </div>
             {/each}
@@ -221,7 +227,7 @@
                   <button class="keep-btn" onclick={() => keepOnly(group, track)}
                           title="Diese behalten, alle anderen in der Gruppe löschen">Behalten</button>
                   <button class="del-btn" onclick={() => removeTrack(group, track)}
-                          title="Diese Datei dauerhaft von der Festplatte löschen">🗑 Von Platte löschen</button>
+                          title={playlistMode ? 'Aus Playlist entfernen' : 'Diese Datei dauerhaft von der Festplatte löschen'}>{playlistMode ? '✕ Aus Playlist' : '🗑 Von Platte löschen'}</button>
                 </div>
               </div>
             {/each}

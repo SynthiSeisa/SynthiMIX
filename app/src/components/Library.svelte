@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte'
-  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner } from '../stores/ws.js'
+  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites } from '../stores/ws.js'
   import BetterVersionDialog from './BetterVersionDialog.svelte'
   import DuplicateScanDialog from './DuplicateScanDialog.svelte'
 
@@ -92,6 +92,7 @@
   }
 
   function selectNav(mode) {
+    if (mode === 'duplicates' && navMode !== 'duplicates') dupeSourceMode = navMode
     navMode = mode
     search  = ''
     selected = new Set()
@@ -102,6 +103,49 @@
   let secArtistOpen   = $state(false)
   let secDlOpen       = $state(true)
   let secPlaylistOpen = $state(true)
+
+  // ── Nav tree search ───────────────────────────────────────────────────────
+  let navSearch = $state('')
+  const navQ = $derived(navSearch.trim().toLowerCase())
+  const filteredArtists = $derived(
+    navQ ? artists.filter(a => a.toLowerCase().includes(navQ)) : artists
+  )
+  const filteredPlaylists = $derived(
+    navQ ? $playlists.filter(pl => pl.name.toLowerCase().includes(navQ)) : $playlists
+  )
+  const filteredDlFolders = $derived(
+    navQ && $downloadTreeLoaded
+      ? $downloadTree.folders.filter(f => f.name.toLowerCase().includes(navQ))
+      : ($downloadTreeLoaded ? $downloadTree.folders : [])
+  )
+  const filteredDlFiles = $derived.by(() => {
+    const raw = navQ && $downloadTreeLoaded
+      ? $downloadTree.files.filter(f => f.name.toLowerCase().includes(navQ))
+      : ($downloadTreeLoaded ? $downloadTree.files : [])
+    const seen = new Set()
+    return raw.filter(f => seen.has(f.path) ? false : (seen.add(f.path), true))
+  })
+  // auto-expand sections with hits
+  $effect(() => {
+    if (!navQ) return
+    if (filteredArtists.length)  secArtistOpen   = true
+    if (filteredPlaylists.length) secPlaylistOpen = true
+    if (filteredDlFolders.length || filteredDlFiles.length) secDlOpen = true
+  })
+  // ── Favoriten dropdown ────────────────────────────────────────────────────
+  let favOpen = $state(false)
+
+  // ── Download subfolder expand state ──────────────────────────────────────
+  let dlExpandedFolders = $state(new Set())
+  function toggleDlFolder(path) {
+    const s = new Set(dlExpandedFolders)
+    s.has(path) ? s.delete(path) : s.add(path)
+    dlExpandedFolders = s
+  }
+
+  // ── Duplicate scope tracking ──────────────────────────────────────────────
+  let dupeSourceMode = $state('all')
+
   let fsRoots = $state([])
   let fsKids  = $state({})
   let fsOpen  = $state({})
@@ -177,27 +221,31 @@
   function dropOnPlaylist(e, plPath) {
     e.preventDefault()
     dragOverPlaylist = null
+    let added = false
 
     function addTrack(t) {
+      added = true
       send({ type: 'playlist_add_track', playlist: plPath,
              path: t.path, title: t.title, duration_sec: t.duration_sec ?? 0 })
     }
 
     const multiRaw = e.dataTransfer.getData('application/x-ytdl-multi')
     if (multiRaw) {
-      try { JSON.parse(multiRaw).forEach(addTrack); return } catch {}
+      try { JSON.parse(multiRaw).forEach(addTrack) } catch {}
+    } else {
+      const rich = e.dataTransfer.getData('application/x-ytdl-track')
+      if (rich) {
+        try { addTrack(JSON.parse(rich)) } catch {}
+      } else {
+        const path = e.dataTransfer.getData('text/plain')
+        if (path) {
+          const t = $library.find(lt => lt.path === path)
+          if (t) addTrack(t)
+        }
+      }
     }
-    const rich = e.dataTransfer.getData('application/x-ytdl-track')
-    if (rich) {
-      try { addTrack(JSON.parse(rich)); return } catch {}
-    }
-    const path = e.dataTransfer.getData('text/plain')
-    if (path) {
-      const t = $library.find(lt => lt.path === path)
-      if (t) addTrack(t)
-    }
-    // Invalidate cached content so next open re-fetches
-    playlistContent.update(m => { const c = {...m}; delete c[plPath]; return c })
+    // Invalidate cache so playlist content refreshes after drop
+    if (added) playlistContent.update(m => { const c = {...m}; delete c[plPath]; return c })
   }
 
   // ── Track list filtered + sorted ──────────────────────────────────────────
@@ -333,14 +381,34 @@
   // Stems are excluded from duplicate detection entirely
   const STEM_RE = /\b(stem|stems|vocal|vocals|instrumental|karaoke|acapella|a[\s-]cappella)\b/i
 
+  // tracks to scan for dupes — scoped to current folder/artist/all
+  const dupeScopeTracks = $derived.by(() => {
+    const mode = dupeSourceMode
+    if (mode === 'all' || mode === 'duplicates') return $library
+    if (mode.startsWith('fs:')) {
+      const p = mode.slice(3)
+      return $library.filter(t => t.path.startsWith(p + '\\') || t.path.startsWith(p + '/'))
+    }
+    if (mode.startsWith('artist:')) {
+      const target = mode.slice(7).toLowerCase()
+      return $library.filter(t => getTrackArtistTitle(t).artist.toLowerCase().includes(target))
+    }
+    if (mode.startsWith('playlist:')) {
+      const plPath = mode.slice(9)
+      return $playlistContent[plPath] ?? []
+    }
+    return $library
+  })
+
   const { dupesHidden, dupesAll, dupesGroups } = $derived.by(() => {
     const groups = new Map()  // normalized key → track[]
 
-    for (const t of $library) {
+    for (const t of dupeScopeTracks) {
       if (STEM_RE.test(t.title ?? '')) continue   // skip stems
 
       // Use metadata artist if available, else extract from "Artist - Title" pattern
       const artist = (t.artist ?? '').trim() ||
+        (t.album_artist ?? '').trim() ||
         ((t.title ?? '').match(/^(.+?)\s+[-–—]\s+.+$/)?.[1]?.trim() ?? '')
       const songTitle = artist
         ? (t.title ?? '').replace(/^.+?\s+[-–—]\s+/, '').trim()
@@ -385,6 +453,7 @@
     for (const t of tracks) {
       if (STEM_RE.test(t.title ?? '')) continue
       const artist = (t.artist ?? '').trim() ||
+        (t.album_artist ?? '').trim() ||
         ((t.title ?? '').match(/^(.+?)\s+[-–—]\s+.+$/)?.[1]?.trim() ?? '')
       const songTitle = artist
         ? (t.title ?? '').replace(/^.+?\s+[-–—]\s+/, '').trim()
@@ -569,12 +638,42 @@
   function closeCtx() { ctxMenu = null }
 
   // ── Folder context menu (tree) ────────────────────────────────────────────
-  let folderCtx = $state(null)  // { x, y, path }
+  let folderCtx    = $state(null)  // { x, y, path }
+  let playlistCtx  = $state(null)  // { x, y, path, name }
+
+  function onPlaylistCtx(e, pl) {
+    e.preventDefault()
+    e.stopPropagation()
+    playlistCtx = { x: e.clientX, y: e.clientY, path: pl.path, name: pl.name }
+  }
 
   function onFolderCtx(e, path) {
     e.preventDefault()
     e.stopPropagation()
     folderCtx = { x: e.clientX, y: e.clientY, path }
+  }
+
+  function analyzeFolder() {
+    if (!folderCtx) return
+    const fp = folderCtx.path
+    folderCtx = null
+    const norm = (p) => (p ?? '').replace(/\\/g, '/').replace(/\/$/, '')
+    const fpN = norm(fp)
+    const tracks = $library.filter(t => {
+      const f = norm(t.folder ?? t.path?.split(/[\\/]/).slice(0, -1).join('/') ?? '')
+      return f === fpN || f.startsWith(fpN + '/')
+    })
+    for (const t of tracks) send({ type: 'analyze_track', path: t.path })
+  }
+
+  function scanFolderDupes() {
+    if (!folderCtx) return
+    const fp = folderCtx.path
+    folderCtx = null
+    dupeSourceMode = 'fs:' + fp
+    navMode = 'duplicates'
+    search = ''
+    selected = new Set()
   }
 
   function excludeFolderFromLibrary() {
@@ -761,7 +860,14 @@
     }
     if (e.key === 'Delete' && selected.size > 0 && !editTrack) {
       e.preventDefault()
-      removeSelectedFromLibrary()
+      if (navMode.startsWith('playlist:')) removeSelectedFromPlaylist()
+      else if (navMode === 'duplicates' && dupeSourceMode.startsWith('playlist:')) {
+        // scoped to playlist — remove from playlist, not disk
+        const plPath = dupeSourceMode.slice(9)
+        for (const path of selected) send({ type: 'playlist_remove_track', playlist: plPath, path })
+        selected = new Set()
+      }
+      else removeSelectedFromLibrary()
     }
   }
 
@@ -820,13 +926,48 @@
         </button>
       {/if}
       {#if dupesAll.size > 0}
-        <button class="t-item {navMode === 'duplicates' ? 'active' : ''}" onclick={() => selectNav('duplicates')}>
+        <button class="t-item {navMode === 'duplicates' ? 'active' : ''}" onclick={() => selectNav('duplicates')}
+                title={dupeSourceMode === 'all' ? 'Duplikate in gesamter Bibliothek' : 'Duplikate im aktuellen Ordner'}>
           <i class="ti ti-copy t-ico" aria-hidden="true" style="color:#c07020"></i>
           <span class="t-name">Duplikate</span>
           <span class="t-badge">{dupesAll.size}</span>
         </button>
       {/if}
+      {#if $favorites.length > 0}
+        <div class="fav-wrap">
+          <button class="t-item {favOpen ? 'active' : ''}" onclick={(e) => { e.stopPropagation(); favOpen = !favOpen }}>
+            <i class="ti ti-star t-ico" aria-hidden="true" style="color:#c09030"></i>
+            <span class="t-name">Favoriten</span>
+            <span class="t-badge">{$favorites.length}</span>
+            <span class="fav-arrow">{favOpen ? '▴' : '▾'}</span>
+          </button>
+          {#if favOpen}
+          <div class="fav-dropdown" onclick={(e) => e.stopPropagation()}>
+            {#each $favorites as fav}
+              <button class="fav-item {navMode === 'fs:' + fav.path ? 'active' : ''}"
+                      onclick={() => { clickFsNode({ path: fav.path, isDir: true }); favOpen = false }}>
+                <i class="ti ti-folder t-ico-sm" aria-hidden="true"></i>
+                <span class="fav-item-name" title={fav.path}>{fav.name}</span>
+                <span class="fav-del" role="button" tabindex="0" title="Entfernen"
+                      onclick={(e) => { e.stopPropagation(); send({ type: 'remove_favorite', path: fav.path }) }}
+                      onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), send({ type: 'remove_favorite', path: fav.path }))}>✕</span>
+              </button>
+            {/each}
+          </div>
+          {/if}
+        </div>
+      {/if}
       <div class="nav-sep nav-sep-top"></div>
+    </div>
+
+    <!-- Nav search -->
+    <div class="nav-search-wrap">
+      <i class="ti ti-search nav-search-ico" aria-hidden="true"></i>
+      <input class="nav-search-input" type="text" placeholder="Filtern…"
+             bind:value={navSearch} />
+      {#if navSearch}
+        <button class="nav-search-clear" onclick={() => navSearch = ''} title="Löschen">✕</button>
+      {/if}
     </div>
 
     <!-- Scrollable tree section -->
@@ -865,10 +1006,12 @@
               </button>
               {#if child.isDir && cOpen && fsKids[child.path]}
                 {#each fsKids[child.path] as grand}
+                  {@const gOpen = !!fsOpen[grand.path]}
                   <button class="t-child t-d3 {navMode === 'fs:' + grand.path ? 'active' : ''}"
-                          onclick={() => clickFsNode(grand)} title={grand.name}>
+                          onclick={() => clickFsNode(grand)} title={grand.name}
+                          oncontextmenu={grand.isDir ? (e) => onFolderCtx(e, grand.path) : undefined}>
                     {#if grand.isDir}
-                      <span class="t-toggle-ico">+</span>
+                      <span class="t-toggle-ico">{gOpen ? '−' : '+'}</span>
                       <i class="ti ti-folder t-ico-sm" aria-hidden="true"></i>
                     {:else}
                       <span class="t-toggle-ico" style="opacity:0">·</span>
@@ -876,6 +1019,38 @@
                     {/if}
                     <span class="t-name">{grand.name}</span>
                   </button>
+                  {#if grand.isDir && gOpen && fsKids[grand.path]}
+                    {#each fsKids[grand.path] as great}
+                      {@const ggOpen = !!fsOpen[great.path]}
+                      <button class="t-child t-d4 {navMode === 'fs:' + great.path ? 'active' : ''}"
+                              onclick={() => clickFsNode(great)} title={great.name}
+                              oncontextmenu={great.isDir ? (e) => onFolderCtx(e, great.path) : undefined}>
+                        {#if great.isDir}
+                          <span class="t-toggle-ico">{ggOpen ? '−' : '+'}</span>
+                          <i class="ti ti-folder t-ico-sm" aria-hidden="true"></i>
+                        {:else}
+                          <span class="t-toggle-ico" style="opacity:0">·</span>
+                          <i class="ti ti-music t-ico-sm" aria-hidden="true"></i>
+                        {/if}
+                        <span class="t-name">{great.name}</span>
+                      </button>
+                      {#if great.isDir && ggOpen && fsKids[great.path]}
+                        {#each fsKids[great.path] as gg}
+                          <button class="t-child t-d5 {navMode === 'fs:' + gg.path ? 'active' : ''}"
+                                  onclick={() => clickFsNode(gg)} title={gg.name}>
+                            {#if gg.isDir}
+                              <span class="t-toggle-ico">+</span>
+                              <i class="ti ti-folder t-ico-sm" aria-hidden="true"></i>
+                            {:else}
+                              <span class="t-toggle-ico" style="opacity:0">·</span>
+                              <i class="ti ti-music t-ico-sm" aria-hidden="true"></i>
+                            {/if}
+                            <span class="t-name">{gg.name}</span>
+                          </button>
+                        {/each}
+                      {/if}
+                    {/each}
+                  {/if}
                 {/each}
               {/if}
             {/each}
@@ -891,7 +1066,7 @@
       <span class="t-sec-badge">{artists.length}</span>
     </button>
     {#if secArtistOpen}
-      {#each artists as artist}
+      {#each filteredArtists as artist}
         <button class="t-child {navMode === 'artist:' + artist.toLowerCase() ? 'active' : ''}"
                 onclick={() => selectNav('artist:' + artist.toLowerCase())}
                 title={artist}>
@@ -916,15 +1091,42 @@
     </div>
     {#if secDlOpen}
       {#if $downloadTreeLoaded}
-        {#each $downloadTree.folders as folder}
+        {#snippet dlFolderNode(folder, depth)}
+          {@const allTracks = folder.tracks.map(f => ({ path: f.path, title: f.name, duration_sec: 0 }))}
+          {@const hasSubs = folder.folders?.length > 0}
+          {@const isExpanded = dlExpandedFolders.has(folder.path)}
           <button class="t-child {navMode === 'dl:' + folder.path ? 'active' : ''}"
-                  onclick={() => selectNav('dl:' + folder.path)} title={folder.name}>
+                  style="padding-left: {8 + depth * 12}px"
+                  draggable="true"
+                  ondragstart={(e) => {
+                    e.dataTransfer.setData('application/x-ytdl-multi', JSON.stringify(allTracks))
+                    e.dataTransfer.effectAllowed = 'copy'
+                  }}
+                  onclick={() => selectNav('dl:' + folder.path)}
+                  oncontextmenu={(e) => onFolderCtx(e, folder.path)}
+                  title={folder.name + '\nDraggen: alle Tracks zur Queue'}>
+            {#if hasSubs}
+              <span class="t-toggle-ico dl-tog" onclick={(e) => { e.stopPropagation(); toggleDlFolder(folder.path) }}>
+                {isExpanded ? '−' : '+'}
+              </span>
+            {:else}
+              <span class="t-toggle-ico" style="opacity:0">·</span>
+            {/if}
             <i class="ti ti-folder t-ico-sm" aria-hidden="true"></i>
             <span class="t-name">{stripTrackNumber(folder.name)}</span>
-            <span class="t-badge">{folder.tracks.length}</span>
+            {#if folder.tracks.length > 0}<span class="t-badge">{folder.tracks.length}</span>{/if}
           </button>
+          {#if hasSubs && isExpanded}
+            {#each folder.folders as sub}
+              {@render dlFolderNode(sub, depth + 1)}
+            {/each}
+          {/if}
+        {/snippet}
+
+        {#each filteredDlFolders as folder}
+          {@render dlFolderNode(folder, 0)}
         {/each}
-        {#each $downloadTree.files as file}
+        {#each filteredDlFiles as file}
           <button class="t-child t-d2 {navMode === 'dl:file:' + file.path ? 'active' : ''}"
                   onclick={() => selectNav('dl:file:' + file.path)} title={file.name}>
             <i class="ti ti-music t-ico-sm" aria-hidden="true"></i>
@@ -948,12 +1150,15 @@
     {#if secPlaylistOpen}
       {#if $playlists.length === 0}
         <div class="t-empty">Noch keine · + zum Speichern</div>
+      {:else if filteredPlaylists.length === 0}
+        <div class="t-empty">Keine Treffer</div>
       {:else}
-        {#each $playlists as pl}
+        {#each filteredPlaylists as pl}
           <div class="t-child t-pl-row {navMode === 'playlist:' + pl.path ? 'active' : ''}
                       {dragOverPlaylist === pl.path ? 'pl-drop-hover' : ''}"
                role="button" tabindex="0"
                onclick={() => openPlaylistInLibrary(pl)}
+               oncontextmenu={(e) => onPlaylistCtx(e, pl)}
                ondragover={(e) => { e.preventDefault(); dragOverPlaylist = pl.path }}
                ondragleave={() => dragOverPlaylist = null}
                ondrop={(e) => dropOnPlaylist(e, pl.path)}
@@ -962,6 +1167,8 @@
             <span class="t-name">{pl.name}</span>
             {#if $playlistContent[pl.path]}
               <span class="t-badge">{$playlistContent[pl.path].length}</span>
+            {:else if pl.track_count > 0}
+              <span class="t-badge">{pl.track_count}</span>
             {/if}
             <button class="t-pl-btn" onclick={(e) => { e.stopPropagation(); loadPlaylistToQueue(pl.path) }}
                     title="In Queue laden">▶</button>
@@ -982,13 +1189,6 @@
         <button class="scan-btn" onclick={scanLibrary} title="Bibliotheksordner neu einlesen">⟳ Scannen</button>
         <button class="scan-btn" onclick={() => send({ type: 'analyze_library_meta' })}
                 title="LUFS und BPM für alle Tracks berechnen die noch keinen Wert haben">◈ Analysieren</button>
-      </div>
-      <div class="scan-row">
-        <button class="scan-btn rec-btn {$scanRecursive ? 'active' : ''}"
-                onclick={() => send({ type: 'set_scan_recursive', enabled: !$scanRecursive })}
-                title="Unterordner beim Scannen einschließen">
-          {$scanRecursive ? '☑' : '☐'} Unterordner einschließen
-        </button>
       </div>
       {#if $analyzeProgress}
         {@const { done, total } = $analyzeProgress}
@@ -1202,7 +1402,7 @@
 </div>
 
 <!-- Click-outside / right-click-outside to close context menu -->
-<svelte:window onclick={() => { closeCtx(); folderCtx = null; colPickerOpen = false }} oncontextmenu={() => { if (!ctxMenu) return; closeCtx() }} onkeydown={libKey} />
+<svelte:window onclick={() => { closeCtx(); folderCtx = null; playlistCtx = null; colPickerOpen = false; favOpen = false }} oncontextmenu={() => { if (!ctxMenu) return; closeCtx() }} onkeydown={libKey} />
 
 {#if betterVersionTrack}
   <BetterVersionDialog track={betterVersionTrack} onclose={() => betterVersionTrack = null} />
@@ -1214,8 +1414,8 @@
 {/if}
 
 {#if showPlDupeScan}
-  {@const plPath = navMode.slice(9)}
-  <DuplicateScanDialog groups={plDupesGroups} onclose={() => showPlDupeScan = false}
+  {@const plPath = navMode.startsWith('playlist:') ? navMode.slice(9) : (playlistCtx?.path ?? '')}
+  <DuplicateScanDialog groups={plDupesGroups} playlistMode={true} onclose={() => showPlDupeScan = false}
     onremove={(path) => send({ type: 'playlist_remove_track', playlist: plPath, path })} />
 {/if}
 
@@ -1332,9 +1532,33 @@
 {/if}
 
 {#if folderCtx}
-  <div class="q-ctx" style="left:{folderCtx.x}px;top:{folderCtx.y}px"
+  <div class="ctx-menu" style="left:{Math.min(folderCtx.x, window.innerWidth - 220)}px;top:{Math.min(folderCtx.y, window.innerHeight - 160)}px"
        onclick={(e) => e.stopPropagation()}>
+    <button onclick={analyzeFolder}>Analysieren</button>
+    <button onclick={scanFolderDupes}>Auf Duplikate scannen</button>
+    <div class="ctx-sep"></div>
+    {#if $favorites.some(f => f.path === folderCtx.path)}
+      <button onclick={() => { send({ type: 'remove_favorite', path: folderCtx.path }); folderCtx = null }}>★ Aus Favoriten entfernen</button>
+    {:else}
+      <button onclick={() => { send({ type: 'add_favorite', path: folderCtx.path, name: folderCtx.path.split(/[\\/]/).filter(Boolean).pop() ?? folderCtx.path }); folderCtx = null }}>☆ Zu Favoriten hinzufügen</button>
+    {/if}
+    <div class="ctx-sep"></div>
     <button onclick={excludeFolderFromLibrary}>Aus Bibliothek ausschließen</button>
+  </div>
+{/if}
+
+{#if playlistCtx}
+  <div class="ctx-menu" style="left:{Math.min(playlistCtx.x, window.innerWidth - 220)}px;top:{Math.min(playlistCtx.y, window.innerHeight - 120)}px"
+       onclick={(e) => e.stopPropagation()}>
+    <button onclick={() => {
+      const pl = $playlists.find(p => p.path === playlistCtx.path)
+      if (pl) openPlaylistInLibrary(pl)
+      showPlDupeScan = true
+      playlistCtx = null
+    }}>Auf Duplikate scannen</button>
+    <div class="ctx-sep"></div>
+    <button onclick={() => { loadPlaylistToQueue(playlistCtx.path); playlistCtx = null }}>In Queue laden</button>
+    <button class="ctx-danger" onclick={() => { deletePlaylist(playlistCtx.path); playlistCtx = null }}>Löschen</button>
   </div>
 {/if}
 
@@ -1437,6 +1661,8 @@
   .t-child.active { color: #e07800; border-left-color: #e07800; background: #090e1a; }
   .t-d2 { padding-left: 24px; }
   .t-d3 { padding-left: 34px; }
+  .t-d4 { padding-left: 44px; }
+  .t-d5 { padding-left: 54px; }
 
   .t-ico-sm { font-size: 12px; flex-shrink: 0; color: #5a7a98; }
   .t-child.active .t-ico-sm { color: #9a5800; }
@@ -1498,13 +1724,6 @@
   }
   .scan-btn:hover { border-color: #e07800; color: #e07800; }
 
-  /* Unterordner toggle — own states so hover never masks on/off */
-  .rec-btn { color: #3a5068; }
-  .rec-btn:hover { border-color: #2a4060; color: #6a8aaa; }
-  .rec-btn.active {
-    border-color: #e07800; color: #060a10; background: #e07800; font-weight: 600;
-  }
-  .rec-btn.active:hover { border-color: #ff9020; color: #060a10; background: #ff9020; }
 
   .analyze-progress {
     padding: 4px 10px 5px;
@@ -1705,7 +1924,8 @@
   .row.even { background: #060b1c; }
   .row.odd  { background: #03060e; }
   .row:hover    { background: #0d1826; }
-  .row.sel      { background: #0c1830; }
+  .row.even.sel { background: #10203c; }
+  .row.odd.sel  { background: #0c1830; }
   .row.sel:hover { background: #111e38; }
   .row:active   { cursor: grabbing; opacity: 0.8; }
   .row:hover .actions { opacity: 1; }
@@ -2000,4 +2220,56 @@
     font-weight: 600; transition: background .1s;
   }
   .meta-save:hover { background: #e0780030; }
+
+  /* ── Favoriten Dropdown ──────────────────────────────────────────────────── */
+  .fav-wrap { position: relative; }
+  .fav-arrow { font-size: 8px; color: #3a5070; margin-left: auto; flex-shrink: 0; }
+  .fav-dropdown {
+    position: absolute; left: 6px; right: 6px; top: calc(100% + 2px);
+    background: #080f1c; border: 1px solid #1a2d46; border-radius: 4px;
+    z-index: 200; overflow: hidden;
+    box-shadow: 0 6px 20px #00000066;
+  }
+  .fav-item {
+    display: flex; align-items: center; gap: 6px; width: 100%;
+    background: none; border: none; border-bottom: 1px solid #0c1828;
+    color: #6a8aaa; font-size: 11px; padding: 6px 8px; cursor: pointer;
+    text-align: left; transition: background .1s;
+  }
+  .fav-item:last-child { border-bottom: none; }
+  .fav-item:hover, .fav-item.active { background: #0d1e30; color: #c0d0e0; }
+  .fav-item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fav-del {
+    color: #2a3c50; font-size: 9px; cursor: pointer; padding: 2px 3px;
+    flex-shrink: 0; border-radius: 2px; line-height: 1;
+    transition: color .1s, background .1s;
+  }
+  .fav-del:hover { color: #e07800; background: #1a0a00; }
+
+  /* ── Download subfolder toggle ───────────────────────────────────────────── */
+  .dl-tog { cursor: pointer; }
+  .dl-tog:hover { color: #e07800; }
+
+  /* ── Nav tree search ─────────────────────────────────────────────────────── */
+  .nav-search-wrap {
+    display: flex; align-items: center; gap: 5px;
+    margin: 4px 8px 6px; padding: 0 7px;
+    background: #060d18; border: 1px solid #1a2838; border-radius: 4px;
+    height: 24px;
+  }
+  .nav-search-ico { font-size: 10px; color: #3a5070; flex-shrink: 0; }
+  .nav-search-input {
+    flex: 1; background: none; border: none; outline: none;
+    color: #8aaccc; font-size: 11px; min-width: 0;
+  }
+  .nav-search-input::placeholder { color: #2a4060; }
+  .nav-search-wrap:focus-within {
+    border-color: #2a4060;
+  }
+  .nav-search-clear {
+    background: none; border: none; color: #2a4060; font-size: 10px;
+    cursor: pointer; padding: 0; line-height: 1; flex-shrink: 0;
+    transition: color .1s;
+  }
+  .nav-search-clear:hover { color: #e07800; }
 </style>

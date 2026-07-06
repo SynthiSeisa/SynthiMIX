@@ -117,6 +117,7 @@ async def lifespan(application: FastAPI):
     load_play_log()
     load_notes()
     asyncio.create_task(_watcher_loop())
+    asyncio.create_task(_auto_scan_loop())
     print("[backend] ready on ws://127.0.0.1:8765/ws", flush=True)
     yield
 
@@ -145,8 +146,8 @@ _state: dict[str, Any] = {
     "history":            [],    # list of {url, title, path, date, bitrate_kbps}
     "play_log":           [],    # list of {path, title, artist, played_at} — actual playback, most recent first
     "notes":              "",    # free-text scratchpad (bug notes etc.)
-    "loudnorm_on_dl":     False,
-    "loudnorm_target":    -14.0,
+    "loudnorm_on_dl":     True,
+    "loudnorm_target":    -10.0,
     "scan_recursive":     True,
     "watched_folders":    [],
     "auto_remove_played": False,
@@ -350,12 +351,14 @@ def load_settings():
     _state["scan_recursive"]  = bool(raw.get("scan_recursive", True))
     _state["watched_folders"] = list(raw.get("watched_folders", []))
     _state["auto_mix"]                = bool(raw.get("auto_mix", True))
-    _state["loudnorm_on_dl"]          = bool(raw.get("loudnorm_on_dl", False))
-    _state["loudnorm_target"]         = float(raw.get("loudnorm_target", -14.0))
+    _state["loudnorm_on_dl"]          = bool(raw.get("loudnorm_on_dl", True))
+    _state["loudnorm_target"]         = float(raw.get("loudnorm_target", -10.0))
     _state["loudnorm_tp"]             = float(raw.get("loudnorm_tp", -1.5))
     _state["playlist_folder_enabled"] = bool(raw.get("playlist_folder_enabled", True))
     _state["dl_filename_format"]      = str(raw.get("dl_filename_format", "title"))
     _state["download_dir"]            = str(raw.get("download_dir", str(BASE_DIR / "Downloads")))
+    _state["auto_scan_interval_min"]  = int(raw.get("auto_scan_interval_min", 0))
+    _state["favorites"]               = list(raw.get("favorites", []))
 
 def save_settings():
     _save_json(SETTINGS_FILE, {
@@ -365,12 +368,14 @@ def save_settings():
         "scan_recursive":  _state.get("scan_recursive", True),
         "watched_folders": _state.get("watched_folders", []),
         "auto_mix":                _state.get("auto_mix", True),
-        "loudnorm_on_dl":          _state.get("loudnorm_on_dl", False),
-        "loudnorm_target":         _state.get("loudnorm_target", -14.0),
+        "loudnorm_on_dl":          _state.get("loudnorm_on_dl", True),
+        "loudnorm_target":         _state.get("loudnorm_target", -10.0),
         "loudnorm_tp":             _state.get("loudnorm_tp", -1.5),
         "playlist_folder_enabled": _state.get("playlist_folder_enabled", True),
         "dl_filename_format":      _state.get("dl_filename_format", "title"),
         "download_dir":            _state.get("download_dir", str(BASE_DIR / "Downloads")),
+        "auto_scan_interval_min":  _state.get("auto_scan_interval_min", 0),
+        "favorites":               _state.get("favorites", []),
     })
 
 def load_history():
@@ -1274,6 +1279,8 @@ async def handle_message(ws: WebSocket, msg: dict):
             "playlist_folder_enabled": _state.get("playlist_folder_enabled", True),
             "dl_filename_format":      _state.get("dl_filename_format", "title"),
             "download_dir":            _state.get("download_dir", str(BASE_DIR / "Downloads")),
+            "auto_scan_interval_min":  _state.get("auto_scan_interval_min", 0),
+            "favorites":               _state.get("favorites", []),
         }))
 
     elif t == "queue_add":
@@ -1464,6 +1471,78 @@ async def handle_message(ws: WebSocket, msg: dict):
         save_settings()
         await broadcast({"type": "settings", "volume": _state["volume"], "crossfade_s": _state["crossfade_s"]})
 
+    elif t == "add_favorite":
+        fav_path = msg.get("path", "")
+        fav_name = msg.get("name", Path(fav_path).name if fav_path else "")
+        if fav_path and os.path.isdir(fav_path):
+            favs = _state.get("favorites", [])
+            if not any(f["path"] == fav_path for f in favs):
+                favs.append({"name": fav_name, "path": fav_path})
+                _state["favorites"] = favs
+                save_settings()
+        await ws.send_text(json.dumps({"type": "favorites", "items": _state.get("favorites", [])}))
+
+    elif t == "remove_favorite":
+        fav_path = msg.get("path", "")
+        _state["favorites"] = [f for f in _state.get("favorites", []) if f["path"] != fav_path]
+        save_settings()
+        await ws.send_text(json.dumps({"type": "favorites", "items": _state.get("favorites", [])}))
+
+    elif t == "set_auto_scan_interval":
+        _state["auto_scan_interval_min"] = max(0, int(msg.get("minutes", 0)))
+        save_settings()
+        await ws.send_text(json.dumps({"type": "settings",
+                                       "auto_scan_interval_min": _state["auto_scan_interval_min"]}))
+
+    elif t == "export_settings":
+        payload = {
+            "volume":                   _state["volume"],
+            "crossfade_s":              _state["crossfade_s"],
+            "bpm_analysis":             _state.get("bpm_analysis", True),
+            "scan_recursive":           _state.get("scan_recursive", True),
+            "watched_folders":          _state.get("watched_folders", []),
+            "auto_mix":                 _state.get("auto_mix", True),
+            "loudnorm_on_dl":           _state.get("loudnorm_on_dl", False),
+            "loudnorm_target":          _state.get("loudnorm_target", -14.0),
+            "loudnorm_tp":              _state.get("loudnorm_tp", -1.5),
+            "playlist_folder_enabled":  _state.get("playlist_folder_enabled", True),
+            "dl_filename_format":       _state.get("dl_filename_format", "title"),
+            "download_dir":             _state.get("download_dir", str(BASE_DIR / "Downloads")),
+            "auto_scan_interval_min":   _state.get("auto_scan_interval_min", 0),
+        }
+        await ws.send_text(json.dumps({"type": "settings_export", "data": payload}))
+
+    elif t == "import_settings":
+        data = msg.get("data", {})
+        if isinstance(data, dict):
+            for key, default in [
+                ("volume", 80), ("crossfade_s", 8.0), ("bpm_analysis", True),
+                ("scan_recursive", True), ("auto_mix", True), ("loudnorm_on_dl", True),
+                ("loudnorm_target", -10.0), ("loudnorm_tp", -1.5),
+                ("playlist_folder_enabled", True), ("dl_filename_format", "title"),
+                ("download_dir", str(BASE_DIR / "Downloads")), ("auto_scan_interval_min", 0),
+            ]:
+                if key in data:
+                    _state[key] = type(default)(data[key]) if not isinstance(default, bool) else bool(data[key])
+            if "watched_folders" in data and isinstance(data["watched_folders"], list):
+                _state["watched_folders"] = data["watched_folders"]
+            save_settings()
+            await ws.send_text(json.dumps({
+                "type":                    "settings",
+                "volume":                  _state["volume"],
+                "crossfade_s":             _state["crossfade_s"],
+                "scan_recursive":          _state.get("scan_recursive", True),
+                "bpm_analysis":            _state.get("bpm_analysis", True),
+                "auto_mix":                _state.get("auto_mix", True),
+                "loudnorm_on_dl":          _state.get("loudnorm_on_dl", False),
+                "loudnorm_target":         _state.get("loudnorm_target", -14.0),
+                "loudnorm_tp":             _state.get("loudnorm_tp", -1.5),
+                "playlist_folder_enabled": _state.get("playlist_folder_enabled", True),
+                "dl_filename_format":      _state.get("dl_filename_format", "title"),
+                "download_dir":            _state.get("download_dir", str(BASE_DIR / "Downloads")),
+                "auto_scan_interval_min":  _state.get("auto_scan_interval_min", 0),
+            }))
+
     elif t == "get_waveform":
         path = msg.get("path", "")
         data = await compute_waveform(path)
@@ -1589,6 +1668,24 @@ async def handle_message(ws: WebSocket, msg: dict):
             await push_queue()
             await push_player()
 
+    elif t == "queue_shuffle_selected":
+        indices = msg.get("indices", [])
+        q = _state["queue"]
+        ci = _state["current_idx"]
+        valid = [i for i in indices if 0 <= i < len(q)]
+        if len(valid) > 1:
+            tracks = [q[i] for i in valid]
+            random.shuffle(tracks)
+            for i, idx in enumerate(valid):
+                q[idx] = tracks[i]
+            # Recalculate current_idx if the current track moved
+            cur_path = q[ci]["path"] if 0 <= ci < len(q) else None
+            if cur_path:
+                _state["current_idx"] = next((i for i, t in enumerate(q) if t.get("path") == cur_path), ci)
+            save_queue()
+            await push_queue()
+            await push_player()
+
     elif t == "queue_mark_unplayed":
         for item in _state["queue"]:
             item["played"] = False
@@ -1611,13 +1708,19 @@ async def handle_message(ws: WebSocket, msg: dict):
     elif t == "queue_remove_duplicates":
         ci = _state["current_idx"]
         cur_path = _state["queue"][ci]["path"] if 0 <= ci < len(_state["queue"]) else None
-        seen: set[str] = set()
+        seen_paths: set[str] = set()
+        seen_titles: set[str] = set()
         deduped = []
         for t in _state["queue"]:
             p = t.get("path")
-            if p in seen:
+            if p in seen_paths:
                 continue
-            seen.add(p)
+            norm = _norm_queue_title(t.get("title", ""))
+            if norm and norm in seen_titles:
+                continue
+            seen_paths.add(p)
+            if norm:
+                seen_titles.add(norm)
             deduped.append(t)
         _state["queue"] = deduped
         _state["current_idx"] = next((i for i, t in enumerate(_state["queue"]) if t.get("path") == cur_path), -1) \
@@ -1667,14 +1770,24 @@ async def handle_message(ws: WebSocket, msg: dict):
             PLAYLISTS_DIR.mkdir(parents=True, exist_ok=True)
             safe = re.sub(r'[<>:"/\\|?*]', '_', name)
             pl_path = PLAYLISTS_DIR / (safe + ".m3u")
+            paths_filter = set(msg.get("paths") or [])
+            tracks_to_save = [tr for tr in _state["queue"]
+                              if not paths_filter or tr.get("path") in paths_filter]
             with open(pl_path, "w", encoding="utf-8") as f:
                 f.write("#EXTM3U\n")
-                for track in _state["queue"]:
+                for track in tracks_to_save:
                     dur   = int(track.get("duration_sec", -1))
                     title = track.get("title", "")
                     f.write(f"#EXTINF:{dur},{title}\n{track['path']}\n")
             await ws.send_text(json.dumps({"type": "playlists",
                                            "items": _get_playlists()}))
+            if msg.get("clear_after"):
+                _state["queue"] = []
+                _state["current_idx"] = -1
+                _state["playing"] = False
+                save_queue()
+                await push_queue()
+                await push_player()
 
     elif t == "load_playlist":
         pl_path = msg.get("path", "")
@@ -1687,18 +1800,32 @@ async def handle_message(ws: WebSocket, msg: dict):
     elif t == "get_download_tree":
         dl_dir = Path(_state.get("download_dir", str(BASE_DIR / "Downloads")))
         AUDIO_EXT = {'.mp3', '.opus', '.m4a', '.flac', '.wav', '.ogg', '.aac', '.wma'}
+
+        def _scan_dl_dir(path: Path, depth: int = 0) -> dict:
+            tracks, subfolders = [], []
+            try:
+                for entry in sorted(path.iterdir(), key=lambda x: (x.is_file(), x.name.lower())):
+                    if entry.is_dir() and not entry.name.startswith('.'):
+                        if depth < 4:
+                            subfolders.append(_scan_dl_dir(entry, depth + 1))
+                    elif entry.is_file() and entry.suffix.lower() in AUDIO_EXT:
+                        tracks.append({"path": str(entry), "name": entry.stem})
+            except PermissionError:
+                pass
+            return {"name": path.name, "path": str(path),
+                    "tracks": sorted(tracks, key=lambda x: x["name"].lower()),
+                    "folders": subfolders}
+
         tree = {"folders": [], "files": []}
         if dl_dir.exists():
-            for entry in sorted(dl_dir.iterdir(), key=lambda x: (x.is_file(), x.name.lower())):
-                if entry.is_dir() and not entry.name.startswith('.'):
-                    tracks = sorted(
-                        [{"path": str(f), "name": f.stem}
-                         for f in entry.iterdir() if f.suffix.lower() in AUDIO_EXT],
-                        key=lambda x: x["name"].lower()
-                    )
-                    tree["folders"].append({"name": entry.name, "path": str(entry), "tracks": tracks})
-                elif entry.is_file() and entry.suffix.lower() in AUDIO_EXT:
-                    tree["files"].append({"path": str(entry), "name": entry.stem})
+            try:
+                for entry in sorted(dl_dir.iterdir(), key=lambda x: (x.is_file(), x.name.lower())):
+                    if entry.is_dir() and not entry.name.startswith('.'):
+                        tree["folders"].append(_scan_dl_dir(entry))
+                    elif entry.is_file() and entry.suffix.lower() in AUDIO_EXT:
+                        tree["files"].append({"path": str(entry), "name": entry.stem})
+            except PermissionError:
+                pass
         await ws.send_text(json.dumps({"type": "download_tree", "tree": tree}))
 
     elif t == "get_playlists":
@@ -1736,6 +1863,11 @@ async def handle_message(ws: WebSocket, msg: dict):
             if trk_path not in existing:
                 with open(pl_path, "a", encoding="utf-8") as f:
                     f.write(f"#EXTINF:{trk_dur},{trk_title}\n{trk_path}\n")
+                pl_tracks = _parse_m3u(pl_path)
+                lib_by_path = {lt["path"]: lt for lt in _state["library"]}
+                result = [lib_by_path.get(pt["path"], pt) for pt in pl_tracks]
+                await ws.send_text(json.dumps({"type": "playlist_content",
+                                               "path": pl_path, "tracks": result}))
 
     elif t == "delete_playlist":
         pl_path = msg.get("path", "")
@@ -1865,8 +1997,8 @@ async def handle_message(ws: WebSocket, msg: dict):
         asyncio.create_task(_update_ytdlp(ws))
 
     elif t == "set_loudnorm_dl":
-        _state["loudnorm_on_dl"]  = bool(msg.get("enabled", False))
-        _state["loudnorm_target"] = float(msg.get("target", -14.0))
+        _state["loudnorm_on_dl"]  = bool(msg.get("enabled", True))
+        _state["loudnorm_target"] = float(msg.get("target", -10.0))
         _state["loudnorm_tp"]     = float(msg.get("true_peak", _state.get("loudnorm_tp", -1.5)))
         save_settings()
 
@@ -1888,8 +2020,15 @@ async def handle_message(ws: WebSocket, msg: dict):
 def _get_playlists() -> list[dict]:
     if not PLAYLISTS_DIR.exists():
         return []
-    return [{"name": p.stem, "path": str(p)}
-            for p in sorted(PLAYLISTS_DIR.glob("*.m3u"))]
+    result = []
+    for p in sorted(PLAYLISTS_DIR.glob("*.m3u")):
+        try:
+            count = sum(1 for ln in p.read_text(encoding="utf-8", errors="replace").splitlines()
+                        if ln.strip() and not ln.startswith("#"))
+        except Exception:
+            count = 0
+        result.append({"name": p.stem, "path": str(p), "track_count": count})
+    return result
 
 def _parse_m3u(path: str) -> list[dict]:
     tracks = []; title = ""; dur = 0
@@ -1965,6 +2104,17 @@ async def scan_folder(folder: str):
     await broadcast({"type": "scan_status", "text": "Fertig · " + " · ".join(parts)})
     await asyncio.sleep(4)
     await broadcast({"type": "scan_status", "text": ""})
+
+async def _auto_scan_loop():
+    while True:
+        interval = _state.get("auto_scan_interval_min", 0)
+        if interval > 0:
+            await asyncio.sleep(interval * 60)
+            for folder in list(_state.get("watched_folders", [])):
+                if os.path.isdir(folder):
+                    await scan_folder(folder)
+        else:
+            await asyncio.sleep(60)
 
 def _scan_sync(folder: str) -> list[dict]:
     result = []
@@ -2115,8 +2265,8 @@ def _ytdlp_cmd(url: str, fmt_id: str, out_dir: str, playlist_folder: str | None 
     cmd += ["--embed-metadata",
             "--parse-metadata", "%(uploader)s:%(meta_comment)s"]
 
-    if _state.get("loudnorm_on_dl", False):
-        t  = float(_state.get("loudnorm_target", -14.0))
+    if _state.get("loudnorm_on_dl", True):
+        t  = float(_state.get("loudnorm_target", -10.0))
         tp = float(_state.get("loudnorm_tp", -1.5))
         cmd += ["--postprocessor-args",
                 f"ffmpeg:-af loudnorm=I={t}:TP={tp}:LRA=11"]
@@ -2434,7 +2584,16 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
                             pct = float(line.split("%")[0].split()[-1])
                             if abs(pct - last_pct) >= 2.0:
                                 last_pct = pct; cur["progress"] = pct
-                                cur["status_text"] = f"{pct:.0f}%"
+                                sp = re.search(r'at\s+([\d.]+\s*\w+/s)', line)
+                                et = re.search(r'ETA\s+(\d+:\d+)', line)
+                                spd = sp.group(1).strip() if sp else ''
+                                eta = et.group(1) if et else ''
+                                if spd and eta:
+                                    cur["status_text"] = f"{pct:.0f}% · {spd} · ETA {eta}"
+                                elif eta:
+                                    cur["status_text"] = f"{pct:.0f}% · ETA {eta}"
+                                else:
+                                    cur["status_text"] = f"{pct:.0f}%"
                                 await push_downloads()
                     except Exception:
                         pass
@@ -2549,7 +2708,16 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
                     if abs(pct - last_pct) >= 1.0:
                         last_pct           = pct
                         cur["progress"]    = pct
-                        cur["status_text"] = f"{pct:.0f}%"
+                        sp = re.search(r'at\s+([\d.]+\s*\w+/s)', line)
+                        et = re.search(r'ETA\s+(\d+:\d+)', line)
+                        spd = sp.group(1).strip() if sp else ''
+                        eta = et.group(1) if et else ''
+                        if spd and eta:
+                            cur["status_text"] = f"{pct:.0f}% · {spd} · ETA {eta}"
+                        elif eta:
+                            cur["status_text"] = f"{pct:.0f}% · ETA {eta}"
+                        else:
+                            cur["status_text"] = f"{pct:.0f}%"
                         done_n = sum(1 for d in _state["downloads"]
                                      if d["session"] == session_id
                                      and d["id"] != session_id

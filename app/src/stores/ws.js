@@ -21,6 +21,8 @@ export const settingsOpen  = writable(false)
 export const playlistFolderEnabled = writable(true)
 export const dlFilenameFormat      = writable('title')
 export const downloadDir           = writable('')
+export const autoScanIntervalMin   = writable(0)
+export const favorites             = writable([])
 export const automixStatus = writable('')
 export const autoMixEnabled = writable(true)
 export const normalizeProgress = writable(null)
@@ -114,9 +116,11 @@ function connect() {
         // If paths were removed from library, also remove them from download tree
         let prevPaths
         library.subscribe(l => { prevPaths = new Set(l.map(t => t.path)) })()
-        const newPaths = new Set(msg.tracks.map(t => t.path))
+        // Deduplicate by path — backend may send the same file from overlapping watched folders
+        const uniqueTracks = [...new Map(msg.tracks.map(t => [t.path, t])).values()]
+        const newPaths = new Set(uniqueTracks.map(t => t.path))
         const deleted = [...prevPaths].filter(p => !newPaths.has(p))
-        library.set(msg.tracks)
+        library.set(uniqueTracks)
         if (deleted.length > 0) {
           const del = new Set(deleted)
           downloadTree.update(dt => ({
@@ -145,6 +149,8 @@ function connect() {
         if (msg.playlist_folder_enabled   !== undefined) playlistFolderEnabled.set(msg.playlist_folder_enabled)
         if (msg.dl_filename_format        !== undefined) dlFilenameFormat.set(msg.dl_filename_format)
         if (msg.download_dir              !== undefined) downloadDir.set(msg.download_dir)
+        if (msg.auto_scan_interval_min    !== undefined) autoScanIntervalMin.set(msg.auto_scan_interval_min)
+        if (msg.favorites                 !== undefined) favorites.set(msg.favorites)
         // bpm_analysis is authoritative from backend — overrides localStorage
         if (msg.bpm_analysis              !== undefined)
           appSettings.update(s => ({ ...s, bpmAnalysis: msg.bpm_analysis }))
@@ -184,7 +190,17 @@ function connect() {
       case 'auto_remove_played': autoRemovePlayed.set(msg.enabled); break
       case 'logs': backendLogs.set(msg.lines ?? []); break
       case 'notes': notes.set(msg.text ?? ''); break
+      case 'favorites': favorites.set(msg.items ?? []); break
       case 'remote_status': remoteStatus.set(msg); break
+      case 'settings_export': {
+        const blob = new Blob([JSON.stringify(msg.data, null, 2)], { type: 'application/json' })
+        const a = document.createElement('a')
+        a.href = URL.createObjectURL(blob)
+        a.download = 'synthimix-settings.json'
+        a.click()
+        URL.revokeObjectURL(a.href)
+        break
+      }
       case 'track_meta_update':
         library.update(l => l.map(t => t.path === msg.track?.path ? { ...t, ...msg.track } : t))
         break

@@ -1,4 +1,4 @@
-<script>
+﻿<script>
   import { settingsOpen, send, backendLogs, notes } from '../stores/ws.js'
   const win = window.electron ?? {}
 
@@ -8,7 +8,7 @@
   let autoRefresh = $state(true)
   let logEl = $state(null)
 
-  // ── Notizblock ────────────────────────────────────────────────────────────
+  // â”€â”€ Notizblock â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   let notesOpen = $state(false)
   let notesSaved = $state(true)
 
@@ -62,18 +62,18 @@
 
   const shortcuts = [
     ['Space',      'Pause / Fortsetzen'],
-    ['← / →',     '±5 Sekunden springen'],
-    ['Strg + →',  'Nächster Track'],
-    ['Strg + ←',  'Track-Anfang / Vorheriger'],
-    ['N',          'Nächster Track'],
+    ['â† / â†’',     'Â±5 Sekunden springen'],
+    ['Strg + â†’',  'NÃ¤chster Track'],
+    ['Strg + â†',  'Track-Anfang / Vorheriger'],
+    ['N',          'NÃ¤chster Track'],
     ['P',          'Vorheriger Track'],
     ['Entf',       'Markierten Queue-Eintrag entfernen'],
     ['F11',        'Vollbild umschalten'],
   ]
 
-  // ── Auto-Update ───────────────────────────────────────────────────────────
+  // â”€â”€ Auto-Update â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   let updateVersion   = $state(null)   // z.B. "1.3.0"
-  let updateProgress  = $state(null)   // 0-100 während Download
+  let updateProgress  = $state(null)   // 0-100 wÃ¤hrend Download
   let updateReady     = $state(false)  // Download abgeschlossen
 
   $effect(() => {
@@ -96,37 +96,38 @@
       <polyline points="16,32 20,36 24,32" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
     <span class="app-name"><span class="nm-synthi">Synthi</span><span class="nm-mix">MIX</span></span>
-    <span class="version">v1.2</span>
+    <span class="version">v1.3</span>
   </div>
   <div class="tb-actions" style="-webkit-app-region:no-drag">
 
     {#if updateReady}
       <button class="update-btn ready" onclick={() => win.installUpdate?.()} title="Update installieren und neu starten">
-        ↑ v{updateVersion} installieren
+        â†‘ v{updateVersion} installieren
       </button>
     {:else if updateProgress !== null}
       <span class="update-btn downloading">
-        ↓ {updateProgress}%
+        â†“ {updateProgress}%
       </span>
     {:else if updateVersion}
-      <span class="update-btn available" title="Update wird heruntergeladen…">
-        ↓ v{updateVersion}
+      <span class="update-btn available" title="Update wird heruntergeladenâ€¦">
+        â†“ v{updateVersion}
       </span>
     {/if}
 
     <div class="log-wrap">
-      <button class="tb-btn tb-log" onclick={() => { logOpen = !logOpen; helpOpen = false; notesOpen = false }} title="Backend-Log">⬛</button>
+      <button class="tb-btn tb-log" onclick={() => { logOpen = !logOpen; helpOpen = false; notesOpen = false }} title="Backend-Log">â¬›</button>
       {#if logOpen}
         <div class="log-panel">
           <div class="log-hdr">
             <span>BACKEND LOG</span>
-            <input class="log-filter" bind:value={logFilter} placeholder="Filter…" />
+            <input class="log-filter" bind:value={logFilter} placeholder="Filterâ€¦" />
             <label class="log-auto">
               <input type="checkbox" bind:checked={autoRefresh} />
               live
             </label>
-            <button onclick={() => send({ type: 'get_logs' })}>↺</button>
-            <button onclick={() => logOpen = false}>✕</button>
+            <button onclick={() => send({ type: 'get_logs' })}>â†º</button>
+            <button onclick={() => navigator.clipboard.writeText(filteredLogs.join('\n'))} title="Alles kopieren">âŽ˜</button>
+            <button onclick={() => logOpen = false}>âœ•</button>
           </div>
           <div class="log-body" bind:this={logEl}>
             {#each filteredLogs as line}
@@ -139,28 +140,36 @@
       {/if}
     </div>
     <div class="notes-wrap">
-      <button class="tb-btn" onclick={() => { notesOpen = !notesOpen; helpOpen = false; logOpen = false }} title="Notizblock">📝</button>
+      <button class="tb-btn tb-notes" onclick={() => { notesOpen = !notesOpen; helpOpen = false; logOpen = false }} title="Notizblock">
+        <svg viewBox="0 0 14 14" width="13" height="13" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="1.5" y="1.5" width="9" height="11" rx="1" stroke="currentColor" stroke-width="1.2"/>
+          <line x1="4" y1="5" x2="8.5" y2="5" stroke="currentColor" stroke-width="1"/>
+          <line x1="4" y1="7.2" x2="8.5" y2="7.2" stroke="currentColor" stroke-width="1"/>
+          <line x1="4" y1="9.4" x2="7" y2="9.4" stroke="currentColor" stroke-width="1"/>
+          <path d="M10.5 8.5 L12.5 6.5 L13.5 7.5 L11.5 9.5 L10 10 Z" fill="currentColor"/>
+        </svg>
+      </button>
       {#if notesOpen}
         <div class="notes-panel">
           <div class="notes-hdr">
             <span>NOTIZBLOCK</span>
-            <span class="notes-status">{notesSaved ? 'gespeichert' : 'speichert…'}</span>
-            <button onclick={() => notesOpen = false}>✕</button>
+            <span class="notes-status">{notesSaved ? 'gespeichert' : 'speichertâ€¦'}</span>
+            <button onclick={() => notesOpen = false}>âœ•</button>
           </div>
-          <textarea class="notes-body" placeholder="Bugs, Ideen, Probleme während des Sets notieren…"
+          <textarea class="notes-body" placeholder="Bugs, Ideen, Probleme wÃ¤hrend des Sets notierenâ€¦"
                     value={$notes} oninput={onNotesInput}></textarea>
         </div>
       {/if}
     </div>
     <div class="help-wrap">
-      <button class="tb-btn tb-help" onclick={() => { helpOpen = !helpOpen; notesOpen = false }} title="Tastenkürzel">?</button>
+      <button class="tb-btn tb-help" onclick={() => { helpOpen = !helpOpen; notesOpen = false }} title="TastenkÃ¼rzel">?</button>
       {#if helpOpen}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="help-backdrop" onclick={() => helpOpen = false}></div>
         <div class="help-panel">
           <div class="help-hdr">
-            <span>TASTENKÜRZEL</span>
-            <button onclick={() => helpOpen = false}>✕</button>
+            <span>TASTENKÃœRZEL</span>
+            <button onclick={() => helpOpen = false}>âœ•</button>
           </div>
           {#each shortcuts as [key, desc]}
             <div class="help-row">
@@ -171,12 +180,12 @@
         </div>
       {/if}
     </div>
-    <button class="tb-btn" onclick={() => settingsOpen.set(true)} title="Einstellungen">⚙</button>
+    <button class="tb-btn" onclick={() => settingsOpen.set(true)} title="Einstellungen">âš™</button>
   </div>
   <div class="controls" role="toolbar">
-    <button onclick={() => win.minimize?.()} aria-label="Minimieren">─</button>
-    <button onclick={() => win.maximize?.()} aria-label="Maximieren">□</button>
-    <button class="close" onclick={() => win.close?.()} aria-label="Schließen">✕</button>
+    <button onclick={() => win.minimize?.()} aria-label="Minimieren">â”€</button>
+    <button onclick={() => win.maximize?.()} aria-label="Maximieren">â–¡</button>
+    <button class="close" onclick={() => win.close?.()} aria-label="SchlieÃŸen">âœ•</button>
   </div>
 </div>
 
@@ -248,10 +257,11 @@
   .log-body {
     overflow-y: auto; flex: 1; padding: 4px 0;
     font-family: 'Consolas', 'Courier New', monospace; font-size: 10px;
+    user-select: text; -webkit-user-select: text;
   }
   .log-line {
     padding: 1px 10px; white-space: pre-wrap; word-break: break-all;
-    line-height: 1.5;
+    line-height: 1.5; user-select: text; -webkit-user-select: text;
   }
   .log-info    { color: #3a5870; }
   .log-analyze { color: #5a8a5a; }

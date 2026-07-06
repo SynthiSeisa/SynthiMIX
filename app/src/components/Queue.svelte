@@ -39,14 +39,25 @@
 
   function shuffleQueue()         { send({ type: 'queue_shuffle' }) }
   function shuffleUnplayed()      { send({ type: 'queue_shuffle_unplayed' }); showMenu = false }
+  function shuffleSelected()      { send({ type: 'queue_shuffle_selected', indices: [...qSelected] }); showMenu = false }
   function markAllUnplayed()      { send({ type: 'queue_mark_unplayed' }); showMenu = false }
   function removePlayed()         { send({ type: 'queue_remove_played' }); showMenu = false }
   function removeQueueDuplicates(){ send({ type: 'queue_remove_duplicates' }); showMenu = false }
   function toggleAutoRemove()     { send({ type: 'set_auto_remove_played', enabled: !$autoRemovePlayed }); showMenu = false }
 
-  function savePlaylist() { plNameValue = ''; plNameDialog = true }
+  function savePlaylist() {
+    plNameValue = ''
+    plSaveOnlySelected = qSelected.size > 0
+    plClearAfterSave = false
+    plNameDialog = true
+  }
   function confirmSavePlaylist() {
-    if (plNameValue.trim()) send({ type: 'save_playlist', name: plNameValue.trim() })
+    if (plNameValue.trim()) {
+      const paths = plSaveOnlySelected && qSelected.size > 0
+        ? [...qSelected].sort((a, b) => a - b).map(i => $queue[i]?.path).filter(Boolean)
+        : null
+      send({ type: 'save_playlist', name: plNameValue.trim(), paths, clear_after: plClearAfterSave })
+    }
     plNameDialog = false; showMenu = false
   }
 
@@ -58,10 +69,12 @@
   function deletePlaylist(path) { dlgDeletePath = path }
 
   // ── Custom dialogs ─────────────────────────────────────────────────────────
-  let plNameDialog   = $state(false)
-  let plNameValue    = $state('')
-  let dlgClearPending = $state(false)
-  let dlgDeletePath  = $state(null)
+  let plNameDialog      = $state(false)
+  let plNameValue       = $state('')
+  let plSaveOnlySelected = $state(false)
+  let plClearAfterSave  = $state(false)
+  let dlgClearPending   = $state(false)
+  let dlgDeletePath     = $state(null)
   function focus(el) { setTimeout(() => el?.focus(), 50) }
 
   // ── Menu dropdown ──────────────────────────────────────────────────────────
@@ -409,6 +422,9 @@
             {/if}
             <button onclick={() => { shuffleQueue(); showMenu = false }}>Einmalig mischen</button>
             <button onclick={shuffleUnplayed}>Nur ungespielte mischen</button>
+            {#if qSelected.size > 1}
+              <button onclick={shuffleSelected}>Nur markierte mischen ({qSelected.size})</button>
+            {/if}
             <div class="dd-sep"></div>
             <button onclick={markAllUnplayed}>Alle als ungespielt markieren</button>
             <button onclick={removePlayed}>Gespielte entfernen</button>
@@ -496,6 +512,16 @@
       <input class="meta-input" bind:value={plNameValue} placeholder="Playlist-Name…"
              onkeydown={(e) => { if (e.key === 'Enter') confirmSavePlaylist(); if (e.key === 'Escape') plNameDialog = false }}
              use:focus />
+    </label>
+    {#if qSelected.size > 0}
+      <label class="meta-check">
+        <input type="checkbox" bind:checked={plSaveOnlySelected} />
+        Nur markierte Tracks speichern ({qSelected.size})
+      </label>
+    {/if}
+    <label class="meta-check">
+      <input type="checkbox" bind:checked={plClearAfterSave} />
+      Queue nach dem Speichern leeren
     </label>
     <div class="meta-actions">
       <button class="meta-cancel" onclick={() => plNameDialog = false}>Abbrechen</button>
@@ -891,6 +917,8 @@
   .meta-label   { display:flex; flex-direction:column; gap:5px; font-size:11px; color:#6888a8; margin-bottom:14px; }
   .meta-input   { background:#060e1a; border:1px solid #1e3050; border-radius:4px; color:#c8d8f0; padding:7px 10px; font-size:12px; outline:none; }
   .meta-input:focus { border-color:#e07800; }
+  .meta-check   { display:flex; align-items:center; gap:7px; font-size:11px; color:#6888a8; margin-bottom:10px; cursor:pointer; user-select:none; }
+  .meta-check input[type=checkbox] { accent-color:#e07800; width:13px; height:13px; cursor:pointer; }
   .meta-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:4px; }
   .meta-cancel  { background:none; border:1px solid #1e3050; border-radius:4px; color:#6888a8; padding:6px 14px; font-size:11px; cursor:pointer; }
   .meta-cancel:hover { border-color:#3a5878; color:#a0b8d0; }

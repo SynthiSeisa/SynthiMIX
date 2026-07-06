@@ -5,7 +5,8 @@
   let input     = $state('')
   let fmt       = $state('mp3-best')
   let searching = $state(false)
-  let expanded  = $state(new Set())
+  let expanded         = $state(new Set())
+  let manuallyCollapsed = $state(new Set())
 
   const formats = [
     { id: 'mp3-best', label: 'MP3',  sub: 'Beste Qualität (320k)' },
@@ -35,12 +36,11 @@
 
   const groups = $derived(buildGroups($downloads))
 
-  // Auto-expand active sessions.
-  // untrack() reads `expanded` without registering it as a dependency,
-  // breaking the read→write→re-run infinite loop.
+  // Auto-expand active sessions — but not those the user manually collapsed.
   $effect(() => {
     const newSids = groups
-      .filter(g => g.hdr?.status === 'active' && g.tracks.length > 0)
+      .filter(g => g.hdr?.status === 'active' && g.tracks.length > 0
+                && !untrack(() => manuallyCollapsed).has(g.session_id))
       .map(g => g.session_id)
     if (newSids.length === 0) return
     const cur = untrack(() => expanded)
@@ -50,12 +50,28 @@
 
   function toggleGroup(sid) {
     const s = new Set(expanded)
-    s.has(sid) ? s.delete(sid) : s.add(sid)
+    if (s.has(sid)) {
+      s.delete(sid)
+      manuallyCollapsed = new Set([...manuallyCollapsed, sid])
+    } else {
+      s.add(sid)
+      manuallyCollapsed = new Set([...manuallyCollapsed].filter(x => x !== sid))
+    }
     expanded = s
   }
 
   // ── input / search ────────────────────────────────────────────────────────
   function isUrl(v) { return v.startsWith('http://') || v.startsWith('https://') }
+
+  async function onUrlFocus() {
+    if (input.trim()) return
+    try {
+      const text = (await navigator.clipboard.readText()).trim()
+      if (isUrl(text) && /youtube|youtu\.be|soundcloud|spotify|tiktok|vimeo|twitch/i.test(text)) {
+        input = text
+      }
+    } catch {}
+  }
 
   function submit() {
     const val = input.trim()
@@ -71,6 +87,16 @@
   }
 
   function handleKey(e) { if (e.key === 'Enter') submit() }
+
+  function onUrlPaste(e) {
+    const text = (e.clipboardData?.getData('text') ?? '').trim()
+    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => isUrl(l))
+    if (lines.length > 1) {
+      e.preventDefault()
+      for (const url of lines) send({ type: 'download_add', url, format: fmt })
+      input = ''
+    }
+  }
 
   function pickResult(url) {
     send({ type: 'download_add', url, format: fmt })
@@ -128,7 +154,7 @@
     <div class="input-row">
       <input class="url-input" type="text"
         placeholder="YouTube-Link / Playlist-URL  oder  Songname suchen — Enter"
-        bind:value={input} onkeydown={handleKey} />
+        bind:value={input} onkeydown={handleKey} onfocus={onUrlFocus} onpaste={onUrlPaste} />
       <button class="icon-btn submit-btn" onclick={submit} title={isUrl(input.trim()) ? 'Herunterladen' : 'Suchen'}>
         {#if isUrl(input.trim())}
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="14" height="14">

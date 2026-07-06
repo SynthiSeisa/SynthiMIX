@@ -28,7 +28,15 @@
   function cur() { return which === 'A' ? elA : elB }
   function alt() { return which === 'A' ? elB : elA }
 
-  $effect(() => { volume = $settings.volume; cfS = $settings.crossfade_s })
+  let _volDragging = false
+  $effect(() => {
+    cfS = $settings.crossfade_s
+    if (!_volDragging) {
+      volume = $settings.volume
+      const el = cur()
+      if (el && !cfActive) el.volume = volume / 100
+    }
+  })
 
   $effect(() => {
     if (!elA || !elB || audioCtx) return
@@ -117,7 +125,10 @@
     const target = $appSettings.targetLUFS ?? -14
     if (!$appSettings.normalizeVolume || !lufs || lufs <= -90) return 1.0
     const db = Math.max(-20, Math.min(12, target - lufs))
-    return Math.pow(10, db / 20)
+    const factor = Math.pow(10, db / 20)
+    // Cap so that gain × el.volume (= volume/100) never exceeds 1.0 (prevents clipping)
+    const v = volume / 100
+    return v > 0 ? Math.min(factor, 1.0 / v) : factor
   }
 
   function getGainNode(el) { return el === elA ? gainA : gainB }
@@ -750,6 +761,10 @@
         <div class="fdr-slot">
           <div class="fdr-groove"></div>
           <input type="range" class="fdr-input" min="0" max="100" value={volume}
+                 onmousedown={() => _volDragging = true}
+                 onmouseup={() => { _volDragging = false }}
+                 ontouchstart={() => _volDragging = true}
+                 ontouchend={() => { _volDragging = false }}
                  oninput={(e) => setVolume(e.target.value)} />
         </div>
         <div class="fdr-info">

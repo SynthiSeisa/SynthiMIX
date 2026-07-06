@@ -1,7 +1,8 @@
 <script>
   import { settings, settingsOpen, appSettings, send, toolsInfo, updateProgress,
            loudnormOnDl, loudnormTarget, loudnormTp, autoMixEnabled, playMode,
-           playlistFolderEnabled, dlFilenameFormat, downloadDir, remoteStatus } from '../stores/ws.js'
+           playlistFolderEnabled, dlFilenameFormat, downloadDir, remoteStatus,
+           autoScanIntervalMin, scanRecursive } from '../stores/ws.js'
 
   let tab = $state('playback')
 
@@ -62,6 +63,59 @@
     dlFilenameFormat.set(fmt)
     send({ type: 'set_dl_filename_format', format: fmt })
   }
+
+  const AUTO_SCAN_OPTIONS = [
+    { value: 0,  label: 'Aus' },
+    { value: 15, label: '15 Min' },
+    { value: 30, label: '30 Min' },
+    { value: 60, label: '1 Std' },
+    { value: 120, label: '2 Std' },
+  ]
+
+  function setAutoScanInterval(min) {
+    autoScanIntervalMin.set(min)
+    send({ type: 'set_auto_scan_interval', minutes: min })
+  }
+
+  function exportSettings() {
+    send({ type: 'export_settings' })
+  }
+
+  function importSettings() {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = '.json'
+    input.onchange = async () => {
+      const file = input.files?.[0]
+      if (!file) return
+      try {
+        const text = await file.text()
+        const data = JSON.parse(text)
+        send({ type: 'import_settings', data })
+      } catch { /* invalid JSON */ }
+    }
+    input.click()
+  }
+
+  import QRCode from 'qrcode'
+
+  let urlCopied = $state(false)
+  function copyRemoteUrl() {
+    navigator.clipboard.writeText($remoteStatus?.url ?? '')
+    urlCopied = true
+    setTimeout(() => urlCopied = false, 1800)
+  }
+
+  let qrCanvas = $state(null)
+  $effect(() => {
+    const url = $remoteStatus?.url
+    if (qrCanvas && url) {
+      QRCode.toCanvas(qrCanvas, url, {
+        width: 160, margin: 2,
+        color: { dark: '#e07800', light: '#070c18' }
+      })
+    }
+  })
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -337,6 +391,41 @@
         {:else if tab === 'system'}
 
           <div class="group">
+            <div class="group-title">Bibliothek</div>
+            <div class="row">
+              <span class="lbl">Auto-Scan</span>
+              <div class="btn-group">
+                {#each AUTO_SCAN_OPTIONS as opt}
+                  <button class="seg-btn {$autoScanIntervalMin === opt.value ? 'active' : ''}"
+                          onclick={() => setAutoScanInterval(opt.value)}>
+                    {opt.label}
+                  </button>
+                {/each}
+              </div>
+            </div>
+            <p class="hint-text">Bibliotheksordner automatisch neu scannen</p>
+            <div class="row" style="margin-top: 8px">
+              <span class="lbl">Unterordner</span>
+              <label class="toggle-wrap">
+                <input type="checkbox" checked={$scanRecursive}
+                       onchange={(e) => send({ type: 'set_scan_recursive', enabled: e.target.checked })} />
+                <span class="toggle-lbl">beim Scannen einschließen</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="group">
+            <div class="group-title">Konfiguration</div>
+            <div class="row">
+              <span class="lbl">Einstellungen</span>
+              <div class="row-btns">
+                <button class="action-btn" onclick={exportSettings} title="Als JSON-Datei herunterladen">↓ Exportieren</button>
+                <button class="action-btn" onclick={importSettings} title="JSON-Datei einlesen">↑ Importieren</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="group">
             <div class="group-title">Tools</div>
 
             <div class="tool-row">
@@ -371,9 +460,20 @@
               </div>
               <div class="remote-url">
                 <span class="url-label">URL:</span>
-                <span class="url-val">{$remoteStatus.url}</span>
+                <span class="url-val" ondblclick={() => window.electron?.openPath($remoteStatus?.url)}
+                      title="Doppelklick: im Browser öffnen">{$remoteStatus.url}</span>
+                <button class="copy-url-btn {urlCopied ? 'copied' : ''}" onclick={copyRemoteUrl} title="In Zwischenablage kopieren">
+                  {urlCopied ? '✓' : '⎘'}
+                </button>
               </div>
-              <div class="remote-hint">Im Handy-Browser öffnen (gleiches WLAN)</div>
+              <div class="remote-url-actions">
+                <span class="remote-hint">Im Handy-Browser öffnen (gleiches WLAN)</span>
+                <button class="action-btn" onclick={() => window.electron?.openPath($remoteStatus?.url)} title="Im Standard-Browser öffnen">Im Browser öffnen ↗</button>
+              </div>
+              <div class="qr-wrap">
+                <canvas bind:this={qrCanvas} class="qr-canvas"></canvas>
+                <span class="qr-hint">Mit Kamera scannen</span>
+              </div>
               <button class="action-btn danger" onclick={() => send({ type: 'remote_stop' })}>Server stoppen</button>
             {:else}
               <div class="remote-status off">
@@ -591,6 +691,21 @@
   .action-btn:hover:not(:disabled) { border-color: #e07800; color: #e07800; }
   .action-btn:disabled { color: #1e2e3e; cursor: default; }
 
+  /* ── Segment buttons (Auto-Scan etc.) ───────────────────────────────────── */
+  .btn-group { display: flex; gap: 4px; flex-wrap: wrap; }
+  .seg-btn {
+    background: #0c1420; border: 1px solid #1a2838; border-radius: 3px;
+    color: #4a6880; font-size: 11px; padding: 3px 10px; cursor: pointer;
+    transition: border-color .1s, color .1s;
+  }
+  .seg-btn:hover { border-color: #e07800; color: #e07800; }
+  .seg-btn.active { border-color: #e07800; color: #e07800; background: #1a1200; }
+  .hint-text { font-size: 10px; color: #2e4060; margin: 4px 0 0; }
+  .toggle-wrap { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+  .toggle-wrap input[type=checkbox] { accent-color: #e07800; width: 14px; height: 14px; cursor: pointer; }
+  .toggle-lbl { font-size: 11px; color: #6a8aaa; }
+  .row-btns { display: flex; gap: 6px; }
+
   /* ── Tools ──────────────────────────────────────────────────────────────── */
   .tool-row {
     display: flex; align-items: center; gap: 10px; padding: 5px 0; font-size: 11px;
@@ -625,8 +740,22 @@
   .remote-dot.off { background: #3a5070; }
   .remote-url { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
   .url-label { font-size: 10px; color: #4a6080; flex-shrink: 0; }
-  .url-val   { font-size: 13px; color: #60a0e0; font-family: monospace; font-weight: 600; }
-  .remote-hint { font-size: 10px; color: #3a5070; margin-bottom: 12px; }
+  .url-val   { font-size: 13px; color: #60a0e0; font-family: monospace; font-weight: 600; flex: 1; }
+  .copy-url-btn {
+    background: #0c1420; border: 1px solid #1a2838; border-radius: 3px;
+    color: #4a6880; font-size: 13px; width: 26px; height: 22px;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; transition: border-color .1s, color .1s;
+  }
+  .copy-url-btn:hover { border-color: #3a6090; color: #80b8e8; }
+  .copy-url-btn.copied { border-color: #2a7040; color: #75d595; }
+  .remote-url-actions { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .remote-hint { font-size: 10px; color: #3a5070; }
+  .url-val { cursor: default; }
+  .url-val:hover { color: #80c0f0; }
+  .qr-wrap { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 12px 0 8px; }
+  .qr-canvas { border-radius: 6px; border: 1px solid #1a2838; }
+  .qr-hint { font-size: 9px; color: #3a5070; letter-spacing: .06em; }
   .action-btn.danger { border-color: #5a1a1a; color: #c05050; }
   .action-btn.danger:hover { border-color: #c05050; color: #e07070; }
   .info-row { font-size: 12px; color: #5a7090; padding: 5px 0; border-bottom: 1px solid #0e1a28; }
