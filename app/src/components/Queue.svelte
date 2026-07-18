@@ -398,6 +398,9 @@
     {/if}
 
     <div class="header-actions">
+      {#if qSelected.size > 1}
+        <button class="hdr-btn sel-shuffle-btn" onclick={shuffleSelected} title="Nur markierte {qSelected.size} Tracks mischen">⇄ {qSelected.size}</button>
+      {/if}
       <button class="hdr-btn {shuffle ? 'active' : ''}" onclick={toggleShuffle} title="Zufallswiedergabe">⇄</button>
       <button class="hdr-btn {repeat > 0 ? 'active' : ''}" onclick={cycleRepeat} title="Wiederholen">{repeatLabel}</button>
       <div class="menu-wrap">
@@ -637,6 +640,8 @@
   }
   .hdr-btn:hover  { color: #c8d8f0; background: #0c1828; }
   .hdr-btn.active { color: #e07800; }
+  .sel-shuffle-btn { color: #4a9eff; font-weight: 600; }
+  .sel-shuffle-btn:hover { color: #7bb8ff; background: #0c1828; }
   .menu-btn { letter-spacing: 2px; }
 
   /* ── Dropdown menu ─────────────────────────────────────────────────────── */

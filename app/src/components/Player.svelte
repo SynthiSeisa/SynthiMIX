@@ -91,8 +91,13 @@
   $effect(() => {
     const lufs = $nowPlaying?.lufs
     if (!lufs || lufs <= -90) return
-    const el = cur()
-    if (el) setElLufs(el, lufs)
+    // untrack: don't re-run when 'which' flips — during _finishCrossfade the deck
+    // swaps before the backend sends now_playing, so cur() would point to the new
+    // element while nowPlaying.lufs still holds the old track's LUFS → wrong gain spike.
+    untrack(() => {
+      const el = cur()
+      if (el) setElLufs(el, lufs)
+    })
   })
 
   // During crossfade: apply LUFS to alt() reactively when enrichment arrives.
@@ -585,6 +590,7 @@
 
   function _finishCrossfade(nextIdx, nextUrl, nextPath) {
     cfActive = false
+    cfNextIdx = -1  // reset before which-flip so cfNextIdx-effect doesn't misfire on alt()
     if (cfTimer) { clearInterval(cfTimer); cfTimer = null }
 
     const oldEl = cur()
