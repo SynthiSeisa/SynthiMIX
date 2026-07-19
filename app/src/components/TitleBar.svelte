@@ -106,7 +106,7 @@
       <polyline points="16,32 20,36 24,32" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
     <span class="app-name"><span class="nm-synthi">Synthi</span><span class="nm-mix">MIX</span></span>
-    <span class="version">v1.3.5</span>
+    <span class="version">v1.3.6</span>
   </div>
   <div class="tb-actions" style="-webkit-app-region:no-drag">
 

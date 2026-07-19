@@ -713,7 +713,11 @@
       <div class="track-info">
         <span class="title">{$nowPlaying?.title ?? '—'}</span>
         <span class="meta">
-          {#if $nowPlaying?.lufs && $nowPlaying.lufs > -90}<span>{$nowPlaying.lufs.toFixed(1)} LUFS</span>{/if}
+          {#if $nowPlaying?.lufs && $nowPlaying.lufs > -90}
+            <span>{$nowPlaying.lufs.toFixed(1)} LUFS</span>
+          {:else if $appSettings.normalizeVolume && $nowPlaying}
+            <span class="lufs-warn" title="Keine Lautstärkemessung — Normalisierung nicht aktiv für diesen Track">⚠ kein LUFS</span>
+          {/if}
           {#if $nowPlaying?.bpm}<span>{$nowPlaying.bpm} BPM</span>
           {:else if $nowPlaying}<span class="bpm-pending">· BPM</span>{/if}
           {#if $nowPlaying?.play_count}<span>×{$nowPlaying.play_count}</span>{/if}
@@ -807,6 +811,7 @@
   .meta { display: flex; gap: 10px; font-size: 11px; color: #5a7090; flex-shrink: 0; }
   .meta span::before { content: '· '; }
   .bpm-pending { color: #2a3e58 !important; font-style: italic; }
+  .lufs-warn { color: #c08030 !important; font-style: italic; }
   .controls { display: flex; align-items: center; gap: 6px; }
   .ctrl {
     background: none; border: none; color: #6a80a0; font-size: 14px;

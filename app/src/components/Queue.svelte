@@ -256,6 +256,17 @@
     qSelected = new Set()
   }
 
+  let qListEl = $state(null)
+
+  function scrollToCurrent() {
+    qListEl?.querySelector('.row.active')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }
+
+  $effect(() => {
+    const _ = $playerState.current_idx
+    setTimeout(scrollToCurrent, 80)
+  })
+
   function qKeydown(e) {
     if (e.target?.tagName === 'INPUT') return
     if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
@@ -401,6 +412,9 @@
       {#if qSelected.size > 1}
         <button class="hdr-btn sel-shuffle-btn" onclick={shuffleSelected} title="Nur markierte {qSelected.size} Tracks mischen">⇄ {qSelected.size}</button>
       {/if}
+      {#if $playerState.current_idx >= 0}
+        <button class="hdr-btn" onclick={scrollToCurrent} title="Zum aktuellen Track scrollen">⦿</button>
+      {/if}
       <button class="hdr-btn {shuffle ? 'active' : ''}" onclick={toggleShuffle} title="Zufallswiedergabe">⇄</button>
       <button class="hdr-btn {repeat > 0 ? 'active' : ''}" onclick={cycleRepeat} title="Wiederholen">{repeatLabel}</button>
       <div class="menu-wrap">
@@ -449,7 +463,7 @@
   {/if}
 
   <!-- Track list -->
-  <div class="queue-list">
+  <div class="queue-list" bind:this={qListEl}>
     {#if $queue.length === 0}
       <div class="empty">Queue leer · Tracks aus der Bibliothek hierher ziehen</div>
     {:else}

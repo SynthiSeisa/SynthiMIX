@@ -1438,6 +1438,8 @@ async def handle_message(ws: WebSocket, msg: dict):
     elif t == "position_update":
         _state["position_ms"] = msg.get("position_ms", 0)
         _state["duration_ms"] = msg.get("duration_ms", _state["duration_ms"])
+        if _remote_clients:
+            asyncio.create_task(_broadcast_remote_pos())
 
     elif t == "seek_relative":
         delta  = int(msg.get("delta_ms", 0))
@@ -2874,6 +2876,17 @@ input[type=range]{width:100%;accent-color:#e07800;height:24px}
 .add-b{background:#0d2010;border:1px solid #1a4020;border-radius:6px;color:#75d595;font-size:18px;width:36px;height:36px;cursor:pointer;flex-shrink:0;padding:0}
 .add-b:active{background:#1a3820}
 .empty{padding:14px 2px;color:#4a6080;font-size:12px;text-align:center}
+.np-nx{font-size:11px;color:#4a6080;min-height:14px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pb-wrap{margin:8px 0 2px;background:#1a2838;border-radius:3px;height:4px;overflow:hidden}
+.pb-fill{background:#e07800;height:100%;width:0%;transition:width .9s linear}
+.pb-row{display:flex;justify-content:space-between;font-size:10px;color:#4a6080;margin-bottom:6px}
+.qi-eta{font-size:10px;color:#2a4060;margin-top:1px}
+.s-tabs{display:flex;gap:6px;margin-bottom:8px}
+.s-tab{flex:1;background:#1a2838;border:1px solid #2a3848;border-radius:6px;color:#5a7898;font-size:12px;padding:6px 4px;cursor:pointer}
+.s-tab.active{background:#12243a;border-color:#3b82f6;color:#c8d8f0}
+.dl-b{background:#0d1a30;border:1px solid #1a3050;border-radius:6px;color:#4a9eff;font-size:18px;width:36px;height:36px;cursor:pointer;flex-shrink:0;padding:0;transition:color .15s}
+.dl-b:disabled{color:#2a3848;cursor:default}
+.ri-sub{font-size:10px;color:#4a6080;margin-top:2px}
 </style>
 </head>
 <body>
@@ -2885,6 +2898,9 @@ input[type=range]{width:100%;accent-color:#e07800;height:24px}
 <div class="np">
   <div id="npT" class="np-t">&#8211;</div>
   <div id="npA" class="np-a">&#8211;</div>
+  <div class="pb-wrap"><div id="pbf" class="pb-fill"></div></div>
+  <div class="pb-row"><span id="pbt">0:00</span><span id="pbr">&#8211;</span></div>
+  <div id="npNx" class="np-nx"></div>
 </div>
 <div class="ctrls">
   <button class="btn" onclick="send({type:'play_prev'})">&#9198;</button>
@@ -2900,12 +2916,16 @@ input[type=range]{width:100%;accent-color:#e07800;height:24px}
   <div id="qw" class="q-wrap"><div id="ql"></div></div>
 </div>
 <div class="sec" style="padding-bottom:20px">
-  <div class="sec-h">BIBLIOTHEK</div>
+  <div class="sec-h">SUCHE</div>
+  <div class="s-tabs">
+    <button id="tb-lib" class="s-tab active" onclick="setMode('lib')">Bibliothek</button>
+    <button id="tb-yt" class="s-tab" onclick="setMode('yt')">YouTube</button>
+  </div>
   <div class="s-row"><input class="inp" id="si" placeholder="Titel oder K&#252;nstler&#8230;" type="search" oninput="onS(this.value)"></div>
   <div id="sr"></div>
 </div>
 <script>
-var st={playing:false,current_idx:-1,volume:80,queue:[]},ws,_vt,_res=[]
+var st={playing:false,current_idx:-1,volume:80,queue:[]},ws,_vt,_res=[],_ytRes=[],_srMode='lib'
 function conn(){
   ws=new WebSocket('ws://'+location.hostname+':8080/ws')
   ws.onopen=function(){dot(true)}
@@ -2913,9 +2933,20 @@ function conn(){
   ws.onerror=function(){ws.close()}
   ws.onmessage=function(e){
     var m=JSON.parse(e.data)
-    if(m.type==='state'){st=m;render()}
+    if(m.type==='state'){st=m;render();updPos(m)}
+    else if(m.type==='pos'){updPos(m)}
     else if(m.type==='search_results'){showRes(m.results||[])}
+    else if(m.type==='yt_results'){showYtRes(m.results||[])}
+    else if(m.type==='yt_dl_status'){updDl(m)}
   }
+}
+function setMode(m){
+  _srMode=m
+  document.getElementById('tb-lib').className='s-tab'+(m==='lib'?' active':'')
+  document.getElementById('tb-yt').className='s-tab'+(m==='yt'?' active':'')
+  document.getElementById('si').placeholder=m==='lib'?'Titel oder Künstler…':'YouTube suchen…'
+  document.getElementById('sr').innerHTML=''
+  document.getElementById('si').value=''
 }
 function dot(on){document.getElementById('dot').className='dot'+(on?' on':'')}
 function send(o){if(ws&&ws.readyState===1)ws.send(JSON.stringify(o))}
@@ -2928,7 +2959,15 @@ function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace
 function rm(i){if(confirm('Entfernen?'))send({type:'queue_remove',index:i})}
 function addLib(i){if(_res[i]){send({type:'queue_append',path:_res[i].path});document.getElementById('si').value='';document.getElementById('sr').innerHTML='';_res=[]}}
 var _st=null
-function onS(q){clearTimeout(_st);if(!q.trim()){document.getElementById('sr').innerHTML='';return}_st=setTimeout(function(){send({type:'search_library',query:q})},300)}
+function onS(q){
+  clearTimeout(_st)
+  if(!q.trim()){document.getElementById('sr').innerHTML='';return}
+  var delay=_srMode==='yt'?700:300
+  _st=setTimeout(function(){
+    if(_srMode==='lib'){send({type:'search_library',query:q})}
+    else{document.getElementById('sr').innerHTML='<div class=empty>Suche läuft…</div>';send({type:'yt_search_remote',query:q})}
+  },delay)
+}
 function showRes(rs){
   _res=rs
   var el=document.getElementById('sr')
@@ -2936,6 +2975,31 @@ function showRes(rs){
   el.innerHTML=rs.map(function(r,i){
     return'<div class=ri><div class=ri-info><div class=ri-t>'+esc(r.title||'&#8211;')+'</div><div class=ri-a>'+esc(r.artist||'')+(r.duration_sec?' &middot; '+fmt(r.duration_sec):'')+'</div></div><button class=add-b onclick="addLib('+i+')">+</button></div>'
   }).join('')
+}
+function showYtRes(rs){
+  _ytRes=rs
+  var el=document.getElementById('sr')
+  if(!rs.length){el.innerHTML='<div class=empty>Keine Ergebnisse</div>';return}
+  el.innerHTML=rs.map(function(r,i){
+    return'<div class=ri id="ytr'+i+'"><div class=ri-info><div class=ri-t>'+esc(r.title||'&#8211;')+'</div><div class=ri-sub>'+esc(r.uploader||'')+(r.duration?' &middot; '+fmt(r.duration):'')+'</div></div><button class=dl-b id="dlb'+i+'" onclick="dlYt('+i+')" title="Herunterladen &amp; zur Queue hinzufügen">+</button></div>'
+  }).join('')
+}
+function dlYt(i){
+  if(!_ytRes[i])return
+  var btn=document.getElementById('dlb'+i)
+  if(btn){btn.disabled=true;btn.textContent='⏳'}
+  send({type:'yt_dl_queue',url:_ytRes[i].url,title:_ytRes[i].title})
+}
+function updDl(m){
+  for(var i=0;i<_ytRes.length;i++){
+    if(_ytRes[i].title===m.title){
+      var btn=document.getElementById('dlb'+i)
+      if(!btn)break
+      if(m.status==='done'){btn.textContent='✓';btn.style.color='#75d595'}
+      else{btn.textContent='✕';btn.style.color='#d57575';btn.disabled=false}
+      break
+    }
+  }
 }
 /* ── Touch drag-to-reorder ─────────────────────────────────────────────── */
 var dg={on:false,idx:-1,ghost:null,gy0:0,gy1:0,dropAt:-1,scInt:null,timer:null}
@@ -2990,19 +3054,40 @@ function showLine(i){
   dl.style.top=(i<rows.length?r.top:r.bottom)+'px';dl.style.display='block'
 }
 function hideLine(){var d=document.getElementById('dl');if(d)d.style.display='none'}
+function updPos(m){
+  var pos=m.pos!=null?m.pos:(st.position_ms||0)
+  var dur=m.dur!=null?m.dur:(st.duration_ms||0)
+  var pct=dur>0?Math.min(100,pos/dur*100):0
+  document.getElementById('pbf').style.width=pct+'%'
+  document.getElementById('pbt').textContent=fmt(pos/1000)
+  document.getElementById('pbr').textContent=dur>0?('-'+fmt((dur-pos)/1000)):'–'
+}
 /* ── Render ─────────────────────────────────────────────────────────────── */
 function render(){
   var q=st.queue||[],ci=st.current_idx,cur=q[ci]
   document.getElementById('npT').textContent=cur&&cur.title?cur.title:'–'
   document.getElementById('npA').textContent=cur&&cur.artist?cur.artist:''
+  var nx=st.next_title?'↓ '+st.next_title+(st.next_artist?' · '+st.next_artist:''):''
+  document.getElementById('npNx').textContent=nx
   document.getElementById('pb').innerHTML=st.playing?'⏸':'▶'
   document.getElementById('vr').value=st.volume
   document.getElementById('vv').textContent=st.volume+'%'
   document.getElementById('qc').textContent=q.length
+  // compute ETA for upcoming tracks
+  var posMs=st.position_ms||0,durMs=st.duration_ms||0
+  var rem=durMs>0?Math.max(0,(durMs-posMs)/1000):0
+  var etas={}
+  for(var j=ci+1;j<q.length;j++){etas[j]=rem;rem+=q[j].duration_sec||0}
   document.getElementById('ql').innerHTML=q.length?q.map(function(t,i){
     var a=i===ci,p=t.played&&!a
-    return'<div class="qi'+(a?' cur':'')+'"><div class=dh ontouchstart="dhStart(event,'+i+')" ontouchmove="dhMove(event)" ontouchend="dhEnd(event)">☰</div><div class=qi-info><div class="qi-t'+(a?' a':p?' p':'')+'">'+esc(t.title||'–')+'</div><div class=qi-d>'+fmt(t.duration_sec)+'</div></div><button class=rmb onclick="rm('+i+')">✕</button></div>'
+    var eta=etas[i]!=null?('<div class=qi-eta>in '+fmtEta(etas[i])+'</div>'):'';
+    return'<div class="qi'+(a?' cur':'')+'"><div class=dh ontouchstart="dhStart(event,'+i+')" ontouchmove="dhMove(event)" ontouchend="dhEnd(event)">☰</div><div class=qi-info><div class="qi-t'+(a?' a':p?' p':'')+'">'+esc(t.title||'–')+'</div><div class=qi-d>'+fmt(t.duration_sec)+(a?'':'')+eta+'</div></div><button class=rmb onclick="rm('+i+')">✕</button></div>'
   }).join(''):'<div class=empty>Warteschlange leer</div>'
+}
+function fmtEta(s){
+  if(s<60)return Math.round(s)+'s'
+  if(s<3600)return Math.round(s/60)+'min'
+  return Math.floor(s/3600)+'h '+Math.round((s%3600)/60)+'min'
 }
 conn()
 </script>
@@ -3075,6 +3160,15 @@ async def remote_ws_endpoint(websocket: WebSocket):
                         or query in (x.get("artist","") or "").lower()
                     ][:30]
                     await websocket.send_text(json.dumps({"type": "search_results", "results": results}))
+            elif t == "yt_search_remote":
+                query = msg.get("query", "").strip()
+                if query:
+                    asyncio.create_task(_do_yt_search_remote(query, websocket))
+            elif t == "yt_dl_queue":
+                url = msg.get("url", "")
+                title = msg.get("title", "")
+                if url:
+                    asyncio.create_task(_remote_dl_and_queue(url, title, websocket))
             elif t in ("pause", "resume", "play_at", "play_next", "play_prev", "set_volume"):
                 await handle_message(websocket, msg)
     except Exception:
@@ -3082,32 +3176,93 @@ async def remote_ws_endpoint(websocket: WebSocket):
     finally:
         _remote_clients.discard(websocket)
 
-async def _send_remote_state(ws: WebSocket):
+async def _do_yt_search_remote(query: str, ws: WebSocket):
+    base_args = ["--flat-playlist", "-j", "--no-playlist", "--quiet"]
+    if FFMPEG_DIR:
+        base_args += ["--ffmpeg-location", FFMPEG_DIR]
+    results = await _run_search_cmd([YTDLP, f"ytmsearch8:{query}"] + base_args)
+    if not results:
+        results = await _run_search_cmd([YTDLP, f"ytsearch8:{query}"] + base_args)
+    results = [r for r in results if not _is_unwanted_result(r)]
+    results.sort(key=lambda r: r.get("_score", 0), reverse=True)
+    try:
+        await ws.send_text(json.dumps({"type": "yt_results", "results": [
+            {"url": r["url"], "title": r["title"], "uploader": r.get("uploader", ""), "duration": r.get("duration", 0)}
+            for r in results[:8]
+        ]}))
+    except Exception:
+        pass
+
+async def _remote_dl_and_queue(url: str, title: str, ws: WebSocket):
+    try:
+        path = await run_download(url)
+        if path and os.path.exists(path):
+            lib = _state.get("library", [])
+            td = next((x for x in lib if x.get("path") == path), None)
+            entry = {
+                "path": path,
+                "title": (td.get("title") if td else None) or title or Path(path).stem,
+                "duration_sec": (td.get("duration_sec") if td else 0) or 0,
+                "lufs": (td.get("lufs") if td else -99.0) or -99.0,
+                "bpm": (td.get("bpm") if td else 0) or 0,
+                "bitrate_kbps": (td.get("bitrate_kbps") if td else 0) or 0,
+                "played": False,
+            }
+            if not _queue_is_duplicate(path, entry["title"]):
+                _state["queue"].append(entry)
+                save_queue()
+                await push_queue()
+            status = "done"
+        else:
+            status = "error"
+    except Exception:
+        status = "error"
+    try:
+        await ws.send_text(json.dumps({"type": "yt_dl_status", "title": title, "status": status}))
+    except Exception:
+        pass
+
+def _remote_state_payload() -> str:
     q = _state.get("queue", [])
-    await ws.send_text(json.dumps({
-        "type": "state",
+    ci = _state.get("current_idx", -1)
+    nxt = q[ci + 1] if 0 <= ci + 1 < len(q) else None
+    return json.dumps({
+        "type":        "state",
         "playing":     _state.get("playing", False),
-        "current_idx": _state.get("current_idx", -1),
+        "current_idx": ci,
         "volume":      _state.get("volume", 80),
+        "position_ms": _state.get("position_ms", 0),
+        "duration_ms": _state.get("duration_ms", 0),
+        "next_title":  nxt.get("title", "") if nxt else "",
+        "next_artist": nxt.get("artist", "") if nxt else "",
         "queue": [{"title": t.get("title",""), "artist": t.get("artist",""),
                    "duration_sec": t.get("duration_sec", 0),
                    "played": t.get("played", False),
                    "path": t.get("path","")} for t in q],
-    }))
+    })
+
+async def _send_remote_state(ws: WebSocket):
+    await ws.send_text(_remote_state_payload())
 
 async def _broadcast_remote_state():
     if not _remote_clients:
         return
-    q = _state.get("queue", [])
+    payload = _remote_state_payload()
+    dead = set()
+    for ws in _remote_clients:
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            dead.add(ws)
+    _remote_clients.difference_update(dead)
+
+async def _broadcast_remote_pos():
+    if not _remote_clients:
+        return
     payload = json.dumps({
-        "type": "state",
-        "playing":     _state.get("playing", False),
-        "current_idx": _state.get("current_idx", -1),
-        "volume":      _state.get("volume", 80),
-        "queue": [{"title": t.get("title",""), "artist": t.get("artist",""),
-                   "duration_sec": t.get("duration_sec", 0),
-                   "played": t.get("played", False),
-                   "path": t.get("path","")} for t in q],
+        "type": "pos",
+        "pos": _state.get("position_ms", 0),
+        "dur": _state.get("duration_ms", 0),
     })
     dead = set()
     for ws in _remote_clients:
