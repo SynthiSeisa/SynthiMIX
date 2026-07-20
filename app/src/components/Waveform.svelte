@@ -36,18 +36,21 @@
     const px = position * w
 
     // ── Base waveform bars ────────────────────────────────────────────────
+    const cs = getComputedStyle(document.documentElement)
+    const cPlayed   = cs.getPropertyValue('--c-accent').trim() || '#e07800'
+    const cUnplayed = cs.getPropertyValue('--c-br2').trim()   || '#1a2838'
     if (data.length > 0) {
       const bw = w / data.length
       data.forEach((amp, i) => {
         const x  = i * bw
         const bh = Math.max(1, amp * mid * 0.85)
-        ctx.fillStyle = x < px ? '#e07800' : '#1e2838'
+        ctx.fillStyle = x < px ? cPlayed : cUnplayed
         ctx.fillRect(Math.floor(x), mid - bh, Math.max(1, Math.floor(bw)), bh * 2)
       })
     } else {
-      ctx.fillStyle = '#e07800'
+      ctx.fillStyle = cPlayed
       ctx.fillRect(0, mid - 1, px, 2)
-      ctx.fillStyle = '#1e2838'
+      ctx.fillStyle = cUnplayed
       ctx.fillRect(px, mid - 1, w - px, 2)
     }
 
@@ -81,7 +84,7 @@
   canvas { width: 100%; height: 100%; display: block; }
   .wf-loading {
     position: absolute; inset: 0;
-    background: linear-gradient(90deg, transparent 0%, #1a2838 50%, transparent 100%);
+    background: linear-gradient(90deg, transparent 0%, var(--c-br2) 50%, transparent 100%);
     background-size: 200% 100%;
     animation: wf-shimmer 1.4s ease-in-out infinite;
     border-radius: 2px;
