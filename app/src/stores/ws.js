@@ -46,8 +46,8 @@ export const remoteAutostart   = writable(false)
 
 // ── appSettings — persisted in localStorage ───────────────────────────────────
 const APP_SETTINGS_DEFAULTS = {
-  normalizeVolume: false,
-  targetLUFS:      -14,
+  normalizeVolume: true,
+  targetLUFS:      -10,
   bpmAnalysis:     true,
   smartFade:          true,
   fadeAggressiveness: 3,   // legacy, kept for compat
@@ -153,9 +153,13 @@ function connect() {
         if (msg.auto_scan_interval_min    !== undefined) autoScanIntervalMin.set(msg.auto_scan_interval_min)
         if (msg.favorites                 !== undefined) favorites.set(msg.favorites)
         if (msg.remote_autostart          !== undefined) remoteAutostart.set(msg.remote_autostart)
-        // bpm_analysis is authoritative from backend — overrides localStorage
+        // bpm_analysis and normalize settings are authoritative from backend
         if (msg.bpm_analysis              !== undefined)
           appSettings.update(s => ({ ...s, bpmAnalysis: msg.bpm_analysis }))
+        if (msg.normalize_volume          !== undefined)
+          appSettings.update(s => ({ ...s, normalizeVolume: msg.normalize_volume }))
+        if (msg.target_lufs               !== undefined)
+          appSettings.update(s => ({ ...s, targetLUFS: msg.target_lufs }))
         break
       case 'playlist_content':
         playlistContent.update(m => ({ ...m, [msg.path]: msg.tracks ?? [] }))

@@ -17,6 +17,7 @@
   let cfTimer      = null
   let cfNextIdx    = $state(-1)
   let cfRaf        = null
+  let cfRafActive  = $state(false)
   let cfCancelled  = false   // cancels pending canplay.play() on pause
   let loadedUrl    = ''
 
@@ -34,7 +35,7 @@
     if (!_volDragging) {
       volume = $settings.volume
       const el = cur()
-      if (el && !cfActive) el.volume = volume / 100
+      if (el && !cfActive && !cfRafActive) el.volume = volume / 100
     }
   })
 
@@ -130,10 +131,7 @@
     const target = $appSettings.targetLUFS ?? -14
     if (!$appSettings.normalizeVolume || !lufs || lufs <= -90) return 1.0
     const db = Math.max(-20, Math.min(12, target - lufs))
-    const factor = Math.pow(10, db / 20)
-    // Cap so that gain × el.volume (= volume/100) never exceeds 1.0 (prevents clipping)
-    const v = volume / 100
-    return v > 0 ? Math.min(factor, 1.0 / v) : factor
+    return Math.pow(10, db / 20)
   }
 
   function getGainNode(el) { return el === elA ? gainA : gainB }
@@ -350,6 +348,7 @@
 
     if (wasPlaying && cf > 0 && !forceImmediate) {
       cfCancelled = false
+      cfRafActive = true
       a.src = url; a.volume = 0; a.load(); a.play().catch(() => {})
       setElLufs(a, track.lufs ?? -99)
       which = untrack(() => which) === 'A' ? 'B' : 'A'
@@ -381,7 +380,7 @@
         const [fv, tv] = _fade(t, vOld, v)
         c.volume = fv; a.volume = tv
         if (t < 1) cfRaf = requestAnimationFrame(rafTick)
-        else { cfRaf = null; _silenceAndStop(c) }
+        else { cfRaf = null; cfRafActive = false; _silenceAndStop(c) }
       }
       cfRaf = requestAnimationFrame(rafTick)
     } else {

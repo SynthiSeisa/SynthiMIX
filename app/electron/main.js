@@ -157,6 +157,9 @@ ipcMain.on('win-maximize', () => {
 ipcMain.on('win-fullscreen', () => {
   if (mainWindow) mainWindow.setFullScreen(!mainWindow.isFullScreen())
 })
+ipcMain.on('win-toggle-fullscreen', () => {
+  if (mainWindow) mainWindow.setFullScreen(!mainWindow.isFullScreen())
+})
 ipcMain.on('win-close', () => mainWindow?.close())
 
 // Open file/folder in Explorer

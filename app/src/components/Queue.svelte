@@ -409,12 +409,6 @@
     {/if}
 
     <div class="header-actions">
-      {#if qSelected.size > 1}
-        <button class="hdr-btn sel-shuffle-btn" onclick={shuffleSelected} title="Nur markierte {qSelected.size} Tracks mischen">⇄ {qSelected.size}</button>
-      {/if}
-      {#if $playerState.current_idx >= 0}
-        <button class="hdr-btn" onclick={scrollToCurrent} title="Zum aktuellen Track scrollen">⦿</button>
-      {/if}
       <button class="hdr-btn {shuffle ? 'active' : ''}" onclick={toggleShuffle} title="Zufallswiedergabe">⇄</button>
       <button class="hdr-btn {repeat > 0 ? 'active' : ''}" onclick={cycleRepeat} title="Wiederholen">{repeatLabel}</button>
       <div class="menu-wrap">
@@ -442,6 +436,9 @@
             {#if qSelected.size > 1}
               <button onclick={shuffleSelected}>Nur markierte mischen ({qSelected.size})</button>
             {/if}
+            {#if $playerState.current_idx >= 0}
+              <button onclick={() => { scrollToCurrent(); showMenu = false }}>⦿ Zum aktuellen Track</button>
+            {/if}
             <div class="dd-sep"></div>
             <button onclick={markAllUnplayed}>Alle als ungespielt markieren</button>
             <button onclick={removePlayed}>Gespielte entfernen</button>
@@ -457,9 +454,9 @@
     </div>
   </div>
 
-  <!-- Drop hint overlay -->
-  {#if isDragOver}
-    <div class="drop-hint">Hier ablegen</div>
+  <!-- Drop: Einfügelinie oben wenn Cursor über leerem Bereich -->
+  {#if isDragOver && dragOver === null}
+    <div class="drop-banner">+ Hier einreihen</div>
   {/if}
 
   <!-- Track list -->
@@ -654,8 +651,6 @@
   }
   .hdr-btn:hover  { color: var(--c-tx2); background: var(--c-bg5); }
   .hdr-btn.active { color: var(--c-accent); }
-  .sel-shuffle-btn { color: var(--c-blue); font-weight: 600; }
-  .sel-shuffle-btn:hover { color: var(--c-tx3); background: var(--c-bg5); }
   .menu-btn { letter-spacing: 2px; }
 
   /* ── Dropdown menu ─────────────────────────────────────────────────────── */
@@ -718,18 +713,20 @@
   .dd-pl-del:hover { color: var(--c-red) !important; }
 
   /* ── Drop hint ─────────────────────────────────────────────────────────── */
-  .drop-hint {
+  .drop-banner {
     position: absolute;
-    inset: 30px 0 0 0;
+    bottom: 0; left: 0; right: 0;
+    height: 28px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 12px;
+    font-size: 10px;
+    letter-spacing: .08em;
     color: var(--c-accent);
-    background: rgba(6, 9, 15, 0.85);
+    background: color-mix(in srgb, var(--c-accent) 8%, transparent);
+    border-top: 1px solid var(--c-accent);
     z-index: 10;
     pointer-events: none;
-    letter-spacing: .06em;
   }
 
   /* ── Track list ─────────────────────────────────────────────────────────── */
@@ -768,9 +765,9 @@
   .row.q-sel .stripe { background: #2a5aaa; }
 
   /* Drop indicator: orange line above the row */
-  .row.drop-before  { box-shadow: inset 0 2px 0 0 var(--c-accent); }
+  .row.drop-before  { box-shadow: inset 0 3px 0 0 var(--c-accent); background: color-mix(in srgb, var(--c-accent) 6%, var(--c-bg)) !important; }
   .row-drop-end     { height: 6px; }
-  .row-drop-end.drop-before { box-shadow: inset 0 2px 0 0 var(--c-accent); }
+  .row-drop-end.drop-before { box-shadow: inset 0 3px 0 0 var(--c-accent); }
 
   /* Colored left stripe */
   .stripe {

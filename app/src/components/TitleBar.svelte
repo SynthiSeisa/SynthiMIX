@@ -70,14 +70,17 @@
   }
 
   const shortcuts = [
-    ['Space',      'Pause / Fortsetzen'],
-    ['← / →',     '±5 Sekunden springen'],
-    ['Strg + →',  'Nächster Track'],
-    ['Strg + ←',  'Track-Anfang / Vorheriger'],
-    ['N',          'Nächster Track'],
-    ['P',          'Vorheriger Track'],
-    ['Entf',       'Markierten Queue-Eintrag entfernen'],
-    ['F11',        'Vollbild umschalten'],
+    ['Space',        'Pause / Fortsetzen'],
+    ['← / →',       '±5 Sekunden springen'],
+    ['Strg + →',    'Nächster Track'],
+    ['Strg + ←',    'Track-Anfang / Vorheriger'],
+    ['N',            'Nächster Track'],
+    ['P',            'Vorheriger Track'],
+    ['Entf',         'Markierte Queue-Einträge entfernen'],
+    ['Strg + A',     'Alle auswählen (Queue / Bibliothek)'],
+    ['Shift + Klick','Bereich auswählen'],
+    ['Escape',       'Auswahl aufheben'],
+    ['F11',          'Vollbild umschalten'],
   ]
 
   // ── Auto-Update ───────────────────────────────────────────────────────────
@@ -115,7 +118,7 @@
       <polyline points="16,32 20,36 24,32" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
     <span class="app-name"><span class="nm-synthi">Synthi</span><span class="nm-mix">MIX</span></span>
-    <span class="version">v1.3.7</span>
+    <span class="version">v1.3.8</span>
   </div>
   <div class="tb-actions" style="-webkit-app-region:no-drag">
 
@@ -154,7 +157,7 @@
       {/if}
     </div>
     <div class="notes-wrap">
-      <button class="tb-btn" onclick={() => { notesOpen = !notesOpen; helpOpen = false; logOpen = false }} title="Notizblock">&#128221;</button>
+      <button class="tb-btn" onclick={() => { notesOpen = !notesOpen; helpOpen = false; logOpen = false }} title="Notizblock">✎</button>
       {#if notesOpen}
         <div class="notes-panel">
           <div class="notes-hdr">

@@ -175,14 +175,14 @@
             <div class="row">
               <span class="lbl">Lautstärke angleichen</span>
               <button class="tog {$appSettings.normalizeVolume ? 'on' : ''}"
-                onclick={() => appSettings.update(s => ({...s, normalizeVolume: !s.normalizeVolume}))}
+                onclick={() => { const v = !$appSettings.normalizeVolume; appSettings.update(s => ({...s, normalizeVolume: v})); send({type:'set_normalize_volume', value: v}) }}
                 title={$appSettings.normalizeVolume ? 'Aktiv' : 'Inaktiv'}></button>
             </div>
             {#if $appSettings.normalizeVolume}
               <div class="row indent">
                 <span class="lbl">Ziel-LUFS</span>
                 <input type="range" min="-23" max="-8" step="1" value={$appSettings.targetLUFS}
-                  oninput={(e) => appSettings.update(s => ({...s, targetLUFS: +e.target.value}))} />
+                  oninput={(e) => { const v = +e.target.value; appSettings.update(s => ({...s, targetLUFS: v})); send({type:'set_normalize_volume', value: $appSettings.normalizeVolume, target_lufs: v}) }} />
                 <span class="val">{$appSettings.targetLUFS} LUFS</span>
               </div>
             {/if}

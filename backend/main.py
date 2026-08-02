@@ -360,6 +360,8 @@ def load_settings():
     _state["auto_scan_interval_min"]  = int(raw.get("auto_scan_interval_min", 0))
     _state["favorites"]               = list(raw.get("favorites", []))
     _state["remote_autostart"]        = bool(raw.get("remote_autostart", False))
+    _state["normalize_volume"]        = bool(raw.get("normalize_volume", True))
+    _state["target_lufs"]             = float(raw.get("target_lufs", -10.0))
 
 def save_settings():
     _save_json(SETTINGS_FILE, {
@@ -378,6 +380,8 @@ def save_settings():
         "auto_scan_interval_min":  _state.get("auto_scan_interval_min", 0),
         "favorites":               _state.get("favorites", []),
         "remote_autostart":        _state.get("remote_autostart", False),
+        "normalize_volume":        _state.get("normalize_volume", True),
+        "target_lufs":             _state.get("target_lufs", -10.0),
     })
 
 def load_history():
@@ -879,9 +883,11 @@ async def _do_automix(last_title: str):
         _automix_running = False
 
 LIVE_RE = re.compile(
-    r'\b(live\s*(at|in|from|version|performance|session|recording|concert|show)?'
-    r'|concert|tour\s*\d{4}?|unplugged|acoustic\s+live|live\s+acoustic'
-    r'|at\s+the\s+\w+\s+(?:arena|stadium|festival|hall|theater|theatre))\b',
+    r'[\(\[]\s*live\s*[\)\]]'                                          # (live) oder [live]
+    r'|\blive\s+(?:at|in|from|version|performance|session|recording|concert|show)\b'
+    r'|\bconcert\b|\btour\s*\d{4}\b|\bunplugged\b'
+    r'|\blive\s+acoustic\b|\bacoustic\s+live\b'
+    r'|\bat\s+the\s+\w+\s+(?:arena|stadium|festival|hall|theater|theatre)\b',
     re.IGNORECASE
 )
 
@@ -1284,6 +1290,8 @@ async def handle_message(ws: WebSocket, msg: dict):
             "auto_scan_interval_min":  _state.get("auto_scan_interval_min", 0),
             "favorites":               _state.get("favorites", []),
             "remote_autostart":        _state.get("remote_autostart", False),
+            "normalize_volume":        _state.get("normalize_volume", True),
+            "target_lufs":             _state.get("target_lufs", -10.0),
         }))
         if _state.get("remote_autostart") and _remote_server is None:
             asyncio.create_task(_start_remote_server(ws))
@@ -1470,6 +1478,15 @@ async def handle_message(ws: WebSocket, msg: dict):
         _state["volume"] = min(100, max(0, int(float(msg.get("value", 80)))))
         save_settings()
         await broadcast({"type": "settings", "volume": _state["volume"], "crossfade_s": _state["crossfade_s"]})
+        if _remote_clients:
+            asyncio.create_task(_broadcast_remote_state())
+
+    elif t == "set_normalize_volume":
+        _state["normalize_volume"] = bool(msg.get("value", True))
+        if "target_lufs" in msg:
+            _state["target_lufs"] = float(msg["target_lufs"])
+        save_settings()
+        await broadcast({"type": "settings", "normalize_volume": _state["normalize_volume"], "target_lufs": _state["target_lufs"]})
         if _remote_clients:
             asyncio.create_task(_broadcast_remote_state())
 
@@ -2887,6 +2904,10 @@ input[type=range]{width:100%;accent-color:#e07800;height:24px}
 .dl-b{background:#0d1a30;border:1px solid #1a3050;border-radius:6px;color:#4a9eff;font-size:18px;width:36px;height:36px;cursor:pointer;flex-shrink:0;padding:0;transition:color .15s}
 .dl-b:disabled{color:#2a3848;cursor:default}
 .ri-sub{font-size:10px;color:#4a6080;margin-top:2px}
+.norm-btn{width:100%;margin-top:6px;background:#1a2838;border:1px solid #2a3848;border-radius:6px;color:#5a7898;font-size:12px;padding:7px;cursor:pointer;text-align:center}
+.norm-btn.on{background:#0d2010;border-color:#1a4020;color:#75d595}
+.nxt-b{background:#0d1a30;border:1px solid #1a3050;border-radius:6px;color:#4a9eff;font-size:16px;width:36px;height:36px;cursor:pointer;flex-shrink:0;padding:0;margin-right:4px}
+.nxt-b:active{opacity:.6}
 </style>
 </head>
 <body>
@@ -2910,6 +2931,7 @@ input[type=range]{width:100%;accent-color:#e07800;height:24px}
 <div class="vol">
   <div class="vol-h"><span>Lautst&#228;rke</span><span id="vv">80%</span></div>
   <input type="range" id="vr" min="0" max="100" value="80" oninput="onVol(this.value)" onchange="flushVol()">
+  <button id="normb" class="norm-btn on" onclick="toggleNorm()">&#128266; -10 LUFS</button>
 </div>
 <div class="sec">
   <div class="sec-h">WARTESCHLANGE &nbsp;<span id="qc" style="font-weight:400;color:#3a5070">0</span></div>
@@ -2925,7 +2947,7 @@ input[type=range]{width:100%;accent-color:#e07800;height:24px}
   <div id="sr"></div>
 </div>
 <script>
-var st={playing:false,current_idx:-1,volume:80,queue:[]},ws,_vt,_res=[],_ytRes=[],_srMode='lib'
+var st={playing:false,current_idx:-1,volume:80,normalize_volume:true,target_lufs:-10,queue:[]},ws,_vt,_res=[],_ytRes=[],_srMode='lib'
 function conn(){
   ws=new WebSocket('ws://'+location.hostname+':8080/ws')
   ws.onopen=function(){dot(true)}
@@ -2954,6 +2976,7 @@ function toggle(){send({type:st.playing?'pause':'resume'})}
 var _pv=null
 function onVol(v){document.getElementById('vv').textContent=v+'%';_pv=+v;clearTimeout(_vt);_vt=setTimeout(flushVol,120)}
 function flushVol(){if(_pv!=null){send({type:'set_volume',value:_pv});_pv=null}}
+function toggleNorm(){st.normalize_volume=!st.normalize_volume;send({type:'set_normalize_volume',value:st.normalize_volume});var nb=document.getElementById('normb');nb.textContent=st.normalize_volume?('🔊 '+st.target_lufs+' LUFS'):'🔇 Aus';nb.className='norm-btn'+(st.normalize_volume?' on':'')}
 function fmt(s){if(!s)return'';var m=Math.floor(s/60);return m+':'+(Math.floor(s%60)+'').padStart(2,'0')}
 function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 function rm(i){if(confirm('Entfernen?'))send({type:'queue_remove',index:i})}
@@ -2973,9 +2996,10 @@ function showRes(rs){
   var el=document.getElementById('sr')
   if(!rs.length){el.innerHTML='<div class=empty>Keine Ergebnisse</div>';return}
   el.innerHTML=rs.map(function(r,i){
-    return'<div class=ri><div class=ri-info><div class=ri-t>'+esc(r.title||'&#8211;')+'</div><div class=ri-a>'+esc(r.artist||'')+(r.duration_sec?' &middot; '+fmt(r.duration_sec):'')+'</div></div><button class=add-b onclick="addLib('+i+')">+</button></div>'
+    return'<div class=ri><div class=ri-info><div class=ri-t>'+esc(r.title||'&#8211;')+'</div><div class=ri-a>'+esc(r.artist||'')+(r.duration_sec?' &middot; '+fmt(r.duration_sec):'')+'</div></div><button class=nxt-b onclick="addNext('+i+')" title="Als n&#228;chstes einreihen">&#9197;</button><button class=add-b onclick="addLib('+i+')" title="Ans Ende">+</button></div>'
   }).join('')
 }
+function addNext(i){if(_res[i]){send({type:'queue_insert_next',path:_res[i].path});document.getElementById('si').value='';document.getElementById('sr').innerHTML='';_res=[]}}
 function showYtRes(rs){
   _ytRes=rs
   var el=document.getElementById('sr')
@@ -3072,6 +3096,8 @@ function render(){
   document.getElementById('pb').innerHTML=st.playing?'⏸':'▶'
   document.getElementById('vr').value=st.volume
   document.getElementById('vv').textContent=st.volume+'%'
+  var nb=document.getElementById('normb')
+  if(nb){nb.textContent=st.normalize_volume?('🔊 '+st.target_lufs+' LUFS'):'🔇 Aus';nb.className='norm-btn'+(st.normalize_volume?' on':'')}
   document.getElementById('qc').textContent=q.length
   // compute ETA for upcoming tracks
   var posMs=st.position_ms||0,durMs=st.duration_ms||0
@@ -3080,15 +3106,11 @@ function render(){
   for(var j=ci+1;j<q.length;j++){etas[j]=rem;rem+=q[j].duration_sec||0}
   document.getElementById('ql').innerHTML=q.length?q.map(function(t,i){
     var a=i===ci,p=t.played&&!a
-    var eta=etas[i]!=null?('<div class=qi-eta>in '+fmtEta(etas[i])+'</div>'):'';
-    return'<div class="qi'+(a?' cur':'')+'"><div class=dh ontouchstart="dhStart(event,'+i+')" ontouchmove="dhMove(event)" ontouchend="dhEnd(event)">☰</div><div class=qi-info><div class="qi-t'+(a?' a':p?' p':'')+'">'+esc(t.title||'–')+'</div><div class=qi-d>'+fmt(t.duration_sec)+(a?'':'')+eta+'</div></div><button class=rmb onclick="rm('+i+')">✕</button></div>'
+    var etaAbs=etas[i]!=null?absTime(etas[i]):'';
+    return'<div class="qi'+(a?' cur':'')+'"><div class=dh ontouchstart="dhStart(event,'+i+')" ontouchmove="dhMove(event)" ontouchend="dhEnd(event)">☰</div><div class=qi-info><div class="qi-t'+(a?' a':p?' p':'')+'">'+esc(t.title||'–')+'</div><div class=qi-d>'+fmt(t.duration_sec)+(etaAbs?'<span class=qi-eta> · '+etaAbs+'</span>':'')+'</div></div><button class=rmb onclick="rm('+i+')">✕</button></div>'
   }).join(''):'<div class=empty>Warteschlange leer</div>'
 }
-function fmtEta(s){
-  if(s<60)return Math.round(s)+'s'
-  if(s<3600)return Math.round(s/60)+'min'
-  return Math.floor(s/3600)+'h '+Math.round((s%3600)/60)+'min'
-}
+function absTime(secs){var d=new Date(Date.now()+secs*1000);return'~'+('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2)}
 conn()
 </script>
 </body>
@@ -3148,6 +3170,24 @@ async def remote_ws_endpoint(websocket: WebSocket):
                     })
                     save_queue()
                     await push_queue()
+            elif t == "queue_insert_next":
+                path = msg.get("path", "")
+                lib = _state.get("library", [])
+                td = next((x for x in lib if x.get("path") == path), None)
+                if td:
+                    ci = _state.get("current_idx", -1)
+                    insert_at = ci + 1 if ci >= 0 else 0
+                    _state["queue"].insert(insert_at, {
+                        "path": path,
+                        "title": td.get("title") or Path(path).stem,
+                        "duration_sec": td.get("duration_sec", 0),
+                        "lufs": td.get("lufs", -99.0),
+                        "bpm": td.get("bpm", 0),
+                        "bitrate_kbps": td.get("bitrate_kbps", 0),
+                        "played": False,
+                    })
+                    save_queue()
+                    await push_queue()
             elif t == "search_library":
                 query = (msg.get("query") or "").lower()
                 if query and query != "__clear__":
@@ -3169,6 +3209,8 @@ async def remote_ws_endpoint(websocket: WebSocket):
                 title = msg.get("title", "")
                 if url:
                     asyncio.create_task(_remote_dl_and_queue(url, title, websocket))
+            elif t == "set_normalize_volume":
+                await handle_message(websocket, msg)
             elif t in ("pause", "resume", "play_at", "play_next", "play_prev", "set_volume"):
                 await handle_message(websocket, msg)
     except Exception:
@@ -3235,6 +3277,8 @@ def _remote_state_payload() -> str:
         "duration_ms": _state.get("duration_ms", 0),
         "next_title":  nxt.get("title", "") if nxt else "",
         "next_artist": nxt.get("artist", "") if nxt else "",
+        "normalize_volume": _state.get("normalize_volume", True),
+        "target_lufs":      _state.get("target_lufs", -10.0),
         "queue": [{"title": t.get("title",""), "artist": t.get("artist",""),
                    "duration_sec": t.get("duration_sec", 0),
                    "played": t.get("played", False),
