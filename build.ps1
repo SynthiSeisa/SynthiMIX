@@ -1,4 +1,4 @@
-# SynthiMIX — Build-Skript
+﻿# SynthiMIX — Build-Skript
 # Erzeugt einen Windows-Installer (.exe) der kein Python oder Node.js benötigt.
 # Voraussetzungen: Python 3.11+, Node.js 20+, pip install pyinstaller
 
@@ -133,12 +133,14 @@ if ($installer) {
 }
 
 if ($releaseOk) {
-    Write-Host "  Release veröffentlichen — alle drei Dateien werden gebraucht:" -ForegroundColor White
-    Write-Host "    gh release create v$version ``"                                  -ForegroundColor Cyan
-    Write-Host "      `"$setupPath`" ``"                                             -ForegroundColor Cyan
-    Write-Host "      `"$setupPath.blockmap`" ``"                                    -ForegroundColor Cyan
-    Write-Host "      `"$latestYml`" ``"                                             -ForegroundColor Cyan
-    Write-Host "      --title `"SynthiMIX v$version`" --notes-file RELEASE-NOTES.md`n" -ForegroundColor Cyan
+    $q = [char]34
+    $ghCmd = "gh release create v$version " +
+             "$q$setupPath$q " +
+             "$q$setupPath.blockmap$q " +
+             "$q$latestYml$q " +
+             "--title ${q}SynthiMIX v$version$q --notes-file RELEASE-NOTES.md"
+    Write-Host "  Release veroeffentlichen - alle drei Dateien werden gebraucht:" -ForegroundColor White
+    Write-Host "    $ghCmd`n" -ForegroundColor Cyan
 } else {
-    Write-Host "`n  Release NICHT veröffentlichen — es fehlen Artefakte (siehe oben).`n" -ForegroundColor Red
+    Write-Host "`n  Release NICHT veroeffentlichen - es fehlen Artefakte (siehe oben).`n" -ForegroundColor Red
 }
