@@ -27,7 +27,19 @@ export const automixStatus = writable('')
 export const autoMixEnabled = writable(true)
 export const normalizeProgress = writable(null)
 export const dlHistory = writable([])
-export const toolsInfo = writable({ ytdlp_version: null, ffmpeg_version: null })
+export const toolsInfo = writable({ ytdlp_version: null, ffmpeg_version: null, spotdl_version: null })
+export const spotifyClientId     = writable('')
+export const spotifyClientSecret = writable('')
+export const lastfmApiKey        = writable('')
+export const acoustidApiKey      = writable('')
+export const radioEnabled        = writable(false)
+export const radioStatus         = writable(null)   // null | { title, similar_to }
+export const trackIdentified     = writable(null)   // null | { title, artist, album, score, path, error }
+export const fpcalcInstalling    = writable(false)
+export const fpcalcInstallError  = writable(null)
+export const spotdlInstalling    = writable(false)
+export const spotdlInstallText   = writable(null)   // Fortschrittstext während des Downloads
+export const spotdlInstallError  = writable(null)
 export const updateProgress = writable(null)
 export const loudnormOnDl = writable(false)
 export const loudnormTarget = writable(-14)
@@ -55,6 +67,7 @@ const APP_SETTINGS_DEFAULTS = {
   outroAggressiveness: 3,
   cfCurve:            'cosine',
   introSkipSec:       0,
+  beatAlignCf:        true,
 }
 
 function _loadAppSettings() {
@@ -140,7 +153,13 @@ function connect() {
       case 'download_tree':   downloadTree.set(msg.tree ?? { folders: [], files: [] }); downloadTreeLoaded.set(true); break
       case 'search_results':  searchResults.set(msg); break
       case 'settings':
-        settings.set({ volume: msg.volume, crossfade_s: msg.crossfade_s })
+        // Partial settings messages (e.g. set_normalize_volume) omit volume/crossfade_s —
+        // use update() so undefined fields don't overwrite existing values with NaN.
+        if (msg.volume !== undefined || msg.crossfade_s !== undefined)
+          settings.update(s => ({
+            volume:      msg.volume      ?? s.volume,
+            crossfade_s: msg.crossfade_s ?? s.crossfade_s,
+          }))
         if (msg.scan_recursive            !== undefined) scanRecursive.set(msg.scan_recursive)
         if (msg.auto_remove_played        !== undefined) autoRemovePlayed.set(msg.auto_remove_played)
         if (msg.auto_mix                  !== undefined) autoMixEnabled.set(msg.auto_mix)
@@ -160,6 +179,11 @@ function connect() {
           appSettings.update(s => ({ ...s, normalizeVolume: msg.normalize_volume }))
         if (msg.target_lufs               !== undefined)
           appSettings.update(s => ({ ...s, targetLUFS: msg.target_lufs }))
+        if (msg.spotify_client_id         !== undefined) spotifyClientId.set(msg.spotify_client_id)
+        if (msg.spotify_client_secret     !== undefined) spotifyClientSecret.set(msg.spotify_client_secret)
+        if (msg.lastfm_api_key            !== undefined) lastfmApiKey.set(msg.lastfm_api_key)
+        if (msg.acoustid_api_key          !== undefined) acoustidApiKey.set(msg.acoustid_api_key)
+        if (msg.radio_enabled             !== undefined) radioEnabled.set(msg.radio_enabled)
         break
       case 'playlist_content':
         playlistContent.update(m => ({ ...m, [msg.path]: msg.tracks ?? [] }))
@@ -214,6 +238,15 @@ function connect() {
         if (msg.finished) analyzeProgress.set(null)
         else analyzeProgress.set({ done: msg.done, total: msg.total })
         break
+      case 'radio_status':  radioEnabled.set(msg.enabled); break
+      case 'radio_added':   radioStatus.set({ title: msg.title, similar_to: msg.similar_to }); setTimeout(() => radioStatus.set(null), 5000); break
+      case 'track_identified': trackIdentified.set(msg); break
+      case 'fpcalc_install_progress': fpcalcInstalling.set(true);  fpcalcInstallError.set(null); break
+      case 'fpcalc_install_done':     fpcalcInstalling.set(false); break
+      case 'fpcalc_install_error':    fpcalcInstalling.set(false); fpcalcInstallError.set(msg.text ?? 'Fehler'); break
+      case 'spotdl_install_progress': spotdlInstalling.set(true);  spotdlInstallError.set(null); spotdlInstallText.set(msg.text ?? null); break
+      case 'spotdl_install_done':     spotdlInstalling.set(false); spotdlInstallText.set(null); if (msg.version) toolsInfo.update(t => ({ ...t, spotdl_version: msg.version })); break
+      case 'spotdl_install_error':    spotdlInstalling.set(false); spotdlInstallText.set(null); spotdlInstallError.set(msg.text ?? 'Fehler'); break
     }
   }
 }

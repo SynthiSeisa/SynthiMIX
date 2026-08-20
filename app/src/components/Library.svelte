@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte'
-  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites } from '../stores/ws.js'
+  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey } from '../stores/ws.js'
   import BetterVersionDialog from './BetterVersionDialog.svelte'
   import DuplicateScanDialog from './DuplicateScanDialog.svelte'
 
@@ -84,6 +84,26 @@
     return [...seen.values()].sort((a, b) => a.localeCompare(b, 'de'))
   })
 
+  const albums = $derived.by(() => {
+    const seen = new Map()
+    for (const t of $library) {
+      const a = (t.album ?? '').trim()
+      if (a) { const k = a.toLowerCase(); if (!seen.has(k)) seen.set(k, a) }
+    }
+    return [...seen.values()].sort((a, b) => a.localeCompare(b, 'de'))
+  })
+
+  const genres = $derived.by(() => {
+    const seen = new Map()
+    for (const t of $library) {
+      for (const part of (t.genre ?? '').split(/[,;/]/)) {
+        const g = part.trim()
+        if (g) { const k = g.toLowerCase(); if (!seen.has(k)) seen.set(k, g) }
+      }
+    }
+    return [...seen.values()].sort((a, b) => a.localeCompare(b, 'de'))
+  })
+
   // ── Download directory tree ───────────────────────────────────────────────
   let dlFolderOpen  = $state({})  // folder path → bool
 
@@ -99,8 +119,10 @@
   }
 
   // ── Nav section expand/collapse ───────────────────────────────────────────
-  let secFsOpen       = $state(true)
+  let secFsOpen       = $state(false)
   let secArtistOpen   = $state(false)
+  let secAlbumOpen    = $state(false)
+  let secGenreOpen    = $state(false)
   let secDlOpen       = $state(true)
   let secPlaylistOpen = $state(true)
 
@@ -109,6 +131,12 @@
   const navQ = $derived(navSearch.trim().toLowerCase())
   const filteredArtists = $derived(
     navQ ? artists.filter(a => a.toLowerCase().includes(navQ)) : artists
+  )
+  const filteredAlbums = $derived(
+    navQ ? albums.filter(a => a.toLowerCase().includes(navQ)) : albums
+  )
+  const filteredGenres = $derived(
+    navQ ? genres.filter(g => g.toLowerCase().includes(navQ)) : genres
   )
   const filteredPlaylists = $derived(
     navQ ? $playlists.filter(pl => pl.name.toLowerCase().includes(navQ)) : $playlists
@@ -129,11 +157,49 @@
   $effect(() => {
     if (!navQ) return
     if (filteredArtists.length)  secArtistOpen   = true
+    if (filteredAlbums.length)   secAlbumOpen    = true
+    if (filteredGenres.length)   secGenreOpen    = true
     if (filteredPlaylists.length) secPlaylistOpen = true
     if (filteredDlFolders.length || filteredDlFiles.length) secDlOpen = true
   })
   // ── Favoriten dropdown ────────────────────────────────────────────────────
   let favOpen = $state(false)
+
+  // ── Total download count (all files + all subfolder tracks recursively) ──
+  const dlTotalCount = $derived.by(() => {
+    if (!$downloadTreeLoaded) return 0
+    function countFolder(f) {
+      return f.tracks.length + (f.folders ?? []).reduce((s, sub) => s + countFolder(sub), 0)
+    }
+    return ($downloadTree.files ?? []).length +
+           ($downloadTree.folders ?? []).reduce((s, f) => s + countFolder(f), 0)
+  })
+
+  // ── Angeheftete Download-Ordner (localStorage-persistent) ────────────────
+  let pinnedDlFolders = $state(
+    (() => { try { return JSON.parse(localStorage.getItem('synthimix-pinned-dl') ?? '[]') } catch { return [] } })()
+  )
+  $effect(() => {
+    localStorage.setItem('synthimix-pinned-dl', JSON.stringify(pinnedDlFolders))
+  })
+  function pinDlFolder(folder) {
+    if (!pinnedDlFolders.find(p => p.path === folder.path))
+      pinnedDlFolders = [...pinnedDlFolders, { name: folder.name, path: folder.path }]
+  }
+  function unpinDlFolder(path) {
+    pinnedDlFolders = pinnedDlFolders.filter(p => p.path !== path)
+  }
+  function isDlPinned(path) {
+    return pinnedDlFolders.some(p => p.path === path)
+  }
+
+  // ── A-Z Schnellsprung für Künstler ────────────────────────────────────────
+  const AZ_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')
+  function jumpArtist(letter) {
+    const tree = document.querySelector('.nav-tree')
+    const target = tree?.querySelector(`[data-aletter="${letter.toLowerCase()}"]`)
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
 
   // ── Download subfolder expand state ──────────────────────────────────────
   let dlExpandedFolders = $state(new Set())
@@ -178,6 +244,8 @@
       if (secFsOpen && !fsReady) loadFsRoots()
     }
     else if (sec === 'artist')   secArtistOpen = !secArtistOpen
+    else if (sec === 'album')    secAlbumOpen  = !secAlbumOpen
+    else if (sec === 'genre')    secGenreOpen  = !secGenreOpen
     else if (sec === 'dl') {
       secDlOpen = !secDlOpen
       if (secDlOpen && !$downloadTreeLoaded) loadDlTree()
@@ -309,6 +377,56 @@
       return applySort(list)
     }
 
+    // ── dl_recent: all downloads sorted by file date, newest first ──────────
+    if (navMode === 'dl_recent') {
+      if (!$downloadTreeLoaded) return []
+      const libByPath = new Map($library.map(t => [t.path, t]))
+      const make = (f) => ({ ...(libByPath.get(f.path) ?? { path: f.path, title: f.name, artist: '', duration_sec: 0, lufs: -99, bpm: 0 }), _mtime: f.mtime ?? 0 })
+      function gatherRecent(folders) {
+        let r = []
+        for (const folder of folders) {
+          r.push(...(folder.tracks ?? []).map(make))
+          if (folder.folders?.length) r.push(...gatherRecent(folder.folders))
+        }
+        return r
+      }
+      let all = [
+        ...($downloadTree.files ?? []).map(make),
+        ...gatherRecent($downloadTree.folders ?? [])
+      ]
+      all.sort((a, b) => (b._mtime ?? 0) - (a._mtime ?? 0))
+      let list = all.slice(0, 40)
+      if (q) list = list.filter(t => {
+        const { artist, title } = getTrackArtistTitle(t)
+        return title.toLowerCase().includes(q) || artist.toLowerCase().includes(q)
+      })
+      return list
+    }
+
+    // ── dl_all: all downloaded files (root + all subfolders recursively) ───
+    if (navMode === 'dl_all') {
+      if (!$downloadTreeLoaded) return []
+      const libByPath = new Map($library.map(t => [t.path, t]))
+      const make = (f) => libByPath.get(f.path) ?? { path: f.path, title: f.name, artist: '', duration_sec: 0, lufs: -99, bpm: 0 }
+      function gatherFolder(folders) {
+        let r = []
+        for (const folder of folders) {
+          r.push(...folder.tracks.map(make))
+          if (folder.folders?.length) r.push(...gatherFolder(folder.folders))
+        }
+        return r
+      }
+      let list = [
+        ...($downloadTree.files ?? []).map(make),
+        ...gatherFolder($downloadTree.folders ?? [])
+      ]
+      if (q) list = list.filter(t => {
+        const { artist, title } = getTrackArtistTitle(t)
+        return title.toLowerCase().includes(q) || artist.toLowerCase().includes(q)
+      })
+      return applySort(list)
+    }
+
     // ── dl: modes — show tracks from download tree (may not be in library) ──
     if (navMode.startsWith('dl:file:')) {
       const filePath = navMode.slice(8)
@@ -358,6 +476,14 @@
       if (navMode.startsWith('artist:')) {
         const target = navMode.slice(7).toLowerCase()
         return getTrackArtistTitle(t).artist.toLowerCase().includes(target)
+      }
+      if (navMode.startsWith('album:')) {
+        const target = navMode.slice(6).toLowerCase()
+        return (t.album ?? '').toLowerCase() === target
+      }
+      if (navMode.startsWith('genre:')) {
+        const target = navMode.slice(6).toLowerCase()
+        return (t.genre ?? '').split(/[,;/]/).map(s => s.trim().toLowerCase()).includes(target)
       }
       if (navMode === 'duplicates') return dupesAll.has(t.path)
       if (navMode === 'all' && hideDupesAuto) return !dupesHidden.has(t.path)
@@ -487,6 +613,8 @@
   const ALL_COL_DEFS = [
     { key: 'title',        label: 'Titel'            },
     { key: 'artist',       label: 'Künstler'         },
+    { key: 'album',        label: 'Album'            },
+    { key: 'genre',        label: 'Genre'            },
     { key: 'album_artist', label: 'Albumkünstler'    },
     { key: 'folder',       label: 'Ordner'           },
     { key: 'ext',          label: 'Format'           },
@@ -497,8 +625,8 @@
     { key: 'comment',      label: 'Kanal'            },
     { key: 'mtime',        label: 'Geändert'         },
   ]
-  const COL_DEFAULTS  = { title: 180, artist: 120, album_artist: 110, folder: 100, ext: 40, duration: 46, lufs: 42, bpm: 38, bitrate: 40, comment: 110, mtime: 76 }
-  const COL_VIS_DEF   = { title: true, artist: true, album_artist: false, folder: false, ext: false, duration: true, lufs: true, bpm: true, bitrate: true, comment: true, mtime: false }
+  const COL_DEFAULTS  = { title: 180, artist: 120, album: 130, genre: 90, album_artist: 110, folder: 100, ext: 40, duration: 46, lufs: 42, bpm: 38, bitrate: 40, comment: 110, mtime: 76 }
+  const COL_VIS_DEF   = { title: true, artist: true, album: false, genre: false, album_artist: false, folder: false, ext: false, duration: true, lufs: true, bpm: true, bitrate: true, comment: false, mtime: false }
   const COL_ORDER_DEF = ALL_COL_DEFS.map(c => c.key)
 
   function _loadColState() {
@@ -817,6 +945,29 @@
     ctxMenu = null
   }
 
+  // ── AcoustID fingerprinting ───────────────────────────────────────────────
+  let identifyResult = $state(null)  // null | { title, artist, album, score, path, error }
+
+  $effect(() => {
+    if ($trackIdentified) {
+      identifyResult = $trackIdentified
+      trackIdentified.set(null)
+    }
+  })
+
+  function identifyTrack(track) {
+    identifyResult = null
+    send({ type: 'identify_track', path: track.path })
+    ctxMenu = null
+  }
+
+  function applyIdentifyResult() {
+    if (!identifyResult || identifyResult.error) return
+    send({ type: 'library_update_meta', path: identifyResult.path,
+           title: identifyResult.title, artist: identifyResult.artist })
+    identifyResult = null
+  }
+
   function analyzeSelected() {
     for (const path of selected) send({ type: 'enrich_track', path, force: true })
     ctxMenu = null
@@ -925,6 +1076,11 @@
           <span class="t-badge">{$dlHistory.length}</span>
         </button>
       {/if}
+      <button class="t-item {navMode === 'dl_recent' ? 'active' : ''}"
+              onclick={() => { if (!$downloadTreeLoaded) loadDlTree(); selectNav('dl_recent') }}>
+        <i class="ti ti-clock-down t-ico" aria-hidden="true"></i>
+        <span class="t-name">Neueste Downloads</span>
+      </button>
       {#if dupesAll.size > 0}
         <button class="t-item {navMode === 'duplicates' ? 'active' : ''}" onclick={() => selectNav('duplicates')}
                 title={dupeSourceMode === 'all' ? 'Duplikate in gesamter Bibliothek' : 'Duplikate im aktuellen Ordner'}>
@@ -973,7 +1129,214 @@
     <!-- Scrollable tree section -->
     <div class="nav-tree">
 
-    <!-- 1. MEIN COMPUTER -->
+    <!-- 0. ANGEHEFTET -->
+    {#if pinnedDlFolders.length > 0}
+      <div class="t-sec-hdr t-pinned-hdr">
+        <i class="ti ti-pin t-ico-sm" aria-hidden="true"></i>
+        <span class="t-sec-label">Angeheftet</span>
+      </div>
+      {#each pinnedDlFolders as pinned}
+        <div class="t-child {navMode === 'dl:' + pinned.path ? 'active' : ''}"
+             role="button" tabindex="0"
+             onclick={() => selectNav('dl:' + pinned.path)}
+             onkeydown={(e) => e.key === 'Enter' && selectNav('dl:' + pinned.path)}
+             title={pinned.name}>
+          <span class="t-toggle-ico" style="opacity:0">·</span>
+          <i class="ti ti-folder t-ico-sm" aria-hidden="true"></i>
+          <span class="t-name">{pinned.name}</span>
+          <button class="t-unpin-btn" onclick={(e) => { e.stopPropagation(); unpinDlFolder(pinned.path) }}
+                  title="Loslösen">✕</button>
+        </div>
+      {/each}
+    {/if}
+
+    <!-- 1. DOWNLOADS -->
+    <div class="t-sec-hdr" role="button" tabindex="0"
+         onclick={() => toggleSection('dl')}
+         onkeydown={(e) => e.key === 'Enter' && toggleSection('dl')}>
+      <span class="t-chevron" class:open={secDlOpen}>›</span>
+      <span class="t-sec-label">Downloads</span>
+      {#if $downloadTreeLoaded}
+        <span class="t-sec-badge">{dlTotalCount}</span>
+      {/if}
+      <span class="t-sec-action" title="Aktualisieren" role="button" tabindex="0"
+            onclick={(e) => { e.stopPropagation(); loadDlTree() }}
+            onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), loadDlTree())}>↺</span>
+    </div>
+    {#if secDlOpen}
+      {#if $downloadTreeLoaded}
+        <!-- Alle Downloads: root + subfolders combined view -->
+        <button class="t-child {navMode === 'dl_all' ? 'active' : ''}"
+                onclick={() => selectNav('dl_all')}
+                title="Alle heruntergeladenen Titel anzeigen">
+          <span class="t-toggle-ico" style="opacity:0">·</span>
+          <i class="ti ti-download t-ico-sm" aria-hidden="true"></i>
+          <span class="t-name">Alle Downloads</span>
+          <span class="t-badge">{dlTotalCount}</span>
+        </button>
+        {#snippet dlFolderNode(folder, depth)}
+          {@const allTracks = folder.tracks.map(f => ({ path: f.path, title: f.name, duration_sec: 0 }))}
+          {@const hasSubs = folder.folders?.length > 0}
+          {@const isExpanded = dlExpandedFolders.has(folder.path)}
+          <button class="t-child {navMode === 'dl:' + folder.path ? 'active' : ''}"
+                  style="padding-left: {8 + depth * 12}px"
+                  draggable="true"
+                  ondragstart={(e) => {
+                    e.dataTransfer.setData('application/x-ytdl-multi', JSON.stringify(allTracks))
+                    e.dataTransfer.effectAllowed = 'copy'
+                  }}
+                  onclick={() => selectNav('dl:' + folder.path)}
+                  oncontextmenu={(e) => onFolderCtx(e, folder.path)}
+                  title={folder.name + '\nDraggen: alle Tracks zur Queue'}>
+            {#if hasSubs}
+              <span class="t-toggle-ico dl-tog" onclick={(e) => { e.stopPropagation(); toggleDlFolder(folder.path) }}>
+                {isExpanded ? '−' : '+'}
+              </span>
+            {:else}
+              <span class="t-toggle-ico" style="opacity:0">·</span>
+            {/if}
+            <i class="ti ti-folder t-ico-sm" aria-hidden="true"></i>
+            <span class="t-name">{stripTrackNumber(folder.name)}</span>
+            {#if folder.tracks.length > 0}<span class="t-badge">{folder.tracks.length}</span>{/if}
+            <span role="button" tabindex="0"
+                    class="t-pin-btn {isDlPinned(folder.path) ? 'pinned' : ''}"
+                    onclick={(e) => { e.stopPropagation(); isDlPinned(folder.path) ? unpinDlFolder(folder.path) : pinDlFolder(folder) }}
+                    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); isDlPinned(folder.path) ? unpinDlFolder(folder.path) : pinDlFolder(folder) }}}
+                    title={isDlPinned(folder.path) ? 'Loslösen' : 'Anpinnen'}>
+              <i class="ti {isDlPinned(folder.path) ? 'ti-pin-filled' : 'ti-pin'}" aria-hidden="true"></i>
+            </span>
+          </button>
+          {#if hasSubs && isExpanded}
+            {#each folder.folders as sub}
+              {@render dlFolderNode(sub, depth + 1)}
+            {/each}
+          {/if}
+        {/snippet}
+
+        {#each filteredDlFolders as folder}
+          {@render dlFolderNode(folder, 0)}
+        {/each}
+        {#each filteredDlFiles as file}
+          <button class="t-child t-d2 {navMode === 'dl:file:' + file.path ? 'active' : ''}"
+                  onclick={() => selectNav('dl:file:' + file.path)} title={file.name}>
+            <i class="ti ti-music t-ico-sm" aria-hidden="true"></i>
+            <span class="t-name">{stripTrackNumber(file.name)}</span>
+          </button>
+        {/each}
+      {/if}
+    {/if}
+
+    <!-- 2. KÜNSTLER -->
+    <button class="t-sec-hdr" onclick={() => toggleSection('artist')}>
+      <span class="t-chevron" class:open={secArtistOpen}>›</span>
+      <span class="t-sec-label">Künstler</span>
+      <span class="t-sec-badge">{artists.length}</span>
+    </button>
+    {#if secArtistOpen}
+      {#if filteredArtists.length > 8}
+        <div class="artist-az">
+          {#each AZ_LETTERS as letter}
+            {@const has = filteredArtists.some(a => a.toUpperCase().startsWith(letter))}
+            <button class="az-btn {has ? '' : 'az-dim'}"
+                    onclick={() => has && jumpArtist(letter)}
+                    title={letter}>{letter}</button>
+          {/each}
+        </div>
+      {/if}
+      {#each filteredArtists as artist}
+        <button class="t-child {navMode === 'artist:' + artist.toLowerCase() ? 'active' : ''}"
+                onclick={() => selectNav('artist:' + artist.toLowerCase())}
+                data-aletter={artist[0]?.toLowerCase() ?? '#'}
+                title={artist}>
+          <i class="ti ti-user t-ico-sm" aria-hidden="true"></i>
+          <span class="t-name">{artist}</span>
+        </button>
+      {/each}
+    {/if}
+
+    <!-- 3. ALBEN -->
+    {#if albums.length > 0}
+    <button class="t-sec-hdr" onclick={() => toggleSection('album')}>
+      <span class="t-chevron" class:open={secAlbumOpen}>›</span>
+      <span class="t-sec-label">Alben</span>
+      <span class="t-sec-badge">{albums.length}</span>
+    </button>
+    {#if secAlbumOpen}
+      {#each filteredAlbums as album}
+        <button class="t-child {navMode === 'album:' + album.toLowerCase() ? 'active' : ''}"
+                onclick={() => selectNav('album:' + album.toLowerCase())}
+                title={album}>
+          <i class="ti ti-vinyl t-ico-sm" aria-hidden="true"></i>
+          <span class="t-name">{album}</span>
+        </button>
+      {/each}
+    {/if}
+    {/if}
+
+    <!-- 4. GENRES -->
+    {#if genres.length > 0}
+    <button class="t-sec-hdr" onclick={() => toggleSection('genre')}>
+      <span class="t-chevron" class:open={secGenreOpen}>›</span>
+      <span class="t-sec-label">Genres</span>
+      <span class="t-sec-badge">{genres.length}</span>
+    </button>
+    {#if secGenreOpen}
+      {#each filteredGenres as genre}
+        <button class="t-child {navMode === 'genre:' + genre.toLowerCase() ? 'active' : ''}"
+                onclick={() => selectNav('genre:' + genre.toLowerCase())}
+                title={genre}>
+          <i class="ti ti-tags t-ico-sm" aria-hidden="true"></i>
+          <span class="t-name">{genre}</span>
+        </button>
+      {/each}
+    {/if}
+    {/if}
+
+    <!-- 5. PLAYLISTEN -->
+    <div class="t-sec-hdr" role="button" tabindex="0"
+         onclick={() => toggleSection('playlist')}
+         onkeydown={(e) => e.key === 'Enter' && toggleSection('playlist')}>
+      <span class="t-chevron" class:open={secPlaylistOpen}>›</span>
+      <span class="t-sec-label">Playlisten</span>
+      <span class="t-sec-badge">{$playlists.length}</span>
+      <span class="t-sec-action" title="Queue als Playlist speichern" role="button" tabindex="0"
+            onclick={(e) => { e.stopPropagation(); saveQueueAsPlaylist() }}
+            onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), saveQueueAsPlaylist())}>+</span>
+    </div>
+    {#if secPlaylistOpen}
+      {#if $playlists.length === 0}
+        <div class="t-empty">Noch keine · + zum Speichern</div>
+      {:else if filteredPlaylists.length === 0}
+        <div class="t-empty">Keine Treffer</div>
+      {:else}
+        {#each filteredPlaylists as pl}
+          <div class="t-child t-pl-row {navMode === 'playlist:' + pl.path ? 'active' : ''}
+                      {dragOverPlaylist === pl.path ? 'pl-drop-hover' : ''}"
+               role="button" tabindex="0"
+               onclick={() => openPlaylistInLibrary(pl)}
+               oncontextmenu={(e) => onPlaylistCtx(e, pl)}
+               ondragover={(e) => { e.preventDefault(); dragOverPlaylist = pl.path }}
+               ondragleave={() => dragOverPlaylist = null}
+               ondrop={(e) => dropOnPlaylist(e, pl.path)}
+               title={pl.name}>
+            <i class="ti ti-list t-ico-sm" aria-hidden="true"></i>
+            <span class="t-name">{pl.name}</span>
+            {#if $playlistContent[pl.path]}
+              <span class="t-badge">{$playlistContent[pl.path].length}</span>
+            {:else if pl.track_count > 0}
+              <span class="t-badge">{pl.track_count}</span>
+            {/if}
+            <button class="t-pl-btn" onclick={(e) => { e.stopPropagation(); loadPlaylistToQueue(pl.path) }}
+                    title="In Queue laden">▶</button>
+            <button class="t-pl-btn t-pl-del" onclick={(e) => { e.stopPropagation(); deletePlaylist(pl.path) }}
+                    title="Löschen">✕</button>
+          </div>
+        {/each}
+      {/if}
+    {/if}
+
+
+    <!-- 6. MEIN COMPUTER -->
     <button class="t-sec-hdr" onclick={() => toggleSection('fs')}>
       <span class="t-chevron" class:open={secFsOpen}>›</span>
       <span class="t-sec-label">Mein Computer</span>
@@ -1058,127 +1421,6 @@
         {/each}
       {/if}
     {/if}
-
-    <!-- 2. KÜNSTLER -->
-    <button class="t-sec-hdr" onclick={() => toggleSection('artist')}>
-      <span class="t-chevron" class:open={secArtistOpen}>›</span>
-      <span class="t-sec-label">Künstler</span>
-      <span class="t-sec-badge">{artists.length}</span>
-    </button>
-    {#if secArtistOpen}
-      {#each filteredArtists as artist}
-        <button class="t-child {navMode === 'artist:' + artist.toLowerCase() ? 'active' : ''}"
-                onclick={() => selectNav('artist:' + artist.toLowerCase())}
-                title={artist}>
-          <i class="ti ti-user t-ico-sm" aria-hidden="true"></i>
-          <span class="t-name">{artist}</span>
-        </button>
-      {/each}
-    {/if}
-
-    <!-- 3. DOWNLOADS -->
-    <div class="t-sec-hdr" role="button" tabindex="0"
-         onclick={() => toggleSection('dl')}
-         onkeydown={(e) => e.key === 'Enter' && toggleSection('dl')}>
-      <span class="t-chevron" class:open={secDlOpen}>›</span>
-      <span class="t-sec-label">Downloads</span>
-      {#if $downloadTreeLoaded}
-        <span class="t-sec-badge">{$downloadTree.folders.length + $downloadTree.files.length}</span>
-      {/if}
-      <span class="t-sec-action" title="Aktualisieren" role="button" tabindex="0"
-            onclick={(e) => { e.stopPropagation(); loadDlTree() }}
-            onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), loadDlTree())}>↺</span>
-    </div>
-    {#if secDlOpen}
-      {#if $downloadTreeLoaded}
-        {#snippet dlFolderNode(folder, depth)}
-          {@const allTracks = folder.tracks.map(f => ({ path: f.path, title: f.name, duration_sec: 0 }))}
-          {@const hasSubs = folder.folders?.length > 0}
-          {@const isExpanded = dlExpandedFolders.has(folder.path)}
-          <button class="t-child {navMode === 'dl:' + folder.path ? 'active' : ''}"
-                  style="padding-left: {8 + depth * 12}px"
-                  draggable="true"
-                  ondragstart={(e) => {
-                    e.dataTransfer.setData('application/x-ytdl-multi', JSON.stringify(allTracks))
-                    e.dataTransfer.effectAllowed = 'copy'
-                  }}
-                  onclick={() => selectNav('dl:' + folder.path)}
-                  oncontextmenu={(e) => onFolderCtx(e, folder.path)}
-                  title={folder.name + '\nDraggen: alle Tracks zur Queue'}>
-            {#if hasSubs}
-              <span class="t-toggle-ico dl-tog" onclick={(e) => { e.stopPropagation(); toggleDlFolder(folder.path) }}>
-                {isExpanded ? '−' : '+'}
-              </span>
-            {:else}
-              <span class="t-toggle-ico" style="opacity:0">·</span>
-            {/if}
-            <i class="ti ti-folder t-ico-sm" aria-hidden="true"></i>
-            <span class="t-name">{stripTrackNumber(folder.name)}</span>
-            {#if folder.tracks.length > 0}<span class="t-badge">{folder.tracks.length}</span>{/if}
-          </button>
-          {#if hasSubs && isExpanded}
-            {#each folder.folders as sub}
-              {@render dlFolderNode(sub, depth + 1)}
-            {/each}
-          {/if}
-        {/snippet}
-
-        {#each filteredDlFolders as folder}
-          {@render dlFolderNode(folder, 0)}
-        {/each}
-        {#each filteredDlFiles as file}
-          <button class="t-child t-d2 {navMode === 'dl:file:' + file.path ? 'active' : ''}"
-                  onclick={() => selectNav('dl:file:' + file.path)} title={file.name}>
-            <i class="ti ti-music t-ico-sm" aria-hidden="true"></i>
-            <span class="t-name">{stripTrackNumber(file.name)}</span>
-          </button>
-        {/each}
-      {/if}
-    {/if}
-
-    <!-- 4. PLAYLISTEN -->
-    <div class="t-sec-hdr" role="button" tabindex="0"
-         onclick={() => toggleSection('playlist')}
-         onkeydown={(e) => e.key === 'Enter' && toggleSection('playlist')}>
-      <span class="t-chevron" class:open={secPlaylistOpen}>›</span>
-      <span class="t-sec-label">Playlisten</span>
-      <span class="t-sec-badge">{$playlists.length}</span>
-      <span class="t-sec-action" title="Queue als Playlist speichern" role="button" tabindex="0"
-            onclick={(e) => { e.stopPropagation(); saveQueueAsPlaylist() }}
-            onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), saveQueueAsPlaylist())}>+</span>
-    </div>
-    {#if secPlaylistOpen}
-      {#if $playlists.length === 0}
-        <div class="t-empty">Noch keine · + zum Speichern</div>
-      {:else if filteredPlaylists.length === 0}
-        <div class="t-empty">Keine Treffer</div>
-      {:else}
-        {#each filteredPlaylists as pl}
-          <div class="t-child t-pl-row {navMode === 'playlist:' + pl.path ? 'active' : ''}
-                      {dragOverPlaylist === pl.path ? 'pl-drop-hover' : ''}"
-               role="button" tabindex="0"
-               onclick={() => openPlaylistInLibrary(pl)}
-               oncontextmenu={(e) => onPlaylistCtx(e, pl)}
-               ondragover={(e) => { e.preventDefault(); dragOverPlaylist = pl.path }}
-               ondragleave={() => dragOverPlaylist = null}
-               ondrop={(e) => dropOnPlaylist(e, pl.path)}
-               title={pl.name}>
-            <i class="ti ti-list t-ico-sm" aria-hidden="true"></i>
-            <span class="t-name">{pl.name}</span>
-            {#if $playlistContent[pl.path]}
-              <span class="t-badge">{$playlistContent[pl.path].length}</span>
-            {:else if pl.track_count > 0}
-              <span class="t-badge">{pl.track_count}</span>
-            {/if}
-            <button class="t-pl-btn" onclick={(e) => { e.stopPropagation(); loadPlaylistToQueue(pl.path) }}
-                    title="In Queue laden">▶</button>
-            <button class="t-pl-btn t-pl-del" onclick={(e) => { e.stopPropagation(); deletePlaylist(pl.path) }}
-                    title="Löschen">✕</button>
-          </div>
-        {/each}
-      {/if}
-    {/if}
-
 
     </div><!-- /nav-tree -->
 
@@ -1358,6 +1600,10 @@
                     </span>
                   {:else if col.key === 'artist'}
                     <span class="cell c-artist" style="width:{colWidths.artist}px" title={at.artist}>{at.artist}</span>
+                  {:else if col.key === 'album'}
+                    <span class="cell c-folder" style="width:{colWidths.album}px" title={track.album || ''}>{track.album || ''}</span>
+                  {:else if col.key === 'genre'}
+                    <span class="cell c-folder" style="width:{colWidths.genre}px" title={track.genre || ''}>{track.genre || ''}</span>
                   {:else if col.key === 'album_artist'}
                     <span class="cell c-folder" style="width:{colWidths.album_artist}px" title={track.album_artist || ''}>{track.album_artist || ''}</span>
                   {:else if col.key === 'folder'}
@@ -1406,6 +1652,33 @@
 
 {#if betterVersionTrack}
   <BetterVersionDialog track={betterVersionTrack} onclose={() => betterVersionTrack = null} />
+{/if}
+
+{#if identifyResult}
+  <div class="id-overlay" onclick={() => identifyResult = null} role="presentation">
+    <div class="id-dialog" onclick={(e) => e.stopPropagation()} role="dialog">
+      <div class="id-title">AcoustID — Fingerprint-Erkennung</div>
+      {#if identifyResult.error}
+        <div class="id-error">{identifyResult.error}</div>
+      {:else}
+        <div class="id-score">
+          Match-Score: {Math.round((identifyResult.score ?? 0) * 100)}%
+          {#if identifyResult._source}
+            <span class="id-source">via {identifyResult._source}</span>
+          {/if}
+        </div>
+        <div class="id-field"><span class="id-lbl">Titel</span><span class="id-val">{identifyResult.title || '—'}</span></div>
+        <div class="id-field"><span class="id-lbl">Künstler</span><span class="id-val">{identifyResult.artist || '—'}</span></div>
+        <div class="id-field"><span class="id-lbl">Album</span><span class="id-val">{identifyResult.album || '—'}</span></div>
+      {/if}
+      <div class="id-btns">
+        <button class="id-cancel" onclick={() => identifyResult = null}>Schließen</button>
+        {#if !identifyResult.error}
+          <button class="id-apply" onclick={applyIdentifyResult}>Metadaten übernehmen</button>
+        {/if}
+      </div>
+    </div>
+  </div>
 {/if}
 
 {#if showDupeScan}
@@ -1511,6 +1784,9 @@
       <button disabled title="Datei ist korrupt oder nicht lesbar" style="opacity:0.35;cursor:not-allowed">Track analysieren (BPM · LUFS)</button>
     {:else}
       <button onclick={() => analyzeTrack(ctxMenu.track)}>Track analysieren (BPM · LUFS)</button>
+    {/if}
+    {#if $acoustidApiKey}
+      <button onclick={() => identifyTrack(ctxMenu.track)}>🔍 Fingerprint-Erkennung (AcoustID)</button>
     {/if}
     <button onclick={() => openBetterVersion(ctxMenu.track)}>Bessere Version suchen</button>
     <button onclick={() => openMetaEdit(ctxMenu.track)}>Metadaten bearbeiten</button>
@@ -1683,6 +1959,44 @@
     font-variant-numeric: tabular-nums;
   }
   .t-child.active .t-badge { color: var(--c-accent); }
+
+  /* ── Angeheftet-Header ─────────────────────────────────────────────────── */
+  .t-pinned-hdr {
+    cursor: default;
+    margin-top: 4px;
+  }
+  .t-pinned-hdr:hover { color: var(--c-tx5); }
+  .t-unpin-btn {
+    opacity: 0; background: none; border: none; cursor: pointer;
+    padding: 0 2px; font-size: 11px; color: var(--c-tx5); flex-shrink: 0;
+  }
+  .t-child:hover .t-unpin-btn { opacity: 0.5; }
+  .t-unpin-btn:hover { opacity: 1 !important; color: #e05050; }
+
+  /* ── Pin-Button auf Download-Ordnern ───────────────────────────────────── */
+  .t-pin-btn {
+    opacity: 0; background: none; border: none; cursor: pointer;
+    padding: 0 2px; font-size: 11px; color: var(--c-tx5); flex-shrink: 0;
+    transition: opacity .15s;
+  }
+  .t-child:hover .t-pin-btn { opacity: 0.45; }
+  .t-pin-btn:hover { opacity: 1 !important; color: var(--c-tx2); }
+  .t-pin-btn.pinned { opacity: 1; color: var(--c-accent); }
+
+  /* ── A-Z Buchstabenstreifen (Künstler) ─────────────────────────────────── */
+  .artist-az {
+    display: flex; flex-wrap: wrap; gap: 1px;
+    padding: 4px 8px 5px;
+    border-bottom: 1px solid var(--c-br1);
+  }
+  .az-btn {
+    width: 17px; height: 15px; font-size: 9px; font-weight: 700;
+    background: none; border: none; cursor: pointer;
+    color: var(--c-accent); border-radius: 2px; padding: 0;
+    line-height: 1; letter-spacing: 0;
+  }
+  .az-btn:hover { background: var(--c-bg3); }
+  .az-btn.az-dim { color: var(--c-tx5); cursor: default; opacity: 0.3; }
 
   .t-loading { padding: 4px 16px; font-size: 10px; color: var(--c-tx5); }
   .t-empty   { padding: 4px 16px; font-size: 10px; color: var(--c-tx5); font-style: italic; }
@@ -2272,4 +2586,27 @@
     transition: color .1s;
   }
   .nav-search-clear:hover { color: var(--c-accent); }
+
+  /* ── AcoustID identify dialog ─────────────────────────────────────────── */
+  .id-overlay {
+    position: fixed; inset: 0; z-index: 10000;
+    background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center;
+  }
+  .id-dialog {
+    background: var(--c-bg); border: 1px solid var(--c-br2); border-radius: 6px;
+    padding: 20px 24px; min-width: 320px; max-width: 460px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.7);
+  }
+  .id-title   { font-size: 13px; font-weight: 600; color: var(--c-tx1); margin-bottom: 12px; }
+  .id-score   { font-size: 10px; color: var(--c-accent); margin-bottom: 10px; }
+  .id-source  { color: var(--c-tx5); margin-left: 6px; }
+  .id-error   { font-size: 11px; color: var(--c-red); margin-bottom: 12px; line-height: 1.5; }
+  .id-field   { display: flex; gap: 8px; align-items: baseline; margin-bottom: 6px; }
+  .id-lbl     { font-size: 10px; color: var(--c-tx6); width: 56px; flex-shrink: 0; }
+  .id-val     { font-size: 12px; color: var(--c-tx2); }
+  .id-btns    { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+  .id-cancel  { background: none; border: 1px solid var(--c-br2); border-radius: 3px; color: var(--c-tx5); font-size: 11px; padding: 5px 14px; cursor: pointer; }
+  .id-cancel:hover { border-color: var(--c-tx4); color: var(--c-tx2); }
+  .id-apply   { background: var(--c-accent); border: none; border-radius: 3px; color: #fff; font-size: 11px; padding: 5px 14px; cursor: pointer; }
+  .id-apply:hover { background: var(--c-accent2); }
 </style>

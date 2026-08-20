@@ -34,6 +34,7 @@ bin/yt-dlp.exe
 
 # ── Dev / Tools ───────────────────────────────────────────────────────────────
 4_Dev-Daten/
+.claude/
 *.tmp
 *.log
 .env

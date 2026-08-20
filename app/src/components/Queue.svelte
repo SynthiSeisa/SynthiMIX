@@ -1,6 +1,6 @@
 <script>
   import { get } from 'svelte/store'
-  import { queue, playerState, library, playlists, playMode, send, automixStatus, introSkipPaths, settings, appSettings, skipNextCrossfade, autoRemovePlayed, livePositionMs, selectionOwner } from '../stores/ws.js'
+  import { queue, playerState, library, playlists, playMode, send, automixStatus, introSkipPaths, settings, appSettings, skipNextCrossfade, autoRemovePlayed, livePositionMs, selectionOwner, radioEnabled, radioStatus, lastfmApiKey } from '../stores/ws.js'
 
   // ── Shuffle / Repeat ────────────────────────────────────────────────────────
   const shuffle = $derived($playMode.shuffle)
@@ -407,6 +407,14 @@
     {#if $automixStatus}
       <span class="am-status">{$automixStatus}</span>
     {/if}
+    <button class="radio-btn {$radioEnabled ? 'on' : ''}"
+            title={$lastfmApiKey ? ($radioEnabled ? 'Radio-Modus deaktivieren' : 'Radio-Modus: Queue automatisch mit ähnlichen Tracks füllen') : 'Last.fm API-Key in Einstellungen → Dienste eintragen'}
+            onclick={() => send({ type: 'set_radio', enabled: !$radioEnabled })}>
+      ⊹ Radio
+    </button>
+    {#if $radioStatus}
+      <span class="radio-added" title="Ähnlich zu: {$radioStatus.similar_to}">+ {$radioStatus.title}</span>
+    {/if}
 
     <div class="header-actions">
       <button class="hdr-btn {shuffle ? 'active' : ''}" onclick={toggleShuffle} title="Zufallswiedergabe">⇄</button>
@@ -611,23 +619,23 @@
   }
 
   .queue-title {
-    font-size: 9px;
+    font-size: 10px;
     font-weight: 700;
-    letter-spacing: 1.5px;
+    letter-spacing: 1.2px;
     color: var(--c-tx5);
     text-transform: uppercase;
   }
 
   .queue-count {
-    font-size: 9px;
+    font-size: 10px;
     color: var(--c-tx6);
     background: var(--c-bg5);
     border-radius: 8px;
     padding: 1px 5px;
   }
   .queue-dur {
-    font-size: 9px;
-    color: var(--c-tx7);
+    font-size: 10px;
+    color: var(--c-tx6);
     font-variant-numeric: tabular-nums;
   }
 
@@ -925,6 +933,19 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .radio-btn {
+    font-size: 10px; padding: 2px 7px; border-radius: 3px; border: 1px solid var(--c-br2);
+    background: none; color: var(--c-tx6); cursor: pointer; flex-shrink: 0;
+    transition: color .15s, border-color .15s, background .15s;
+  }
+  .radio-btn:hover { color: var(--c-accent); border-color: var(--c-accent); }
+  .radio-btn.on { background: var(--c-accent); color: #fff; border-color: var(--c-accent); }
+  .radio-added {
+    font-size: 10px; color: var(--c-green); flex-shrink: 0;
+    max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    animation: fadeIn .3s ease;
+  }
+  @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
   /* ── Custom dialogs (same design as Library.svelte) ────────────────────── */
   .meta-overlay { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:9000; display:flex; align-items:center; justify-content:center; }
   .meta-dialog  { background:var(--c-bg5); border:1px solid var(--c-br3); border-radius:6px; padding:20px; min-width:300px; max-width:400px; }

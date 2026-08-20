@@ -2,7 +2,8 @@
 YT-Downloader backend — FastAPI + WebSocket
 Replaces the PyQt5 main thread with a clean async server.
 """
-import asyncio, json, os, sys, math, subprocess, re, base64, random, time
+import asyncio, json, os, sys, math, subprocess, re, base64, random, time, shutil, zipfile, tempfile
+import urllib.request as _urllib_req
 from collections import deque
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -72,6 +73,24 @@ if _data_dir_arg:
     BASE_DIR.mkdir(parents=True, exist_ok=True)
 else:
     BASE_DIR = Path(__file__).parent.parent
+
+FPCALC_LOCAL  = BASE_DIR / "fpcalc.exe"   # downloaded via Settings
+SPOTDL_LOCAL  = BASE_DIR / "spotdl.exe"   # downloaded via Settings
+
+def _find_fpcalc() -> str | None:
+    """Return path to fpcalc executable or None."""
+    if FPCALC_LOCAL.exists():
+        return str(FPCALC_LOCAL)
+    found = shutil.which('fpcalc')
+    if found:
+        return found
+    for p in [
+        r'C:\Program Files\Chromaprint\fpcalc.exe',
+        r'C:\Program Files (x86)\Chromaprint\fpcalc.exe',
+    ]:
+        if os.path.exists(p):
+            return p
+    return None
 
 QUEUE_FILE    = BASE_DIR / "queue.json"
 SETTINGS_FILE = BASE_DIR / "settings.json"
@@ -168,6 +187,7 @@ async def push_queue():
                      "current_idx": _state["current_idx"]})
     if _remote_clients:
         asyncio.create_task(_broadcast_remote_state())
+    asyncio.create_task(_check_radio_queue())
 
 async def push_player():
     await broadcast({
@@ -362,6 +382,11 @@ def load_settings():
     _state["remote_autostart"]        = bool(raw.get("remote_autostart", False))
     _state["normalize_volume"]        = bool(raw.get("normalize_volume", True))
     _state["target_lufs"]             = float(raw.get("target_lufs", -10.0))
+    _state["spotify_client_id"]       = str(raw.get("spotify_client_id", ""))
+    _state["spotify_client_secret"]   = str(raw.get("spotify_client_secret", ""))
+    _state["lastfm_api_key"]          = str(raw.get("lastfm_api_key", ""))
+    _state["acoustid_api_key"]        = str(raw.get("acoustid_api_key", ""))
+    _state["radio_enabled"]           = bool(raw.get("radio_enabled", False))
 
 def save_settings():
     _save_json(SETTINGS_FILE, {
@@ -382,6 +407,11 @@ def save_settings():
         "remote_autostart":        _state.get("remote_autostart", False),
         "normalize_volume":        _state.get("normalize_volume", True),
         "target_lufs":             _state.get("target_lufs", -10.0),
+        "spotify_client_id":       _state.get("spotify_client_id", ""),
+        "spotify_client_secret":   _state.get("spotify_client_secret", ""),
+        "lastfm_api_key":          _state.get("lastfm_api_key", ""),
+        "acoustid_api_key":        _state.get("acoustid_api_key", ""),
+        "radio_enabled":           _state.get("radio_enabled", False),
     })
 
 def load_history():
@@ -530,6 +560,7 @@ def _estimate_bpm_sync(path: str) -> int:
 def _probe_sync(path: str) -> dict:
     result = {"duration_sec": 0.0, "bitrate_kbps": 0, "bpm": 0,
               "title": Path(path).stem, "artist": "", "album_artist": "",
+              "album": "", "genre": "",
               "comment": "", "ext": Path(path).suffix.lstrip('.').lower()}
     try:
         r = subprocess.run(
@@ -546,6 +577,8 @@ def _probe_sync(path: str) -> dict:
         result["artist"]  = tags.get("artist") or tags.get("album_artist") or ""
         result["comment"]      = tags.get("comment") or tags.get("description") or ""
         result["album_artist"] = tags.get("album_artist") or tags.get("albumartist") or ""
+        result["album"]        = tags.get("album") or ""
+        result["genre"]        = tags.get("genre") or ""
         if result["duration_sec"] > 0:
             return result
     except Exception:
@@ -574,6 +607,8 @@ def _probe_sync(path: str) -> dict:
                 if comms and hasattr(comms[0], 'text'):
                     result["comment"] = str(comms[0].text[0]) if comms[0].text else ''
             result["album_artist"] = _t('TPE2','album_artist','aART','\xa9aAR')
+            result["album"]        = _t('TALB','album','\xa9alb')
+            result["genre"]        = _t('TCON','genre','\xa9gen')
             bpm_s = _t('TBPM','bpm')
             try: result["bpm"] = int(float(bpm_s)) if bpm_s else 0
             except ValueError: pass
@@ -592,7 +627,7 @@ async def _analyze_library_meta_task():
         return
     _analyze_running = True
     _analyze_cancel  = False
-    loop    = asyncio.get_event_loop()
+    loop    = asyncio.get_running_loop()
     try:
         tracks  = list(_state["library"])
         pending = [lt for lt in tracks if lt.get("path") and os.path.exists(lt["path"])
@@ -806,6 +841,29 @@ def _waveform_sync(path: str, bars: int) -> list[float]:
     except Exception:
         return []
 
+def _find_spotdl_cmd() -> list[str] | None:
+    """Return spotdl command as a list, or None if not found."""
+    if SPOTDL_LOCAL.exists():
+        return [str(SPOTDL_LOCAL)]
+    exe = shutil.which("spotdl")
+    if exe:
+        return [exe]
+    for py in ("py", "python", "python3"):
+        p = shutil.which(py)
+        if not p:
+            continue
+        try:
+            r = subprocess.run([p, "-m", "spotdl", "--version"],
+                               capture_output=True, timeout=5, creationflags=_NO_WINDOW)
+            if r.returncode == 0:
+                return [p, "-m", "spotdl"]
+        except Exception:
+            pass
+    return None
+
+def _is_spotify(url: str) -> bool:
+    return "open.spotify.com" in url or "spotify.link" in url
+
 async def _check_tools(ws: WebSocket):
     loop = asyncio.get_running_loop()
     info: dict = {}
@@ -824,6 +882,19 @@ async def _check_tools(ws: WebSocket):
             info["ffmpeg_version"] = m.group(1) if m else first[:40]
         except Exception:
             info["ffmpeg_version"] = None
+        try:
+            spotdl = _find_spotdl_cmd()
+            if spotdl:
+                r = subprocess.run(spotdl + ["--version"], capture_output=True,
+                                   text=True, encoding="utf-8", errors="replace",
+                                   timeout=8, creationflags=_NO_WINDOW)
+                m = re.search(r'(\d+\.\d+[\.\d]*)', r.stdout + r.stderr)
+                info["spotdl_version"] = m.group(1) if m else "installiert"
+            else:
+                info["spotdl_version"] = None
+        except Exception:
+            info["spotdl_version"] = None
+        info["fpcalc_found"] = bool(_find_fpcalc())
     await loop.run_in_executor(None, _sync)
     try:
         await ws.send_text(json.dumps({"type": "tools_info", **info}))
@@ -1262,6 +1333,357 @@ def _normalize_one_sync(path: str, target_lufs: float, target_tp: float) -> bool
         except Exception: pass
 
 
+# ── Radio mode ────────────────────────────────────────────────────────────────
+_radio_fill_running = False
+
+async def _lastfm_similar(artist: str, title: str, api_key: str, limit: int = 30) -> list[dict]:
+    import urllib.request as _req, urllib.parse as _parse
+    params = _parse.urlencode({
+        'method': 'track.getSimilar', 'artist': artist, 'track': title,
+        'api_key': api_key, 'format': 'json', 'limit': limit, 'autocorrect': 1,
+    })
+    url = f"https://ws.audioscrobbler.com/2.0/?{params}"
+    loop = asyncio.get_running_loop()
+    def _fetch():
+        try:
+            req = _req.Request(url, headers={'User-Agent': 'SynthiMIX/1.4'})
+            with _req.urlopen(req, timeout=8) as r:
+                return json.loads(r.read().decode())
+        except Exception:
+            return {}
+    data = await loop.run_in_executor(None, _fetch)
+    tracks = data.get('similartracks', {}).get('track', [])
+    return [{'artist': t.get('artist', {}).get('name', '') if isinstance(t.get('artist'), dict) else str(t.get('artist', '')),
+             'title': t.get('name', '')} for t in tracks]
+
+async def _radio_fill():
+    global _radio_fill_running
+    if _radio_fill_running:
+        return
+    _radio_fill_running = True
+    try:
+        ci = _state['current_idx']
+        q  = _state['queue']
+        if ci < 0 or ci >= len(q):
+            return
+
+        np = q[ci]
+        raw_title = np.get('title', '') or ''
+        if ' - ' in raw_title:
+            parts  = raw_title.split(' - ', 1)
+            artist = parts[0].strip()
+            title  = parts[1].strip()
+        else:
+            artist = np.get('artist', '') or ''
+            title  = raw_title
+        if not title:
+            return
+
+        in_queue = {t.get('path', '') for t in q}
+        lib = _state.get('library', [])
+
+        # Bug fix: all tracks already in queue → nothing to add, stop trying
+        candidates_total = [lt for lt in lib if lt.get('path', '') not in in_queue
+                            and float(lt.get('duration_sec', 0) or 0) > 60]
+        if not candidates_total:
+            return
+
+        best_match: dict | None = None
+        api_key = _state.get('lastfm_api_key', '').strip()
+        if api_key:
+            similar = await _lastfm_similar(artist, title, api_key)
+            if similar:
+                for s in similar:
+                    s_artist = s['artist'].lower()
+                    s_title  = s['title'].lower()
+                    best: dict | None = None
+                    best_score = 0.0
+                    for lt in candidates_total:
+                        lt_title  = (lt.get('title')  or lt.get('name', '') or '').lower()
+                        lt_artist = (lt.get('artist') or '').lower()
+                        t_score = SequenceMatcher(None, s_title, lt_title).ratio()
+                        a_score = SequenceMatcher(None, s_artist, lt_artist).ratio() if lt_artist else 0.5
+                        score   = t_score * 0.7 + a_score * 0.3
+                        if score > best_score and t_score > 0.7:
+                            best_score = score
+                            best = lt
+                    if best:
+                        best_match = best
+                        break
+
+        # Fallback: random track from library not in queue
+        if not best_match:
+            best_match = random.choice(candidates_total)
+
+        track = {
+            'path':         best_match.get('path', ''),
+            'title':        best_match.get('title') or best_match.get('name', ''),
+            'duration_sec': float(best_match.get('duration_sec', 0) or 0),
+            'lufs':         float(best_match.get('lufs', -99.0) or -99.0),
+            'bpm':          int(best_match.get('bpm', 0) or 0),
+            'bitrate_kbps': int(best_match.get('bitrate_kbps', 0) or 0),
+            'played':       False,
+        }
+        _state['queue'].append(track)
+        save_queue()
+        await push_queue()
+        await broadcast({'type': 'radio_added',
+                         'title': track['title'],
+                         'similar_to': f"{artist} – {title}"})
+    finally:
+        _radio_fill_running = False
+
+async def _check_radio_queue():
+    if not _state.get('radio_enabled'):
+        return
+    ci = _state['current_idx']
+    q  = _state['queue']
+    remaining = sum(1 for t in q[max(0, ci+1):] if not t.get('played', False))
+    if remaining < 3:
+        asyncio.create_task(_radio_fill())
+
+# ── fpcalc auto-download ──────────────────────────────────────────────────────
+_FPCALC_URL = "https://github.com/acoustid/chromaprint/releases/download/v1.5.1/chromaprint-fpcalc-1.5.1-windows-x86_64.zip"
+
+async def _download_fpcalc(ws):
+    async def _send(t, **kw):
+        try: await ws.send_text(json.dumps({"type": t, **kw}))
+        except Exception: pass
+
+    await _send("fpcalc_install_progress", text="Wird heruntergeladen…")
+    loop = asyncio.get_running_loop()
+    try:
+        def _do_download():
+            import tempfile as _tf
+            with _tf.NamedTemporaryFile(suffix='.zip', delete=False) as _f:
+                tmp = Path(_f.name)
+            _urllib_req.urlretrieve(_FPCALC_URL, tmp)
+            with zipfile.ZipFile(tmp) as zf:
+                names = zf.namelist()
+                exe_name = next((n for n in names if n.lower().endswith('fpcalc.exe')), None)
+                if not exe_name:
+                    raise FileNotFoundError("fpcalc.exe not in zip")
+                with zf.open(exe_name) as src, open(FPCALC_LOCAL, 'wb') as dst:
+                    shutil.copyfileobj(src, dst)
+            tmp.unlink(missing_ok=True)
+        await loop.run_in_executor(None, _do_download)
+    except Exception as e:
+        await _send("fpcalc_install_error", text=str(e))
+        return
+
+    await _send("fpcalc_install_done")
+    # Re-broadcast tools_info so UI updates fpcalc_found flag
+    await _send("tools_info", fpcalc_found=True)
+
+# ── spotdl auto-install ───────────────────────────────────────────────────────
+# Standalone-Exe statt "pip install": im gepackten Betrieb ist sys.executable
+# backend.exe (kein pip), und ein System-Python ist auf fremden PCs nicht
+# vorausgesetzt. Der Download läuft damit in Dev und Release identisch.
+_SPOTDL_API      = "https://api.github.com/repos/spotDL/spotify-downloader/releases/latest"
+_SPOTDL_FALLBACK = "https://github.com/spotDL/spotify-downloader/releases/download/v4.5.2/spotdl-4.5.2-win32.exe"
+
+def _spotdl_asset_url() -> str:
+    """Neueste Windows-Exe aus der GitHub-Release-API, sonst gepinnte Version."""
+    try:
+        req = _urllib_req.Request(_SPOTDL_API, headers={"User-Agent": "SynthiMIX"})
+        with _urllib_req.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8", errors="replace"))
+        for a in data.get("assets", []):
+            if a.get("name", "").lower().endswith("-win32.exe"):
+                return a["browser_download_url"]
+    except Exception:
+        pass
+    return _SPOTDL_FALLBACK
+
+async def _install_spotdl(ws):
+    async def _send(t, **kw):
+        try: await ws.send_text(json.dumps({"type": t, **kw}))
+        except Exception: pass
+
+    await _send("spotdl_install_progress", text="Suche Download…")
+    loop = asyncio.get_running_loop()
+    last_pct = -1
+
+    def _on_block(done_blocks, block_size, total):
+        nonlocal last_pct
+        if total <= 0:
+            return
+        pct = min(100, int(done_blocks * block_size * 100 / total))
+        if pct != last_pct and pct % 5 == 0:
+            last_pct = pct
+            mb = total / 1024 / 1024
+            asyncio.run_coroutine_threadsafe(
+                _send("spotdl_install_progress", text=f"Lädt… {pct}% von {mb:.0f} MB"), loop)
+
+    try:
+        url = await loop.run_in_executor(None, _spotdl_asset_url)
+
+        def _do_install():
+            tmp = SPOTDL_LOCAL.with_suffix(".part")
+            _urllib_req.urlretrieve(url, tmp, _on_block)
+            # Erst nach vollständigem Download an den finalen Platz — ein
+            # abgebrochener Download soll nicht als "installiert" gelten.
+            tmp.replace(SPOTDL_LOCAL)
+        await loop.run_in_executor(None, _do_install)
+    except Exception as e:
+        SPOTDL_LOCAL.with_suffix(".part").unlink(missing_ok=True)
+        await _send("spotdl_install_error", text=str(e))
+        return
+
+    # Detect version after install
+    cmd = _find_spotdl_cmd()
+    version = None
+    if cmd:
+        try:
+            r = subprocess.run(cmd + ["--version"], capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               timeout=8, creationflags=_NO_WINDOW)
+            m = re.search(r'(\d+\.\d+[\.\d]*)', r.stdout + r.stderr)
+            version = m.group(1) if m else "installiert"
+        except Exception:
+            version = "installiert"
+    await _send("spotdl_install_done", version=version)
+
+# ── AcoustID fingerprinting ───────────────────────────────────────────────────
+async def _acoustid_identify(path: str) -> dict:
+    import urllib.request as _req, urllib.parse as _parse
+    api_key = _state.get('acoustid_api_key', '').strip()
+    if not api_key:
+        return {'error': 'Kein AcoustID API-Key konfiguriert (Einstellungen → Dienste)'}
+
+    fpcalc = _find_fpcalc()
+    if not fpcalc:
+        return {'error': 'fpcalc nicht gefunden. In den Einstellungen → Dienste → AcoustID installieren.'}
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            fpcalc, '-json', path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            creationflags=_NO_WINDOW)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        fp_data = json.loads(out.decode(errors='replace'))
+    except asyncio.TimeoutError:
+        return {'error': 'fpcalc Timeout — Datei zu groß oder kaputt'}
+    except Exception as e:
+        return {'error': f'fpcalc Fehler: {e}'}
+
+    fingerprint = fp_data.get('fingerprint', '')
+    duration    = int(fp_data.get('duration', 0))
+    if not fingerprint:
+        return {'error': 'Kein Fingerprint generiert'}
+
+    loop = asyncio.get_running_loop()
+    _UA = 'SynthiMIX/1.4 (synthiseisa@gmail.com)'
+
+    params = _parse.urlencode({
+        'client': api_key, 'fingerprint': fingerprint, 'duration': duration,
+        'meta': 'recordings+releasegroups+tracks',
+    })
+    url = f"https://api.acoustid.org/v2/lookup?{params}"
+
+    def _fetch(u, extra_headers=None):
+        try:
+            headers = {'User-Agent': _UA}
+            if extra_headers:
+                headers.update(extra_headers)
+            req = _req.Request(u, headers=headers)
+            with _req.urlopen(req, timeout=10) as r:
+                return json.loads(r.read().decode())
+        except Exception as e:
+            return {'error': str(e)}
+
+    data = await loop.run_in_executor(None, _fetch, url)
+    if 'error' in data:
+        return {'error': f'AcoustID API: {data["error"]}'}
+
+    results = data.get('results', [])
+    if not results:
+        return {'error': 'Kein Match bei AcoustID gefunden'}
+
+    best  = max(results, key=lambda r: r.get('score', 0))
+    score = best.get('score', 0)
+    recs  = best.get('recordings', [])
+
+    # Pick a recording that has at least a title
+    rec = next((r for r in recs if r.get('title')), recs[0] if recs else None)
+
+    # Fallback: recording ID present but no title → fetch directly from MusicBrainz
+    if rec and not rec.get('title') and rec.get('id'):
+        mb_id  = rec['id']
+        mb_url = f"https://musicbrainz.org/ws/2/recording/{mb_id}?inc=artists+releases+release-groups&fmt=json"
+        mb = await loop.run_in_executor(None, _fetch, mb_url)
+        if mb and 'id' in mb:
+            ac = mb.get('artist-credit', [])
+            rels = mb.get('releases', [])
+            rec = {
+                'title':   mb.get('title', ''),
+                'artists': [{'name': a['artist']['name']} for a in ac if 'artist' in a],
+                'releasegroups': [{'title': rels[0]['title']}] if rels else [],
+            }
+
+    if not rec or not rec.get('title'):
+        # Last-resort: MusicBrainz text search via existing library tags
+        lib_track = next((t for t in _state.get('library', []) if t.get('path') == path), None)
+        q_title  = lib_track.get('title', '')  if lib_track else ''
+        q_artist = lib_track.get('artist', '') if lib_track else ''
+        if q_title or q_artist:
+            parts = []
+            if q_title:  parts.append(f'recording:"{q_title}"')
+            if q_artist: parts.append(f'artist:"{q_artist}"')
+            mb_q   = _parse.urlencode({'query': ' AND '.join(parts), 'limit': '1', 'fmt': 'json'})
+            mb_url = f"https://musicbrainz.org/ws/2/recording/?{mb_q}"
+            mb = await loop.run_in_executor(None, _fetch, mb_url)
+            mb_recs = (mb or {}).get('recordings', [])
+            if mb_recs:
+                r0 = mb_recs[0]
+                ac   = r0.get('artist-credit', [])
+                rels = r0.get('releases', [])
+                rec  = {
+                    'title':        r0.get('title', ''),
+                    'artists':      [{'name': a['artist']['name']} for a in ac if 'artist' in a],
+                    'releasegroups': [{'title': rels[0]['title']}] if rels else [],
+                }
+
+    if not rec or not rec.get('title'):
+        # Last.fm fallback: search by filename
+        lfm_key = _state.get('lastfm_api_key', '').strip()
+        if lfm_key:
+            fname = os.path.splitext(os.path.basename(path))[0]
+            # Clean up filename: remove common noise, replace separators
+            fname = re.sub(r'[\[\(].*?[\]\)]', '', fname)          # strip [brackets] (notes)
+            fname = re.sub(r'[-_]+', ' ', fname).strip()
+            lfm_params = _parse.urlencode({
+                'method': 'track.search', 'track': fname,
+                'api_key': lfm_key, 'format': 'json', 'limit': '1',
+            })
+            lfm_url = f"http://ws.audioscrobbler.com/2.0/?{lfm_params}"
+            lfm = await loop.run_in_executor(None, _fetch, lfm_url)
+            matches = ((lfm or {}).get('results', {})
+                       .get('trackmatches', {})
+                       .get('track', []))
+            if isinstance(matches, dict):
+                matches = [matches]
+            if matches:
+                m = matches[0]
+                rec = {
+                    'title':        m.get('name', ''),
+                    'artists':      [{'name': m.get('artist', '')}],
+                    'releasegroups': [],
+                    '_source': 'Last.fm',
+                }
+
+    if not rec or not rec.get('title'):
+        return {'error': f'Match gefunden (score={score:.2f}), aber keine Metadaten in AcoustID, MusicBrainz oder Last.fm verfügbar'}
+
+    title   = rec.get('title', '')
+    artists = rec.get('artists', [])
+    artist  = artists[0].get('name', '') if artists else ''
+    rgs     = rec.get('releasegroups', [])
+    album   = rgs[0].get('title', '') if rgs else ''
+
+    return {'title': title, 'artist': artist, 'album': album, 'score': round(score, 3), 'path': path}
+
+
 # ── message handler ───────────────────────────────────────────────────────────
 async def handle_message(ws: WebSocket, msg: dict):
     t = msg.get("type")
@@ -1292,6 +1714,11 @@ async def handle_message(ws: WebSocket, msg: dict):
             "remote_autostart":        _state.get("remote_autostart", False),
             "normalize_volume":        _state.get("normalize_volume", True),
             "target_lufs":             _state.get("target_lufs", -10.0),
+            "spotify_client_id":       _state.get("spotify_client_id", ""),
+            "spotify_client_secret":   _state.get("spotify_client_secret", ""),
+            "lastfm_api_key":          _state.get("lastfm_api_key", ""),
+            "acoustid_api_key":        _state.get("acoustid_api_key", ""),
+            "radio_enabled":           _state.get("radio_enabled", False),
         }))
         if _state.get("remote_autostart") and _remote_server is None:
             asyncio.create_task(_start_remote_server(ws))
@@ -1600,7 +2027,39 @@ async def handle_message(ws: WebSocket, msg: dict):
         url = msg.get("url", "").strip()
         fmt = msg.get("format", "mp3-best")
         if url:
-            asyncio.create_task(run_download(url, fmt))
+            if _is_spotify(url):
+                asyncio.create_task(run_spotify_download(url, fmt))
+            else:
+                asyncio.create_task(run_download(url, fmt))
+
+    elif t == "set_spotify_creds":
+        _state["spotify_client_id"]     = str(msg.get("client_id", "")).strip()
+        _state["spotify_client_secret"] = str(msg.get("client_secret", "")).strip()
+        save_settings()
+
+    elif t == "set_services":
+        if "lastfm_api_key"  in msg: _state["lastfm_api_key"]  = str(msg["lastfm_api_key"]).strip()
+        if "acoustid_api_key" in msg: _state["acoustid_api_key"] = str(msg["acoustid_api_key"]).strip()
+        save_settings()
+
+    elif t == "set_radio":
+        _state["radio_enabled"] = bool(msg.get("enabled", False))
+        save_settings()
+        await broadcast({"type": "radio_status", "enabled": _state["radio_enabled"]})
+        if _state["radio_enabled"]:
+            asyncio.create_task(_check_radio_queue())
+
+    elif t == "identify_track":
+        path = msg.get("path", "")
+        if path and os.path.exists(path):
+            result = await _acoustid_identify(path)
+            await ws.send_text(json.dumps({"type": "track_identified", **result}))
+
+    elif t == "download_fpcalc":
+        asyncio.create_task(_download_fpcalc(ws))
+
+    elif t == "install_spotdl":
+        asyncio.create_task(_install_spotdl(ws))
 
     elif t == "download_stop":
         # Kill entire session (all tracks) and terminate subprocess
@@ -1735,17 +2194,17 @@ async def handle_message(ws: WebSocket, msg: dict):
         seen_paths: set[str] = set()
         seen_titles: set[str] = set()
         deduped = []
-        for t in _state["queue"]:
-            p = t.get("path")
+        for qt in _state["queue"]:
+            p = qt.get("path")
             if p in seen_paths:
                 continue
-            norm = _norm_queue_title(t.get("title", ""))
+            norm = _norm_queue_title(qt.get("title", ""))
             if norm and norm in seen_titles:
                 continue
             seen_paths.add(p)
             if norm:
                 seen_titles.add(norm)
-            deduped.append(t)
+            deduped.append(qt)
         _state["queue"] = deduped
         _state["current_idx"] = next((i for i, t in enumerate(_state["queue"]) if t.get("path") == cur_path), -1) \
             if cur_path else -1
@@ -1767,8 +2226,8 @@ async def handle_message(ws: WebSocket, msg: dict):
             idxs, tracks = zip(*future)
             shuffled = list(tracks)
             random.shuffle(shuffled)
-            for i, t in zip(idxs, shuffled):
-                q[i] = t
+            for i, qt in zip(idxs, shuffled):
+                q[i] = qt
         save_queue()
         await push_queue()
 
@@ -1833,7 +2292,7 @@ async def handle_message(ws: WebSocket, msg: dict):
                         if depth < 4:
                             subfolders.append(_scan_dl_dir(entry, depth + 1))
                     elif entry.is_file() and entry.suffix.lower() in AUDIO_EXT:
-                        tracks.append({"path": str(entry), "name": entry.stem})
+                        tracks.append({"path": str(entry), "name": entry.stem, "mtime": entry.stat().st_mtime})
             except PermissionError:
                 pass
             return {"name": path.name, "path": str(path),
@@ -1847,7 +2306,7 @@ async def handle_message(ws: WebSocket, msg: dict):
                     if entry.is_dir() and not entry.name.startswith('.'):
                         tree["folders"].append(_scan_dl_dir(entry))
                     elif entry.is_file() and entry.suffix.lower() in AUDIO_EXT:
-                        tree["files"].append({"path": str(entry), "name": entry.stem})
+                        tree["files"].append({"path": str(entry), "name": entry.stem, "mtime": entry.stat().st_mtime})
             except PermissionError:
                 pass
         await ws.send_text(json.dumps({"type": "download_tree", "tree": tree}))
@@ -2174,25 +2633,67 @@ def _scan_sync(folder: str) -> list[dict]:
                 })
     return result
 
+def _find_new_audio_paths(folder: str, existing: set[str], recursive: bool) -> list[str]:
+    """Fast filesystem scan — returns only paths NOT already in the library (no ffprobe)."""
+    new_paths = []
+    if recursive:
+        for root, _, files in os.walk(folder):
+            for f in files:
+                if Path(f).suffix.lower() in AUDIO_EXTS:
+                    full = str(Path(os.path.join(root, f)))
+                    if full not in existing:
+                        new_paths.append(full)
+    else:
+        try:
+            for f in os.listdir(folder):
+                if Path(f).suffix.lower() in AUDIO_EXTS:
+                    full = str(Path(os.path.join(folder, f)))
+                    if full not in existing:
+                        new_paths.append(full)
+        except OSError:
+            pass
+    return new_paths
+
 async def _watcher_loop():
     """Periodically check watched folders for new audio files."""
     await asyncio.sleep(15)   # initial delay — let app settle
     while True:
         try:
-            folders = list(_state.get("watched_folders", []))
+            folders   = list(_state.get("watched_folders", []))
+            recursive = _state.get("scan_recursive", True)
             if folders:
                 existing = {t["path"] for t in _state["library"]}
-                new_tracks: list[dict] = []
+                new_paths: list[str] = []
                 loop = asyncio.get_running_loop()
                 for folder in folders:
                     if not os.path.isdir(folder):
                         continue
-                    tracks = await loop.run_in_executor(None, _scan_sync, folder)
-                    for t in tracks:
-                        if t["path"] not in existing:
-                            new_tracks.append(t)
-                            existing.add(t["path"])
-                if new_tracks:
+                    # Fast path: only list new files (no ffprobe for existing tracks)
+                    found = await loop.run_in_executor(
+                        None, _find_new_audio_paths, folder, existing, recursive)
+                    for p in found:
+                        if p not in existing:
+                            new_paths.append(p)
+                            existing.add(p)
+                if new_paths:
+                    new_tracks = []
+                    for p in new_paths:
+                        probe = await loop.run_in_executor(None, _probe_sync, p)
+                        new_tracks.append({
+                            "path":         p,
+                            "title":        probe["title"] or Path(p).stem,
+                            "artist":       probe.get("artist", ""),
+                            "album_artist": probe.get("album_artist", ""),
+                            "folder":       Path(p).parent.name,
+                            "ext":          probe.get("ext", Path(p).suffix.lstrip('.').lower()),
+                            "duration_sec": probe["duration_sec"],
+                            "lufs":         -99.0,
+                            "bpm":          probe["bpm"],
+                            "bitrate_kbps": probe["bitrate_kbps"],
+                            "comment":      probe.get("comment", ""),
+                            "mtime":        int(os.path.getmtime(p)),
+                            "play_count":   0,
+                        })
                     _state["library"].extend(new_tracks)
                     save_library()
                     await push_library()
@@ -2342,13 +2843,18 @@ async def _run_search_cmd(cmd: list) -> list[dict]:
                     item.get("url") or item.get("webpage_url") or item.get("id", ""))
                 if not url:
                     continue
+                vid_id = item.get("id") or ""
+                thumb = (item.get("thumbnail") or
+                         (item.get("thumbnails") or [{}])[-1].get("url") or
+                         (f"https://i.ytimg.com/vi/{vid_id}/mqdefault.jpg" if vid_id else ""))
                 results.append({
-                    "url":      url,
-                    "title":    item.get("title", ""),
-                    "uploader": item.get("uploader") or item.get("channel") or "",
-                    "duration": item.get("duration") or 0,
-                    "abr":      item.get("abr") or item.get("audio_bitrate") or 0,
-                    "_score":   _score_result(item),
+                    "url":       url,
+                    "title":     item.get("title", ""),
+                    "uploader":  item.get("uploader") or item.get("channel") or "",
+                    "duration":  item.get("duration") or 0,
+                    "abr":       item.get("abr") or item.get("audio_bitrate") or 0,
+                    "thumbnail": thumb,
+                    "_score":    _score_result(item),
                 })
             except Exception:
                 pass
@@ -2460,6 +2966,143 @@ async def do_search(query: str, ws: WebSocket):
         del r["_score"]
 
     await ws.send_text(json.dumps({"type": "search_results", "query": query, "results": results}))
+
+async def run_spotify_download(url: str, fmt_id: str = "mp3-best"):
+    """Download a Spotify track/album/playlist via spotdl."""
+    global _dl_counter
+    _dl_counter += 1
+    session_id = _dl_counter
+
+    hdr: dict = {
+        "id":            session_id,
+        "session":       session_id,
+        "session_label": "Spotify",
+        "title":         "",
+        "url":           url,
+        "fmt":           fmt_id,
+        "path":          None,
+        "track_n":       0,
+        "track_total":   0,
+        "progress":      0,
+        "status":        "active",
+        "status_text":   "Verbinde mit Spotify…",
+        "error_msg":     "",
+    }
+    _state["downloads"].insert(0, hdr)
+    await push_downloads(force=True)
+
+    loop = asyncio.get_running_loop()
+    spotdl_cmd = await loop.run_in_executor(None, _find_spotdl_cmd)
+
+    if not spotdl_cmd:
+        hdr["status"]      = "error"
+        hdr["status_text"] = "spotdl nicht gefunden"
+        hdr["error_msg"]   = "Einstellungen → Download → spotdl installieren"
+        await push_downloads(force=True)
+        return
+
+    out_dir = _state.get("download_dir", str(BASE_DIR / "Downloads"))
+    os.makedirs(out_dir, exist_ok=True)
+
+    fmt_map  = {"mp3-best": "mp3", "flac": "flac", "wav": "wav", "m4a": "m4a", "opus": "opus"}
+    sdl_fmt  = fmt_map.get(fmt_id, "mp3")
+    out_tmpl = str(Path(out_dir) / "{artist} - {title}.{output-ext}")
+
+    cmd = spotdl_cmd + [
+        "download", url,
+        "--output",  out_tmpl,
+        "--format",  sdl_fmt,
+        "--bitrate", "320k" if sdl_fmt == "mp3" else "auto",
+        "--print-errors",
+    ]
+    # Die spotdl-Standalone-Exe hat kein eigenes ffmpeg — auf das gebundelte zeigen
+    if FFMPEG and FFMPEG != "ffmpeg" and os.path.exists(FFMPEG):
+        cmd += ["--ffmpeg", FFMPEG]
+    cid  = _state.get("spotify_client_id",     "").strip()
+    csec = _state.get("spotify_client_secret",  "").strip()
+    if cid and csec:
+        cmd += ["--client-id", cid, "--client-secret", csec]
+
+    track_total = 0
+    track_done  = 0
+    error_lines: list[str] = []   # collect error/warning lines for display
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            creationflags=_NO_WINDOW)
+        _dl_procs[session_id] = proc
+
+        async def _read_stderr():
+            async for raw in proc.stderr:
+                ln = raw.decode('utf-8', errors='replace').strip()
+                if ln:
+                    error_lines.append(ln)
+                    print('[spotdl err] ' + ln, flush=True)
+        asyncio.create_task(_read_stderr())
+
+        async for raw in proc.stdout:
+            if hdr not in _state['downloads']:
+                try: proc.kill()
+                except Exception: pass
+                break
+            line = raw.decode('utf-8', errors='replace').strip()
+            if not line:
+                continue
+            print('[spotdl] ' + line, flush=True)
+            if re.search(r'error|failed|rate.?limit|unauthorized|invalid', line, re.IGNORECASE):
+                error_lines.append(line)
+            m = re.search(r'Found\s+(\d+)\s+songs?', line, re.IGNORECASE)
+            if m:
+                track_total = int(m.group(1))
+                hdr['track_total'] = track_total
+                hdr['status_text'] = str(track_total) + ' Titel gefunden…'
+                await push_downloads()
+                continue
+            m = re.search(r'(?:Downloaded|Skipping)\s+[““”]?([^”“”\n]+?)[““”]?(?:\s+to\s+|$)', line, re.IGNORECASE)
+            if m:
+                track_done += 1
+                title = m.group(1).strip()
+                hdr['track_n']     = track_done
+                hdr['title']       = title[:80]
+                hdr['status_text'] = title[:60]
+                hdr['progress']    = (track_done / track_total * 100) if track_total else 50
+                await push_downloads()
+                continue
+            m = re.search(r'Downloading\s+(\d+)\s+songs?', line, re.IGNORECASE)
+            if m and not track_total:
+                track_total = int(m.group(1))
+                hdr['track_total'] = track_total
+                await push_downloads()
+
+        await proc.wait()
+        _dl_procs.pop(session_id, None)
+
+        if hdr in _state['downloads']:
+            if proc.returncode == 0 or track_done > 0:
+                hdr['status']      = 'done'
+                hdr['status_text'] = '✓ ' + str(track_done) + ' Titel'
+                hdr['progress']    = 100
+                asyncio.create_task(scan_folder(out_dir))
+            else:
+                err_msg = 'spotdl Fehler'
+                for ln in reversed(error_lines):
+                    clean = re.sub(r'\x1b\[[0-9;]*m', '', ln).strip()
+                    if clean and len(clean) < 120:
+                        err_msg = clean
+                        break
+                hdr['status']      = 'error'
+                hdr['status_text'] = err_msg
+            await push_downloads(force=True)
+    except Exception as exc:
+        _dl_procs.pop(session_id, None)
+        if hdr in _state["downloads"]:
+            hdr["status"]      = "error"
+            hdr["status_text"] = f"Fehler: {exc}"
+            await push_downloads(force=True)
+
 
 async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
     """Returns the final output path on success, None on failure."""
@@ -2613,7 +3256,7 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
                 last_pct = -1.0
                 async for raw in ep.stdout:
                     try:
-                        line = raw.decode("utf-8", errors="replace").strip()
+                        line = raw.decode('utf-8', errors='replace').strip()
                         if not line: continue
                         if "[download] Destination:" in line:
                             fname = line.split("Destination:", 1)[1].strip()
@@ -2682,7 +3325,7 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
             if not raw:
                 break
             try:
-                line = raw.decode("utf-8", errors="replace").strip()
+                line = raw.decode('utf-8', errors='replace').strip()
                 if not line:
                     continue
 
@@ -2904,8 +3547,12 @@ input[type=range]{width:100%;accent-color:#e07800;height:24px}
 .dl-b{background:#0d1a30;border:1px solid #1a3050;border-radius:6px;color:#4a9eff;font-size:18px;width:36px;height:36px;cursor:pointer;flex-shrink:0;padding:0;transition:color .15s}
 .dl-b:disabled{color:#2a3848;cursor:default}
 .ri-sub{font-size:10px;color:#4a6080;margin-top:2px}
-.norm-btn{width:100%;margin-top:6px;background:#1a2838;border:1px solid #2a3848;border-radius:6px;color:#5a7898;font-size:12px;padding:7px;cursor:pointer;text-align:center}
+.norm-wrap{margin-top:8px}
+.norm-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.norm-btn{flex:1;background:#1a2838;border:1px solid #2a3848;border-radius:6px;color:#5a7898;font-size:12px;padding:6px 10px;cursor:pointer;text-align:center}
 .norm-btn.on{background:#0d2010;border-color:#1a4020;color:#75d595}
+.norm-val{font-size:12px;color:#4a9eff;min-width:52px;text-align:right;white-space:nowrap}
+#normr{width:100%;margin-top:6px;accent-color:#3b82f6}
 .nxt-b{background:#0d1a30;border:1px solid #1a3050;border-radius:6px;color:#4a9eff;font-size:16px;width:36px;height:36px;cursor:pointer;flex-shrink:0;padding:0;margin-right:4px}
 .nxt-b:active{opacity:.6}
 </style>
@@ -2931,7 +3578,13 @@ input[type=range]{width:100%;accent-color:#e07800;height:24px}
 <div class="vol">
   <div class="vol-h"><span>Lautst&#228;rke</span><span id="vv">80%</span></div>
   <input type="range" id="vr" min="0" max="100" value="80" oninput="onVol(this.value)" onchange="flushVol()">
-  <button id="normb" class="norm-btn on" onclick="toggleNorm()">&#128266; -10 LUFS</button>
+  <div class="norm-wrap">
+    <div class="norm-head">
+      <button id="normb" class="norm-btn on" onclick="toggleNorm()">&#128266; Normalisierung</button>
+      <span id="normv" class="norm-val">-10 LUFS</span>
+    </div>
+    <input type="range" id="normr" min="-24" max="-6" step="1" value="-10" oninput="onNorm(this.value)" onchange="flushNorm()">
+  </div>
 </div>
 <div class="sec">
   <div class="sec-h">WARTESCHLANGE &nbsp;<span id="qc" style="font-weight:400;color:#3a5070">0</span></div>
@@ -2976,7 +3629,11 @@ function toggle(){send({type:st.playing?'pause':'resume'})}
 var _pv=null
 function onVol(v){document.getElementById('vv').textContent=v+'%';_pv=+v;clearTimeout(_vt);_vt=setTimeout(flushVol,120)}
 function flushVol(){if(_pv!=null){send({type:'set_volume',value:_pv});_pv=null}}
-function toggleNorm(){st.normalize_volume=!st.normalize_volume;send({type:'set_normalize_volume',value:st.normalize_volume});var nb=document.getElementById('normb');nb.textContent=st.normalize_volume?('🔊 '+st.target_lufs+' LUFS'):'🔇 Aus';nb.className='norm-btn'+(st.normalize_volume?' on':'')}
+function updateNormUI(){var nb=document.getElementById('normb');var nr=document.getElementById('normr');if(nb){nb.textContent=st.normalize_volume?'🔊 Normalisierung':'🔇 Normalisierung';nb.className='norm-btn'+(st.normalize_volume?' on':'')};if(nr)nr.style.opacity=st.normalize_volume?'1':'0.4'}
+function toggleNorm(){st.normalize_volume=!st.normalize_volume;send({type:'set_normalize_volume',value:st.normalize_volume});updateNormUI()}
+var _nv=null,_nt
+function onNorm(v){document.getElementById('normv').textContent=v+' LUFS';_nv=+v;clearTimeout(_nt);_nt=setTimeout(flushNorm,200)}
+function flushNorm(){if(_nv!=null){st.target_lufs=_nv;send({type:'set_normalize_volume',value:st.normalize_volume,target_lufs:_nv});_nv=null}}
 function fmt(s){if(!s)return'';var m=Math.floor(s/60);return m+':'+(Math.floor(s%60)+'').padStart(2,'0')}
 function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 function rm(i){if(confirm('Entfernen?'))send({type:'queue_remove',index:i})}
@@ -3005,22 +3662,30 @@ function showYtRes(rs){
   var el=document.getElementById('sr')
   if(!rs.length){el.innerHTML='<div class=empty>Keine Ergebnisse</div>';return}
   el.innerHTML=rs.map(function(r,i){
-    return'<div class=ri id="ytr'+i+'"><div class=ri-info><div class=ri-t>'+esc(r.title||'&#8211;')+'</div><div class=ri-sub>'+esc(r.uploader||'')+(r.duration?' &middot; '+fmt(r.duration):'')+'</div></div><button class=dl-b id="dlb'+i+'" onclick="dlYt('+i+')" title="Herunterladen &amp; zur Queue hinzufügen">+</button></div>'
+    return'<div class=ri id="ytr'+i+'"><div class=ri-info><div class=ri-t>'+esc(r.title||'&#8211;')+'</div><div class=ri-sub>'+esc(r.uploader||'')+(r.duration?' &middot; '+fmt(r.duration):'')+'</div></div><button class=nxt-b id="nlb'+i+'" onclick="dlYtNext('+i+')" title="Herunterladen &amp; als n&#228;chstes einreihen">&#9197;</button><button class=dl-b id="dlb'+i+'" onclick="dlYt('+i+')" title="Herunterladen &amp; ans Ende">+</button></div>'
   }).join('')
 }
 function dlYt(i){
   if(!_ytRes[i])return
-  var btn=document.getElementById('dlb'+i)
-  if(btn){btn.disabled=true;btn.textContent='⏳'}
+  var b=document.getElementById('dlb'+i),n=document.getElementById('nlb'+i)
+  if(b){b.disabled=true;b.textContent='⏳'}
+  if(n)n.disabled=true
   send({type:'yt_dl_queue',url:_ytRes[i].url,title:_ytRes[i].title})
+}
+function dlYtNext(i){
+  if(!_ytRes[i])return
+  var b=document.getElementById('dlb'+i),n=document.getElementById('nlb'+i)
+  if(n){n.disabled=true;n.textContent='⏳'}
+  if(b)b.disabled=true
+  send({type:'yt_dl_queue',url:_ytRes[i].url,title:_ytRes[i].title,as_next:true})
 }
 function updDl(m){
   for(var i=0;i<_ytRes.length;i++){
     if(_ytRes[i].title===m.title){
-      var btn=document.getElementById('dlb'+i)
-      if(!btn)break
-      if(m.status==='done'){btn.textContent='✓';btn.style.color='#75d595'}
-      else{btn.textContent='✕';btn.style.color='#d57575';btn.disabled=false}
+      var b=document.getElementById('dlb'+i),n=document.getElementById('nlb'+i)
+      if(!b)break
+      if(m.status==='done'){b.textContent='✓';b.style.color='#75d595';if(n){n.textContent='✓';n.style.color='#75d595'}}
+      else{b.textContent='✕';b.style.color='#d57575';b.disabled=false;if(n){n.textContent='⏭';n.style.color='';n.disabled=false}}
       break
     }
   }
@@ -3096,8 +3761,9 @@ function render(){
   document.getElementById('pb').innerHTML=st.playing?'⏸':'▶'
   document.getElementById('vr').value=st.volume
   document.getElementById('vv').textContent=st.volume+'%'
-  var nb=document.getElementById('normb')
-  if(nb){nb.textContent=st.normalize_volume?('🔊 '+st.target_lufs+' LUFS'):'🔇 Aus';nb.className='norm-btn'+(st.normalize_volume?' on':'')}
+  var nr=document.getElementById('normr')
+  if(nr&&_nv==null){nr.value=st.target_lufs;document.getElementById('normv').textContent=st.target_lufs+' LUFS'}
+  updateNormUI()
   document.getElementById('qc').textContent=q.length
   // compute ETA for upcoming tracks
   var posMs=st.position_ms||0,durMs=st.duration_ms||0
@@ -3109,6 +3775,8 @@ function render(){
     var etaAbs=etas[i]!=null?absTime(etas[i]):'';
     return'<div class="qi'+(a?' cur':'')+'"><div class=dh ontouchstart="dhStart(event,'+i+')" ontouchmove="dhMove(event)" ontouchend="dhEnd(event)">☰</div><div class=qi-info><div class="qi-t'+(a?' a':p?' p':'')+'">'+esc(t.title||'–')+'</div><div class=qi-d>'+fmt(t.duration_sec)+(etaAbs?'<span class=qi-eta> · '+etaAbs+'</span>':'')+'</div></div><button class=rmb onclick="rm('+i+')">✕</button></div>'
   }).join(''):'<div class=empty>Warteschlange leer</div>'
+  // Scroll current track into view
+  if(ci>=0){var rows=document.getElementById('ql').children;if(rows[ci])rows[ci].scrollIntoView({behavior:'smooth',block:'nearest'})}
 }
 function absTime(secs){var d=new Date(Date.now()+secs*1000);return'~'+('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2)}
 conn()
@@ -3207,8 +3875,9 @@ async def remote_ws_endpoint(websocket: WebSocket):
             elif t == "yt_dl_queue":
                 url = msg.get("url", "")
                 title = msg.get("title", "")
+                as_next = bool(msg.get("as_next", False))
                 if url:
-                    asyncio.create_task(_remote_dl_and_queue(url, title, websocket))
+                    asyncio.create_task(_remote_dl_and_queue(url, title, websocket, as_next))
             elif t == "set_normalize_volume":
                 await handle_message(websocket, msg)
             elif t in ("pause", "resume", "play_at", "play_next", "play_prev", "set_volume"):
@@ -3235,7 +3904,7 @@ async def _do_yt_search_remote(query: str, ws: WebSocket):
     except Exception:
         pass
 
-async def _remote_dl_and_queue(url: str, title: str, ws: WebSocket):
+async def _remote_dl_and_queue(url: str, title: str, ws: WebSocket, as_next: bool = False):
     try:
         path = await run_download(url)
         if path and os.path.exists(path):
@@ -3251,7 +3920,11 @@ async def _remote_dl_and_queue(url: str, title: str, ws: WebSocket):
                 "played": False,
             }
             if not _queue_is_duplicate(path, entry["title"]):
-                _state["queue"].append(entry)
+                if as_next:
+                    ci = _state.get("current_idx", -1)
+                    _state["queue"].insert(ci + 1, entry)
+                else:
+                    _state["queue"].append(entry)
                 save_queue()
                 await push_queue()
             status = "done"
@@ -3329,15 +4002,46 @@ async def _start_remote_server(requester: WebSocket):
     try:
         ip = _get_local_ip()
         config = uvicorn.Config(remote_app, host="0.0.0.0", port=_remote_port, log_level="warning")
-        _remote_server = uvicorn.Server(config)
-        asyncio.create_task(_remote_server.serve())
+        server = uvicorn.Server(config)
+        _remote_server = server
+
+        async def _serve_task():
+            global _remote_server
+            try:
+                await server.serve()
+            except OSError as e:
+                print(f"[remote] Port {_remote_port} nicht verfügbar: {e}", flush=True)
+            except Exception as e:
+                print(f"[remote] serve Fehler: {e}", flush=True)
+            finally:
+                if _remote_server is server:
+                    _remote_server = None
+                    try:
+                        await broadcast({"type": "remote_status", "running": False})
+                    except Exception:
+                        pass
+
+        asyncio.create_task(_serve_task())
+        # Kurz warten bis uvicorn den Port gebunden hat
+        await asyncio.sleep(0.3)
+        if _remote_server is None:
+            # Startup fehlgeschlagen (z.B. Port belegt)
+            try:
+                await requester.send_text(json.dumps({"type": "remote_status", "running": False, "error": f"Port {_remote_port} nicht verfügbar"}))
+            except Exception:
+                pass
+            return
         print(f"[remote] gestartet auf http://{ip}:{_remote_port}", flush=True)
         await broadcast({"type": "remote_status", "running": True,
                          "ip": ip, "port": _remote_port,
                          "url": f"http://{ip}:{_remote_port}"})
     except Exception as e:
         print(f"[remote] Fehler beim Starten: {e}", flush=True)
-        await requester.send_text(json.dumps({"type": "remote_status", "running": False, "error": str(e)}))
+        _remote_server = None
+        try:
+            await requester.send_text(json.dumps({"type": "remote_status", "running": False, "error": str(e)}))
+        except Exception:
+            pass
 
 async def _stop_remote_server():
     global _remote_server

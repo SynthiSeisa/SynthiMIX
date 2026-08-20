@@ -193,6 +193,12 @@
       <div class="search-results">
         {#each $searchResults.results as r}
           <button class="result-row" onclick={() => pickResult(r.url)}>
+            {#if r.thumbnail}
+              <img class="result-thumb" src={r.thumbnail} alt=""
+                   loading="lazy" onerror={(e) => e.currentTarget.style.display='none'} />
+            {:else}
+              <div class="result-thumb result-thumb-ph"></div>
+            {/if}
             <div class="result-info">
               <span class="result-title">{r.title}</span>
               <span class="result-meta">
@@ -388,11 +394,16 @@
   .close-btn:hover { color:var(--c-red); }
   .result-row {
     display:flex; align-items:center; gap:10px; width:100%;
-    padding:8px 14px; background:none; border:none; border-bottom:1px solid var(--c-bg2);
+    padding:6px 14px; background:none; border:none; border-bottom:1px solid var(--c-bg2);
     text-align:left; cursor:pointer; transition:background .1s;
   }
   .result-row:hover { background:var(--c-bg5); }
   .result-row:hover .result-dl { color:var(--c-accent); }
+  .result-thumb {
+    width:72px; height:40px; object-fit:cover; border-radius:3px;
+    flex-shrink:0; background:var(--c-bg3);
+  }
+  .result-thumb-ph { background:var(--c-bg3); border-radius:3px; }
   .result-info   { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
   .result-title  { font-size:12px; color:var(--c-tx2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .result-meta   { display:flex; gap:6px; align-items:center; }

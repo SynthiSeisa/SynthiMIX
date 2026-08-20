@@ -2,7 +2,11 @@
   import { settings, settingsOpen, appSettings, send, toolsInfo, updateProgress,
            loudnormOnDl, loudnormTarget, loudnormTp, autoMixEnabled, playMode,
            playlistFolderEnabled, dlFilenameFormat, downloadDir, remoteStatus,
-           autoScanIntervalMin, scanRecursive, remoteAutostart } from '../stores/ws.js'
+           autoScanIntervalMin, scanRecursive, remoteAutostart,
+           spotifyClientId, spotifyClientSecret,
+           lastfmApiKey, acoustidApiKey,
+           fpcalcInstalling, fpcalcInstallError,
+           spotdlInstalling, spotdlInstallError, spotdlInstallText } from '../stores/ws.js'
 
   let tab = $state('playback')
 
@@ -10,6 +14,7 @@
     { id: 'playback', label: 'Wiedergabe', icon: '▶' },
     { id: 'fade',     label: 'Blend',      icon: '⇌' },
     { id: 'download', label: 'Download',   icon: '↓' },
+    { id: 'services', label: 'Dienste',    icon: '⊹' },
     { id: 'system',   label: 'System',     icon: '⚙' },
     { id: 'remote',   label: 'Remote',     icon: '⊕' },
     { id: 'info',     label: 'Info',       icon: 'ℹ' },
@@ -57,6 +62,28 @@
   function setPlaylistFolder(enabled) {
     playlistFolderEnabled.set(enabled)
     send({ type: 'set_playlist_folder', enabled })
+  }
+
+  // Spotify credentials — local edit state so we don't spam the backend on every keystroke
+  let spotifyCidEdit  = $state('')
+  let spotifyCsecEdit = $state('')
+  $effect(() => { spotifyCidEdit  = $spotifyClientId  })
+  $effect(() => { spotifyCsecEdit = $spotifyClientSecret })
+  function saveSpotifyCreds() {
+    spotifyClientId.set(spotifyCidEdit)
+    spotifyClientSecret.set(spotifyCsecEdit)
+    send({ type: 'set_spotify_creds', client_id: spotifyCidEdit, client_secret: spotifyCsecEdit })
+  }
+
+  // Services (Last.fm + AcoustID) — local edit state
+  let lastfmKeyEdit   = $state('')
+  let acoustidKeyEdit = $state('')
+  $effect(() => { lastfmKeyEdit   = $lastfmApiKey  })
+  $effect(() => { acoustidKeyEdit = $acoustidApiKey })
+  function saveServices() {
+    lastfmApiKey.set(lastfmKeyEdit)
+    acoustidApiKey.set(acoustidKeyEdit)
+    send({ type: 'set_services', lastfm_api_key: lastfmKeyEdit, acoustid_api_key: acoustidKeyEdit })
   }
 
   function setFilenameFormat(fmt) {
@@ -313,6 +340,23 @@
             </div>
           </div>
 
+          <div class="group">
+            <div class="group-title">Beat-aligned Crossfade</div>
+            <div class="hint">Startet den Übergang exakt auf der nächsten Taktgrenze (±1 Beat Toleranz). Erfordert BPM-Analyse.</div>
+            <div class="row" style="margin-top:8px">
+              <span class="lbl">Aktiv</span>
+              <button class="tog {$appSettings.beatAlignCf ? 'on' : ''}"
+                onclick={() => appSettings.update(s => ({...s, beatAlignCf: !s.beatAlignCf}))}></button>
+            </div>
+            <div class="hint" style="margin-top:4px">
+              {#if $appSettings.beatAlignCf}
+                Crossfade-Trigger wird auf den nächsten Beat-Boundary verschoben (max. ±500ms bei 120 BPM).
+              {:else}
+                Crossfade startet zum fixen Zeitpunkt ohne Beat-Ausrichtung.
+              {/if}
+            </div>
+          </div>
+
         <!-- ── DOWNLOAD ────────────────────────────────────────────────── -->
         {:else if tab === 'download'}
 
@@ -385,6 +429,102 @@
               </span>
               <button class="action-btn" onclick={pickDownloadFolder}>Ordner wählen</button>
             </div>
+          </div>
+
+          <div class="group">
+            <div class="group-title">Spotify-Download (via spotdl)</div>
+            <div class="row">
+              <span class="lbl">spotdl</span>
+              {#if $toolsInfo.spotdl_version}
+                <span class="val" style="color:var(--c-green)">✓ v{$toolsInfo.spotdl_version}</span>
+              {:else if $spotdlInstalling}
+                <span class="val" style="color:var(--c-tx4)">{$spotdlInstallText ?? 'Wird installiert…'}</span>
+              {:else}
+                <span class="val" style="color:var(--c-tx5)">nicht gefunden</span>
+                <button class="install-btn" onclick={() => send({ type: 'install_spotdl' })}>
+                  Installieren
+                </button>
+              {/if}
+            </div>
+            {#if $spotdlInstallError}
+              <div class="row">
+                <span class="lbl"></span>
+                <span class="val" style="color:var(--c-red);font-size:11px">{$spotdlInstallError}</span>
+              </div>
+            {/if}
+            <div class="hint" style="margin-top:6px">
+              Spotify lädt via YouTube Music — kein direkter Spotify-Stream.
+              „Installieren“ lädt spotdl einmalig als eigenständiges Programm (~46 MB) herunter;
+              Python wird dafür nicht benötigt.
+              Client-ID &amp; Secret sind optional (höhere Rate-Limits):
+            </div>
+            <div class="row" style="margin-top:8px">
+              <span class="lbl">Client-ID</span>
+              <input class="text-input" type="text" placeholder="optional"
+                     bind:value={spotifyCidEdit} />
+            </div>
+            <div class="row">
+              <span class="lbl">Client-Secret</span>
+              <input class="text-input" type="password" placeholder="optional"
+                     bind:value={spotifyCsecEdit} />
+            </div>
+            <div class="row">
+              <span class="lbl"></span>
+              <button class="action-btn" onclick={saveSpotifyCreds}>Speichern</button>
+            </div>
+          </div>
+
+        <!-- ── DIENSTE ─────────────────────────────────────────────────── -->
+        {:else if tab === 'services'}
+
+          <div class="group">
+            <div class="group-title">Last.fm — Radio-Modus</div>
+            <div class="hint">
+              Radio-Modus füllt die Queue automatisch mit ähnlichen Tracks aus deiner Bibliothek.
+              API-Key kostenlos unter <strong>last.fm/api/account/create</strong>.
+            </div>
+            <div class="row" style="margin-top:8px">
+              <span class="lbl">API-Key</span>
+              <input class="text-input" type="text" placeholder="32-stelliger Hex-Key"
+                     bind:value={lastfmKeyEdit} />
+            </div>
+          </div>
+
+          <div class="group">
+            <div class="group-title">AcoustID — Fingerprint-Erkennung</div>
+            <div class="hint">
+              Erkennt Tracks anhand des Audioinhalts (via AcoustID + MusicBrainz).
+              Braucht <strong>Chromaprint (fpcalc)</strong> und einen kostenlosen API-Key von <strong>acoustid.org/api-key</strong>.
+            </div>
+            <div class="row" style="margin-top:8px">
+              <span class="lbl">fpcalc</span>
+              {#if $toolsInfo.fpcalc_found}
+                <span class="val" style="color:var(--c-green)">✓ gefunden</span>
+              {:else if $fpcalcInstalling}
+                <span class="val" style="color:var(--c-tx4)">Wird installiert…</span>
+              {:else}
+                <span class="val" style="color:var(--c-tx5)">nicht gefunden</span>
+                <button class="install-btn" onclick={() => send({ type: 'download_fpcalc' })}>
+                  Installieren
+                </button>
+              {/if}
+            </div>
+            {#if $fpcalcInstallError}
+              <div class="row">
+                <span class="lbl"></span>
+                <span class="val" style="color:var(--c-red);font-size:11px">{$fpcalcInstallError}</span>
+              </div>
+            {/if}
+            <div class="row">
+              <span class="lbl">API-Key</span>
+              <input class="text-input" type="text" placeholder="AcoustID API-Key"
+                     bind:value={acoustidKeyEdit} />
+            </div>
+          </div>
+
+          <div class="row" style="padding:0 4px">
+            <span class="lbl"></span>
+            <button class="action-btn" onclick={saveServices}>Speichern</button>
           </div>
 
         <!-- ── SYSTEM ──────────────────────────────────────────────────── -->
@@ -615,8 +755,12 @@
     color: var(--c-tx5); text-transform: uppercase; margin-bottom: 10px;
   }
 
+  .hint code {
+    background: var(--c-bg3); border: 1px solid var(--c-br1); border-radius: 2px;
+    padding: 1px 4px; font-size: 10px; color: var(--c-accent2); font-family: monospace;
+  }
   .hint {
-    font-size: 10px; color: var(--c-tx7); line-height: 1.5;
+    font-size: 10px; color: var(--c-tx6); line-height: 1.5;
     margin-top: 2px;
   }
 
@@ -686,6 +830,22 @@
   .radio-opt-v.active .ro-label { color: var(--c-accent); }
   .ro-example { font-size: 10px; color: var(--c-tx7); font-family: monospace; }
   .radio-opt-v.active .ro-example { color: var(--c-accent); }
+
+  /* ── Text input ─────────────────────────────────────────────────────────── */
+  .text-input {
+    flex: 1; min-width: 0; background: var(--c-bg2); border: 1px solid var(--c-br2);
+    border-radius: 3px; color: var(--c-tx2); font-size: 11px; padding: 4px 8px;
+    font-family: inherit;
+  }
+  .text-input:focus { outline: none; border-color: var(--c-accent); }
+
+  /* ── Install button (inline, small) ─────────────────────────────────────── */
+  .install-btn {
+    margin-left: 8px; padding: 2px 8px; font-size: 10px; font-family: inherit;
+    background: var(--c-accent); color: #fff; border: none; border-radius: 3px;
+    cursor: pointer; transition: opacity .15s;
+  }
+  .install-btn:hover { opacity: .85; }
 
   /* ── Action button ──────────────────────────────────────────────────────── */
   .action-btn {

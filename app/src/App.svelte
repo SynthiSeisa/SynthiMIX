@@ -185,25 +185,25 @@
 <style>
   /* ── CSS Custom Properties ────────────────────────────────────────────── */
   :global(:root) {
-    --c-bg:     #080c14;
-    --c-bg2:    #060a12;
-    --c-bg3:    #070c18;
-    --c-bg4:    #060b1c;
-    --c-bg5:    #0c1420;
-    --c-br1:    #0e1828;
-    --c-br2:    #1a2838;
-    --c-br3:    #1a2d48;
-    --c-tx1:    #dce8f8;
-    --c-tx2:    #c8d4e8;
-    --c-tx3:    #8aaac8;
-    --c-tx4:    #6a80a0;
-    --c-tx5:    #4a6080;
-    --c-tx6:    #3a5070;
-    --c-tx7:    #2a3a54;
+    --c-bg:     #0a0e18;
+    --c-bg2:    #080c16;
+    --c-bg3:    #090e1c;
+    --c-bg4:    #080d20;
+    --c-bg5:    #0e1624;
+    --c-br1:    #121e30;
+    --c-br2:    #1e2e44;
+    --c-br3:    #243650;
+    --c-tx1:    #ecf2ff;
+    --c-tx2:    #d0dcf0;
+    --c-tx3:    #a0bcd4;
+    --c-tx4:    #80a0bc;
+    --c-tx5:    #6088a8;
+    --c-tx6:    #5078a0;
+    --c-tx7:    #406090;
     --c-act-bg: #0e0a00;
     --c-act-tx: #f0a040;
-    --c-sel:    #0a1428;
-    --c-hover:  #0b1320;
+    --c-sel:    #0e1c38;
+    --c-hover:  #101828;
     --c-accent: #e07800;
     --c-accent2:#ff9020;
     --c-blue:   #3b82f6;
@@ -223,10 +223,10 @@
     --c-tx1:    #0a0806;
     --c-tx2:    #1e1a14;
     --c-tx3:    #3a342a;
-    --c-tx4:    #5a5248;
-    --c-tx5:    #6e6258;
-    --c-tx6:    #8a7e72;
-    --c-tx7:    #a09488;
+    --c-tx4:    #4e4840;
+    --c-tx5:    #5e5650;
+    --c-tx6:    #6a6058;
+    --c-tx7:    #7a7068;
     --c-act-bg: #fff4e0;
     --c-act-tx: #8a4800;
     --c-sel:    #ddeeff;

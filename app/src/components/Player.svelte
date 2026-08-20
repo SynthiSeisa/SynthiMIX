@@ -78,6 +78,10 @@
         gainA.gain.setValueAtTime(gainA.gain.value, audioCtx.currentTime)
         gainA.gain.linearRampToValueAtTime(t, audioCtx.currentTime + 0.4)
       } else { gainA.gain.value = t }
+    } else {
+      // No LUFS data → reset to neutral so previous track's gain doesn't carry over
+      gainA.gain.cancelScheduledValues(audioCtx.currentTime)
+      gainA.gain.value = 1.0
     }
     if (lufsB > -90) {
       const t = normFactor(lufsB)
@@ -86,6 +90,9 @@
         gainB.gain.setValueAtTime(gainB.gain.value, audioCtx.currentTime)
         gainB.gain.linearRampToValueAtTime(t, audioCtx.currentTime + 0.4)
       } else { gainB.gain.value = t }
+    } else {
+      gainB.gain.cancelScheduledValues(audioCtx.currentTime)
+      gainB.gain.value = 1.0
     }
   })
 
@@ -478,8 +485,20 @@
   function _checkCrossfade(pos) {
     if (cfActive || cfS <= 0 || durMs <= 0) return
 
-    const trigFrac  = _outroTrigger()
-    const triggerMs = trigFrac >= 0 ? trigFrac * durMs : durMs - cfS * 1000
+    const trigFrac = _outroTrigger()
+    let triggerMs  = trigFrac >= 0 ? trigFrac * durMs : durMs - cfS * 1000
+
+    // Beat-align: snap crossfade trigger to nearest beat (±1 beat tolerance)
+    const bpm = $nowPlaying?.bpm
+    if (bpm > 30 && bpm < 300 && get(appSettings).beatAlignCf) {
+      const beatMs  = 60000 / bpm
+      const snapped = Math.round(triggerMs / beatMs) * beatMs
+      // Only apply if snap is within ±1 beat from base trigger
+      if (Math.abs(snapped - triggerMs) <= beatMs) {
+        // Don't go so late that there's no room for the crossfade
+        triggerMs = Math.min(snapped, durMs - cfS * 1000 - 200)
+      }
+    }
 
     if (pos < triggerMs - 100 || pos >= durMs - 100) return
 
@@ -711,6 +730,9 @@
     <div class="center" bind:clientHeight={centerH}>
       <div class="track-info">
         <span class="title">{$nowPlaying?.title ?? '—'}</span>
+        {#if $nowPlaying?.artist}
+          <span class="artist">{$nowPlaying.artist}</span>
+        {/if}
         <span class="meta">
           {#if $nowPlaying?.lufs && $nowPlaying.lufs > -90}
             <span>{$nowPlaying.lufs.toFixed(1)} LUFS</span>
@@ -718,7 +740,7 @@
             <span class="lufs-warn" title="Keine Lautstärkemessung — Normalisierung nicht aktiv für diesen Track">⚠ kein LUFS</span>
           {/if}
           {#if $nowPlaying?.bpm}<span>{$nowPlaying.bpm} BPM</span>
-          {:else if $nowPlaying}<span class="bpm-pending">· BPM</span>{/if}
+          {:else if $nowPlaying}<span class="bpm-pending">BPM…</span>{/if}
           {#if $nowPlaying?.play_count}<span>×{$nowPlaying.play_count}</span>{/if}
         </span>
       </div>
@@ -731,7 +753,7 @@
         <div class="next-bar">
           <span class="next-arrow">↓</span>
           <span class="next-label">NÄCHSTER</span>
-          <span class="next-title">{nextTrack.title}</span>
+          <span class="next-title">{nextTrack.title}{nextTrack.artist ? ' · ' + nextTrack.artist : ''}</span>
           <span class="next-dur">{fmt(nextTrack.duration_sec * 1000)}</span>
         </div>
         <Waveform data={$waveformNext} position={0} introStart={nextIntroStart} introEnd={nextIntroEnd} height={20} />
@@ -801,13 +823,18 @@
   .art img { width: 100%; height: 100%; object-fit: cover; }
   .art-ph  { font-size: 24px; color: var(--c-tx7); }
 
-  .center { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; padding-top: 2px; }
-  .track-info { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
+  .center { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; padding-top: 2px; }
+  .track-info { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
   .title {
     font-size: 14px; font-weight: 600; color: var(--c-tx1);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  .meta { display: flex; gap: 10px; font-size: 11px; color: var(--c-tx5); flex-shrink: 0; }
+  .artist {
+    font-size: 11px; color: var(--c-tx4);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .meta { display: flex; gap: 10px; font-size: 11px; color: var(--c-tx5); flex-shrink: 0; flex-wrap: wrap; }
+  .meta span:first-child::before { content: ''; }
   .meta span::before { content: '· '; }
   .bpm-pending { color: var(--c-tx7) !important; font-style: italic; }
   .lufs-warn { color: #c08030 !important; font-style: italic; }
@@ -847,7 +874,7 @@
     display: flex; flex-direction: column; justify-content: space-between;
     align-items: flex-end; flex: 1;
   }
-  .fdr-marks span { font-size: 7px; color: var(--c-tx7); line-height: 1; }
+  .fdr-marks span { font-size: 9px; color: var(--c-tx6); line-height: 1; }
 
   .fdr-slot {
     position: relative; width: 34px; flex: 1;
