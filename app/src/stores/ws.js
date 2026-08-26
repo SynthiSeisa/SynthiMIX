@@ -37,6 +37,7 @@ export const radioStatus         = writable(null)   // null | { title, similar_t
 export const trackIdentified     = writable(null)   // null | { title, artist, album, score, path, error }
 export const fpcalcInstalling    = writable(false)
 export const fpcalcInstallError  = writable(null)
+export const playlistChoice      = writable(null)   // null | {pending:true} | {url, format, track_title, playlist_title, count}
 export const spotdlInstalling    = writable(false)
 export const spotdlInstallText   = writable(null)   // Fortschrittstext während des Downloads
 export const spotdlInstallError  = writable(null)
@@ -244,6 +245,9 @@ function connect() {
       case 'fpcalc_install_progress': fpcalcInstalling.set(true);  fpcalcInstallError.set(null); break
       case 'fpcalc_install_done':     fpcalcInstalling.set(false); break
       case 'fpcalc_install_error':    fpcalcInstalling.set(false); fpcalcInstallError.set(msg.text ?? 'Fehler'); break
+      case 'playlist_choice_pending': playlistChoice.set({ pending: true }); break
+      case 'playlist_choice_cancel':  playlistChoice.set(null); break
+      case 'playlist_choice':         playlistChoice.set({ ...msg, pending: false }); break
       case 'spotdl_install_progress': spotdlInstalling.set(true);  spotdlInstallError.set(null); spotdlInstallText.set(msg.text ?? null); break
       case 'spotdl_install_done':     spotdlInstalling.set(false); spotdlInstallText.set(null); if (msg.version) toolsInfo.update(t => ({ ...t, spotdl_version: msg.version })); break
       case 'spotdl_install_error':    spotdlInstalling.set(false); spotdlInstallText.set(null); spotdlInstallError.set(msg.text ?? 'Fehler'); break

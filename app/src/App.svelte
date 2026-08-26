@@ -8,6 +8,7 @@
   import Library   from './components/Library.svelte'
   import Downloads from './components/Downloads.svelte'
   import Settings  from './components/Settings.svelte'
+  import PlaylistChoiceDialog from './components/PlaylistChoiceDialog.svelte'
 
   // Apply saved theme on load
   const _savedTheme = localStorage.getItem('synthimix-theme') || 'dark'
@@ -180,6 +181,8 @@
         title={$connected ? 'Verbunden' : 'Verbindet…'}></span>
 
   {#if $settingsOpen}<Settings />{/if}
+
+  <PlaylistChoiceDialog />
 </div>
 
 <style>

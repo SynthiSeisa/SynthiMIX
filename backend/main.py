@@ -2024,12 +2024,17 @@ async def handle_message(ws: WebSocket, msg: dict):
             asyncio.create_task(do_search(query, ws))
 
     elif t == "download_add":
-        url = msg.get("url", "").strip()
-        fmt = msg.get("format", "mp3-best")
+        url    = msg.get("url", "").strip()
+        fmt    = msg.get("format", "mp3-best")
+        choice = msg.get("playlist_choice")   # None | "single" | "all"
         if url:
             if _is_spotify(url):
                 asyncio.create_task(run_spotify_download(url, fmt))
+            elif choice is None and _is_mixed_playlist_url(url):
+                asyncio.create_task(_ask_playlist_choice(url, fmt, ws))
             else:
+                if choice == "single":
+                    url = _strip_playlist_params(url)
                 asyncio.create_task(run_download(url, fmt))
 
     elif t == "set_spotify_creds":
@@ -2755,6 +2760,81 @@ _FMT_MAP = {
 def _is_playlist(url: str) -> bool:
     return "list=" in url or "/playlist" in url
 
+def _is_mixed_playlist_url(url: str) -> bool:
+    """Link auf einen einzelnen Titel, der zugleich eine Playlist mitfuehrt.
+
+    So sieht ein Link aus, den man aus einer laufenden Playlist kopiert:
+    watch?v=ABC&list=PL…&index=7 — gemeint ist meist nur der eine Titel,
+    frueher wurde stillschweigend die ganze Playlist geladen.
+    """
+    if not url.startswith("http") or "list=" not in url:
+        return False
+    # youtu.be/<id> ist die Kurzform aus dem Teilen-Menue und fuehrt weder
+    # /watch noch v= mit — ohne den Fall liefe sie am Dialog vorbei.
+    return "/watch" in url or "v=" in url or "youtu.be/" in url
+
+def _strip_playlist_params(url: str) -> str:
+    """list=/index=/start_radio entfernen — uebrig bleibt der reine Titel-Link."""
+    import urllib.parse as _p
+    try:
+        parts = _p.urlsplit(url)
+        keep = [(k, v) for k, v in _p.parse_qsl(parts.query, keep_blank_values=True)
+                if k not in ("list", "index", "start_radio", "pp")]
+        return _p.urlunsplit(parts._replace(query=_p.urlencode(keep)))
+    except Exception:
+        return url
+
+async def _playlist_probe(url: str) -> dict:
+    """Titel des Einzeltracks sowie Name und Laenge der Playlist holen."""
+    async def _run(args: list[str]) -> list[str]:
+        try:
+            pr = await asyncio.create_subprocess_exec(
+                YTDLP, *args, "--no-warnings", "--quiet", "--encoding", "utf-8", url,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                creationflags=_NO_WINDOW)
+            out, _ = await asyncio.wait_for(pr.communicate(), timeout=20)
+            return out.decode(errors="replace").strip().splitlines()
+        except Exception:
+            return []
+
+    pl_task = asyncio.create_task(_run(
+        ["--flat-playlist", "--playlist-items", "1",
+         "--print", "%(playlist_title)s", "--print", "%(playlist_count)s"]))
+    tr_task = asyncio.create_task(_run(
+        ["--no-playlist", "--skip-download", "--print", "%(title)s"]))
+    pl_lines, tr_lines = await asyncio.gather(pl_task, tr_task)
+
+    info: dict = {"track_title": "", "playlist_title": "", "count": 0}
+    if tr_lines:
+        info["track_title"] = tr_lines[0][:100]
+    if len(pl_lines) >= 2:
+        t = pl_lines[0].strip()
+        if t and t not in ("NA", "N/A"):
+            info["playlist_title"] = t[:80]
+        try:
+            info["count"] = int(pl_lines[1].strip())
+        except Exception:
+            pass
+    return info
+
+async def _ask_playlist_choice(url: str, fmt: str, ws: WebSocket):
+    """Nachfragen, ob nur der Titel oder die ganze Playlist geladen wird."""
+    async def _send(t, **kw):
+        try: await ws.send_text(json.dumps({"type": t, **kw}))
+        except Exception: pass
+
+    await _send("playlist_choice_pending", url=url)
+    info = await _playlist_probe(url)
+
+    # Keine echte Playlist dahinter (oder Abfrage fehlgeschlagen) — dann nicht
+    # mit einer sinnlosen Rueckfrage aufhalten, sondern einfach den Titel laden.
+    if info["count"] <= 1:
+        await _send("playlist_choice_cancel")
+        asyncio.create_task(run_download(_strip_playlist_params(url), fmt))
+        return
+
+    await _send("playlist_choice", url=url, format=fmt, **info)
+
 def _ytdlp_cmd(url: str, fmt_id: str, out_dir: str, playlist_folder: str | None = None,
                force_folder: bool = False) -> list[str]:
     audio_fmt, quality = _FMT_MAP.get(fmt_id, ("mp3", "0"))
@@ -3184,6 +3264,7 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
     track_total = 0
     last_pct    = -1.0
     cur         = hdr   # points to the current track item (or header for singles)
+    err_lines: list[str] = []   # ERROR-Zeilen von yt-dlp, fuer die Fehlermeldung
 
     # Build URL→history lookup once for O(1) smart-skip (newest entry wins)
     _hist_by_url = {h["url"]: h for h in reversed(_state.get("history", []))}
@@ -3417,11 +3498,25 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
                         hdr["progress"] = min(99, round((base + bonus) * 100))
                         await push_downloads()   # throttled to 200 ms
 
+                # ── Fehlermeldung merken ──────────────────────────────────────
+                elif line.startswith("ERROR:"):
+                    err_lines.append(line[6:].strip()[:120])
+
             except Exception:
                 pass
 
         await proc.wait()
-        ok = proc.returncode in (0, 1)
+
+        # Erfolg heisst: es ist wirklich eine Datei entstanden. yt-dlp beendet
+        # sich wegen --ignore-errors auch dann mit Code 1, wenn gar nichts
+        # geladen wurde — das galt frueher als Erfolg, wodurch fehlgeschlagene
+        # Downloads als "Fertig" in der Liste standen.
+        def _has_file(it: dict) -> bool:
+            fp = it.get("path")
+            return bool(fp) and os.path.exists(fp)
+
+        ok = any(_has_file(d) for d in _state["downloads"]
+                 if d.get("session") == session_id)
 
         # finish current track
         if cur is not hdr:
@@ -3430,10 +3525,21 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
         # finish header
         hdr["progress"]    = 100 if ok else hdr["progress"]
         hdr["status"]      = "done" if ok else "error"
-        hdr["status_text"] = (f"✓ {track_total} Tracks" if track_total and ok
-                              else "✓ Fertig" if ok else "✗ Fehler")
+        partial = ok and proc.returncode != 0
+        if ok and track_total:
+            hdr["status_text"] = (f"✓ {track_total} Tracks · einige übersprungen"
+                                  if partial else f"✓ {track_total} Tracks")
+        elif ok:
+            hdr["status_text"] = "✓ Fertig"
+        else:
+            hdr["status_text"] = "✗ Fehler"
+        # Nur bei Playlists melden, dass etwas uebersprungen wurde. Bei einem
+        # einzelnen Titel, der als Datei vorliegt, waere eine Fehlerzeile
+        # daneben nur verwirrend — heruntergeladen ist heruntergeladen.
+        if partial and err_lines and track_total:
+            hdr["error_msg"] = err_lines[-1]
         if not ok:
-            hdr["error_msg"] = "Download fehlgeschlagen"
+            hdr["error_msg"] = err_lines[-1] if err_lines else "Download fehlgeschlagen"
 
     except Exception as e:
         hdr["status"]      = "error"
