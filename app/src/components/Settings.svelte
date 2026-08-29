@@ -588,6 +588,16 @@
                 ↑ Update
               </button>
             </div>
+            <div class="row">
+              <span class="lbl">Automatisch aktuell halten</span>
+              <button class="tog {$settings.ytdlp_autoupdate ? 'on' : ''}"
+                onclick={() => send({ type: 'set_ytdlp_autoupdate', value: !$settings.ytdlp_autoupdate })}></button>
+            </div>
+            <div class="hint" style="margin-bottom:10px">
+              Prüft einmal täglich auf eine neue yt-dlp-Version. YouTube ändert
+              regelmäßig etwas, wodurch ältere Versionen Downloads mit „403 Forbidden"
+              abbrechen — ohne dass man der App ansieht, woran es liegt.
+            </div>
             <div class="tool-row">
               <span class="tool-name">ffmpeg</span>
               <span class="tool-ver">{$toolsInfo.ffmpeg_version ?? '—'}</span>

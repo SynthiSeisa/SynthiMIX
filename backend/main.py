@@ -141,6 +141,7 @@ async def lifespan(application: FastAPI):
     load_wishes()
     asyncio.create_task(_watcher_loop())
     asyncio.create_task(_auto_scan_loop())
+    asyncio.create_task(_ytdlp_autoupdate_loop())
     print("[backend] ready on ws://127.0.0.1:8765/ws", flush=True)
     yield
 
@@ -385,6 +386,8 @@ def load_settings():
     _state["auto_scan_interval_min"]  = int(raw.get("auto_scan_interval_min", 0))
     _state["favorites"]               = list(raw.get("favorites", []))
     _state["remote_autostart"]        = bool(raw.get("remote_autostart", False))
+    _state["ytdlp_autoupdate"]        = bool(raw.get("ytdlp_autoupdate", True))
+    _state["ytdlp_last_check"]        = int(raw.get("ytdlp_last_check", 0))
     _state["normalize_volume"]        = bool(raw.get("normalize_volume", True))
     _state["target_lufs"]             = float(raw.get("target_lufs", -10.0))
     _state["spotify_client_id"]       = str(raw.get("spotify_client_id", ""))
@@ -410,6 +413,8 @@ def save_settings():
         "auto_scan_interval_min":  _state.get("auto_scan_interval_min", 0),
         "favorites":               _state.get("favorites", []),
         "remote_autostart":        _state.get("remote_autostart", False),
+        "ytdlp_autoupdate":        _state.get("ytdlp_autoupdate", True),
+        "ytdlp_last_check":        _state.get("ytdlp_last_check", 0),
         "normalize_volume":        _state.get("normalize_volume", True),
         "target_lufs":             _state.get("target_lufs", -10.0),
         "spotify_client_id":       _state.get("spotify_client_id", ""),
@@ -906,10 +911,13 @@ async def _check_tools(ws: WebSocket):
     except Exception:
         pass
 
-async def _update_ytdlp(ws: WebSocket):
+async def _update_ytdlp(ws: WebSocket | None = None):
     import urllib.request as _req
     loop = asyncio.get_running_loop()
     async def _send(text, pct):
+        # ws ist None, wenn die taegliche Pruefung das Update anstoesst
+        if ws is None:
+            print(f"[yt-dlp] {text}", flush=True); return
         try: await ws.send_text(json.dumps({"type": "update_progress", "text": text, "pct": pct}))
         except Exception: pass
     await _send("Suche neueste Version…", 0)
@@ -941,7 +949,8 @@ async def _update_ytdlp(ws: WebSocket):
         await loop.run_in_executor(None, _dl)
         os.replace(tmp, str(dest))
         await _send(f"✓ {tag} installiert", 100)
-        await _check_tools(ws)
+        if ws is not None:
+            await _check_tools(ws)
     except Exception as e:
         await _send(f"❌ {e}", -1)
 
@@ -1720,6 +1729,7 @@ async def handle_message(ws: WebSocket, msg: dict):
             "auto_scan_interval_min":  _state.get("auto_scan_interval_min", 0),
             "favorites":               _state.get("favorites", []),
             "remote_autostart":        _state.get("remote_autostart", False),
+            "ytdlp_autoupdate":        _state.get("ytdlp_autoupdate", True),
             "normalize_volume":        _state.get("normalize_volume", True),
             "target_lufs":             _state.get("target_lufs", -10.0),
             "spotify_client_id":       _state.get("spotify_client_id", ""),
@@ -2521,6 +2531,12 @@ async def handle_message(ws: WebSocket, msg: dict):
     elif t == "remote_stop":
         await _stop_remote_server()
 
+    elif t == "set_ytdlp_autoupdate":
+        _state["ytdlp_autoupdate"] = bool(msg.get("value", True))
+        save_settings()
+        await ws.send_text(json.dumps({"type": "settings",
+                                       "ytdlp_autoupdate": _state["ytdlp_autoupdate"]}))
+
     elif t == "set_remote_autostart":
         _state["remote_autostart"] = bool(msg.get("value", False))
         save_settings()
@@ -2680,6 +2696,58 @@ def _scan_folders() -> list[str]:
         if dl_n == f_n or (recursive and dl_n.startswith(f_n + os.sep)):
             return folders
     return folders + [dl]
+
+def _ytdlp_version_sync() -> str:
+    try:
+        r = subprocess.run([YTDLP, "--version"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace",
+                           timeout=10, creationflags=_NO_WINDOW)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+def _ytdlp_latest_tag() -> str:
+    try:
+        req = _urllib_req.Request(
+            "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest",
+            headers={"User-Agent": "SynthiMIX", "Accept": "application/vnd.github+json"})
+        with _urllib_req.urlopen(req, timeout=15) as r:
+            return json.loads(r.read()).get("tag_name", "")
+    except Exception:
+        return ""
+
+async def _ytdlp_check_once():
+    # Nicht mitten in einen laufenden Download platzen: unter Windows laesst
+    # sich die Exe nicht ersetzen, solange sie benutzt wird.
+    if any(d.get("status") == "active" for d in _state.get("downloads", [])):
+        return
+    loop     = asyncio.get_running_loop()
+    lokal    = await loop.run_in_executor(None, _ytdlp_version_sync)
+    neueste  = await loop.run_in_executor(None, _ytdlp_latest_tag)
+    _state["ytdlp_last_check"] = int(time.time())
+    save_settings()
+    if not lokal or not neueste or lokal == neueste:
+        return
+    print(f"[yt-dlp] {lokal} ist veraltet, neueste ist {neueste}", flush=True)
+    await _update_ytdlp()
+    await broadcast({"type": "tools_info", "ytdlp_version": _ytdlp_version_sync()})
+
+async def _ytdlp_autoupdate_loop():
+    """Taeglich pruefen, ob yt-dlp veraltet ist.
+
+    YouTube dreht regelmaessig an der Auslieferung, wodurch aeltere Versionen
+    mit HTTP 403 abbrechen. Im August 2026 hat eine knapp drei Monate alte
+    Version einen Grossteil der Downloads gekostet, ohne dass man der App
+    angesehen haette woran es liegt — genau das soll hier nicht wieder passieren.
+    """
+    await asyncio.sleep(90)          # die App erst hochkommen lassen
+    while True:
+        try:
+            if _state.get("ytdlp_autoupdate", True) and                time.time() - _state.get("ytdlp_last_check", 0) > 86400:
+                await _ytdlp_check_once()
+        except Exception as e:
+            print(f"[yt-dlp] Pruefung fehlgeschlagen: {e}", flush=True)
+        await asyncio.sleep(6 * 3600)
 
 async def _auto_scan_loop():
     while True:
