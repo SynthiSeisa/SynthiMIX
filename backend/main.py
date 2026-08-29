@@ -3644,7 +3644,7 @@ async def websocket_endpoint(ws: WebSocket):
 
 # ── Remote Control Server ──────────────────────────────────────────────────────
 import socket as _socket
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 def _get_local_ip() -> str:
     try:
@@ -3660,8 +3660,14 @@ _REMOTE_HTML = """<!DOCTYPE html>
 <html lang="de">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>SynthiMIX Remote</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#0d1625">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="SynthiMIX">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0a0f1a;color:#c8d8f0;font-family:system-ui,sans-serif}
@@ -3704,7 +3710,15 @@ input[type=range]{width:100%;accent-color:#e07800;height:24px}
 .add-b:active{background:#1a3820}
 .empty{padding:14px 2px;color:#4a6080;font-size:12px;text-align:center}
 .np-nx{font-size:11px;color:#4a6080;min-height:14px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pb-wrap{margin:8px 0 2px;background:#1a2838;border-radius:3px;height:4px;overflow:hidden}
+.cov{display:none;width:132px;height:132px;object-fit:cover;border-radius:8px;margin:0 auto 10px;box-shadow:0 6px 18px rgba(0,0,0,.5)}
+.cov.on{display:block}
+/* Der Balken selbst ist 4px hoch — zu wenig zum Treffen. Die Huelle gibt ihm
+   eine Trefferflaeche von 22px, ohne das Aussehen zu veraendern. */
+.pb-hit{padding:9px 0;margin:-1px 0 -7px;cursor:pointer}
+.pb-wrap{background:#1a2838;border-radius:3px;height:4px;overflow:hidden}
+.pl-list{display:flex;flex-wrap:wrap;gap:6px}
+.pl-b{background:#1a2838;border:1px solid #2a3848;border-radius:6px;color:#8aaac8;font-size:12px;padding:7px 12px;cursor:pointer}
+.pl-b:active{background:#12243a;border-color:#e07800}
 .pb-fill{background:#e07800;height:100%;width:0%;transition:width .9s linear}
 .pb-row{display:flex;justify-content:space-between;font-size:10px;color:#4a6080;margin-bottom:6px}
 .qi-eta{font-size:10px;color:#2a4060;margin-top:1px}
@@ -3731,9 +3745,12 @@ input[type=range]{width:100%;accent-color:#e07800;height:24px}
   <div id="dot" class="dot"></div>
 </div>
 <div class="np">
+  <img id="cov" class="cov" alt="">
   <div id="npT" class="np-t">&#8211;</div>
   <div id="npA" class="np-a">&#8211;</div>
-  <div class="pb-wrap"><div id="pbf" class="pb-fill"></div></div>
+  <div class="pb-hit" onclick="seekAt(event)" title="Zum Spulen antippen">
+    <div class="pb-wrap"><div id="pbf" class="pb-fill"></div></div>
+  </div>
   <div class="pb-row"><span id="pbt">0:00</span><span id="pbr">&#8211;</span></div>
   <div id="npNx" class="np-nx"></div>
 </div>
@@ -3757,6 +3774,10 @@ input[type=range]{width:100%;accent-color:#e07800;height:24px}
   <div class="sec-h">WARTESCHLANGE &nbsp;<span id="qc" style="font-weight:400;color:#3a5070">0</span></div>
   <div id="qw" class="q-wrap"><div id="ql"></div></div>
 </div>
+<div class="sec">
+  <div class="sec-h">PLAYLISTEN</div>
+  <div id="pll" class="pl-list"><div class="empty">&#8230;</div></div>
+</div>
 <div class="sec" style="padding-bottom:20px">
   <div class="sec-h">SUCHE</div>
   <div class="s-tabs">
@@ -3768,10 +3789,13 @@ input[type=range]{width:100%;accent-color:#e07800;height:24px}
 </div>
 <script>
 var st={playing:false,current_idx:-1,volume:80,normalize_volume:true,target_lufs:-10,queue:[]},ws,_vt,_res=[],_ytRes=[],_srMode='lib'
+var _rt=null,_wl=null
 function conn(){
+  if(ws&&(ws.readyState===0||ws.readyState===1))return
+  clearTimeout(_rt);_rt=null
   ws=new WebSocket('ws://'+location.hostname+':8080/ws')
-  ws.onopen=function(){dot(true)}
-  ws.onclose=function(){dot(false);setTimeout(conn,2000)}
+  ws.onopen=function(){dot(true);send({type:'remote_playlists'})}
+  ws.onclose=function(){dot(false);clearTimeout(_rt);_rt=setTimeout(conn,2000)}
   ws.onerror=function(){ws.close()}
   ws.onmessage=function(e){
     var m=JSON.parse(e.data)
@@ -3779,6 +3803,7 @@ function conn(){
     else if(m.type==='pos'){updPos(m)}
     else if(m.type==='search_results'){showRes(m.results||[])}
     else if(m.type==='yt_results'){showYtRes(m.results||[])}
+    else if(m.type==='playlists'){showPls(m.items||[])}
     else if(m.type==='yt_dl_status'){updDl(m)}
   }
 }
@@ -3921,6 +3946,7 @@ function updPos(m){
 /* ── Render ─────────────────────────────────────────────────────────────── */
 function render(){
   var q=st.queue||[],ci=st.current_idx,cur=q[ci]
+  setCover(cur?ci:-1)
   document.getElementById('npT').textContent=cur&&cur.title?cur.title:'–'
   document.getElementById('npA').textContent=cur&&cur.artist?cur.artist:''
   var nx=st.next_title?'↓ '+st.next_title+(st.next_artist?' · '+st.next_artist:''):''
@@ -3945,8 +3971,53 @@ function render(){
   // Scroll current track into view
   if(ci>=0){var rows=document.getElementById('ql').children;if(rows[ci])rows[ci].scrollIntoView({behavior:'smooth',block:'nearest'})}
 }
+function seekAt(e){
+  var box=e.currentTarget.getBoundingClientRect()
+  var frac=Math.min(1,Math.max(0,(e.clientX-box.left)/box.width))
+  var dur=st.duration_ms||0
+  if(dur>0){send({type:'seek',position_ms:Math.round(frac*dur)});updPos({pos:frac*dur,dur:dur})}
+}
+function setCover(ci){
+  var el=document.getElementById('cov')
+  if(ci==null||ci<0){el.className='cov';el.removeAttribute('src');return}
+  var want='/cover?i='+ci
+  if(el.getAttribute('src')===want)return
+  el.onload=function(){el.className='cov on'}
+  el.onerror=function(){el.className='cov';el.removeAttribute('src')}
+  el.setAttribute('src',want)
+}
+function showPls(items){
+  document.getElementById('pll').innerHTML=(items&&items.length)
+    ?items.map(function(pl){
+        return'<button class=pl-b onclick="loadPl(this)" data-p="'+esc(pl.path)+'">'+esc(pl.name||'?')+'</button>'
+      }).join('')
+    :'<div class=empty>Keine Playlisten</div>'
+}
+function loadPl(b){send({type:'remote_load_playlist',path:b.getAttribute('data-p')})}
 function absTime(secs){var d=new Date(Date.now()+secs*1000);return'~'+('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2)}
+
+/* Sperrt das Handy den Bildschirm, stirbt die Verbindung. Ohne das hier
+   merkt die Seite das erst beim naechsten Sendeversuch und haengt beim
+   Zurueckkommen ein paar Sekunden auf "getrennt". */
+document.addEventListener('visibilitychange',function(){
+  if(document.visibilityState==='visible'){conn();lock()}
+  else releaseLock()
+})
+window.addEventListener('online',conn)
+window.addEventListener('pageshow',conn)
+
+/* Beim Auflegen soll der Bildschirm nicht dauernd zugehen. */
+function lock(){
+  if(!navigator.wakeLock||_wl)return
+  navigator.wakeLock.request('screen').then(function(w){
+    _wl=w
+    w.addEventListener('release',function(){_wl=null})
+  }).catch(function(){})
+}
+function releaseLock(){if(_wl){try{_wl.release()}catch(e){}_wl=null}}
+
 conn()
+lock()
 </script>
 </body>
 </html>"""
@@ -3957,6 +4028,53 @@ remote_app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*
 @remote_app.get("/")
 async def remote_index():
     return HTMLResponse(_REMOTE_HTML)
+
+# Cover werden per ffmpeg aus der Datei geholt — das dauert, also einmal je
+# Pfad merken. None heisst "hat keins", damit nicht jedes Mal neu gesucht wird.
+_remote_art: dict[str, bytes | None] = {}
+
+@remote_app.get("/cover")
+async def remote_cover(i: int = -1):
+    """Cover des Titels an Warteschlangenposition i.
+
+    Bewusst ueber den Index und nicht ueber einen Pfad: ein Pfad aus der
+    Anfrage waere ein Weg, beliebige Dateien vom Rechner zu lesen.
+    """
+    q = _state.get("queue", [])
+    if not (0 <= i < len(q)):
+        return Response(status_code=404)
+    path = q[i].get("path", "")
+    if not path or not os.path.exists(path):
+        return Response(status_code=404)
+
+    if path not in _remote_art:
+        loop = asyncio.get_running_loop()
+        data = await loop.run_in_executor(None, _extract_art_sync, path)
+        if data and data.startswith("data:image/jpeg;base64,"):
+            _remote_art[path] = base64.b64decode(data.split(",", 1)[1])
+        else:
+            _remote_art[path] = None
+        if len(_remote_art) > 200:
+            _remote_art.clear()
+
+    art = _remote_art[path]
+    if not art:
+        return Response(status_code=404)
+    return Response(content=art, media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=3600"})
+
+@remote_app.get("/manifest.json")
+async def remote_manifest():
+    """Macht die Seite ueber "Zum Startbildschirm" zur eigenstaendigen App."""
+    return JSONResponse({
+        "name": "SynthiMIX Remote",
+        "short_name": "SynthiMIX",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#0a0f1a",
+        "theme_color": "#0d1625",
+        "icons": [],
+    })
 
 @remote_app.websocket("/ws")
 async def remote_ws_endpoint(websocket: WebSocket):
@@ -4047,7 +4165,18 @@ async def remote_ws_endpoint(websocket: WebSocket):
                     asyncio.create_task(_remote_dl_and_queue(url, title, websocket, as_next))
             elif t == "set_normalize_volume":
                 await handle_message(websocket, msg)
-            elif t in ("pause", "resume", "play_at", "play_next", "play_prev", "set_volume"):
+            elif t == "remote_playlists":
+                await websocket.send_text(json.dumps(
+                    {"type": "playlists", "items": _get_playlists()}))
+            elif t == "remote_load_playlist":
+                # Pfad gegen die bekannten Playlisten pruefen — load_playlist
+                # wuerde sonst jede beliebige Datei einlesen.
+                want  = msg.get("path", "")
+                known = {pl.get("path") for pl in _get_playlists()}
+                if want in known:
+                    await handle_message(websocket, {"type": "load_playlist", "path": want})
+            elif t in ("pause", "resume", "play_at", "play_next", "play_prev",
+                       "set_volume", "seek"):
                 await handle_message(websocket, msg)
     except Exception:
         pass
