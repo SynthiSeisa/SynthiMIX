@@ -101,6 +101,7 @@ PLAYLISTS_DIR = BASE_DIR / "playlists"
 HISTORY_FILE  = BASE_DIR / "history.json"
 PLAY_LOG_FILE = BASE_DIR / "play_log.json"
 NOTES_FILE    = BASE_DIR / "notes.json"
+WISHES_FILE   = BASE_DIR / "wishes.json"
 
 # Exe dir (where ffmpeg/yt-dlp are bundled in packaged mode)
 _frozen   = getattr(sys, 'frozen', False)
@@ -137,6 +138,7 @@ async def lifespan(application: FastAPI):
     load_history()
     load_play_log()
     load_notes()
+    load_wishes()
     asyncio.create_task(_watcher_loop())
     asyncio.create_task(_auto_scan_loop())
     print("[backend] ready on ws://127.0.0.1:8765/ws", flush=True)
@@ -167,6 +169,7 @@ _state: dict[str, Any] = {
     "history":            [],    # list of {url, title, path, date, bitrate_kbps}
     "play_log":           [],    # list of {path, title, artist, played_at} — actual playback, most recent first
     "notes":              "",    # free-text scratchpad (bug notes etc.)
+    "wishes":             [],    # Musikwuensche der Gaeste, siehe _process_wish
     "loudnorm_on_dl":     True,
     "loudnorm_target":    -10.0,
     "scan_recursive":     True,
@@ -1697,6 +1700,9 @@ async def handle_message(ws: WebSocket, msg: dict):
         await ws.send_text(json.dumps({"type": "library", "tracks": _state["library"]}))
         await ws.send_text(json.dumps({"type": "downloads", "items": _state["downloads"]}))
         await ws.send_text(json.dumps({"type": "playlists", "items": _get_playlists()}))
+        # Ohne das hier haette ein frisch gestarteter Client die Wuensche erst
+        # gesehen, wenn sich der naechste geaendert hat.
+        await ws.send_text(json.dumps({"type": "wishes", "items": _state.get("wishes", [])}))
         await ws.send_text(json.dumps({
             "type":             "settings",
             "volume":           _state["volume"],
@@ -1834,6 +1840,53 @@ async def handle_message(ws: WebSocket, msg: dict):
             nxt_path = _state["queue"][nxt_idx].get("path", "")
             if nxt_path and _state["queue"][nxt_idx].get("lufs", -99) <= -90:
                 asyncio.create_task(_enrich_track(nxt_path))
+
+    elif t == "get_wishes":
+        await ws.send_text(json.dumps({"type": "wishes", "items": _state.get("wishes", [])}))
+
+    elif t == "wish_accept":
+        wid = msg.get("id")
+        w = next((x for x in _state.get("wishes", []) if x.get("id") == wid), None)
+        if w and w.get("path") and os.path.exists(w["path"]):
+            td = next((lt for lt in _state["library"] if lt.get("path") == w["path"]), None)
+            entry = {
+                "path":         w["path"],
+                "title":        (td or {}).get("title") or w.get("title", ""),
+                "artist":       (td or {}).get("artist", ""),
+                "duration_sec": (td or {}).get("duration_sec", 0),
+                "lufs":         (td or {}).get("lufs", -99.0),
+                "bpm":          (td or {}).get("bpm", 0),
+                "bitrate_kbps": (td or {}).get("bitrate_kbps", 0),
+                "played":       False,
+            }
+            if msg.get("as_next") and _state.get("current_idx", -1) >= 0:
+                _state["queue"].insert(_state["current_idx"] + 1, entry)
+            else:
+                _state["queue"].append(entry)
+            save_queue()
+            await push_queue()
+            _state["wishes"] = [x for x in _state["wishes"] if x.get("id") != wid]
+            save_wishes()
+            await push_wishes()
+
+    elif t == "wish_reject":
+        wid = msg.get("id")
+        w = next((x for x in _state.get("wishes", []) if x.get("id") == wid), None)
+        if w:
+            # Heruntergeladene Datei mitnehmen — abgelehnte Wuensche sollen
+            # den Download-Ordner nicht vollmuellen.
+            p = w.get("path", "")
+            if p and os.path.exists(p) and msg.get("delete_file", True):
+                try:
+                    os.remove(p)
+                    _state["library"] = [lt for lt in _state["library"] if lt.get("path") != p]
+                    save_library()
+                    await push_library()
+                except Exception as e:
+                    print(f"[wishes] konnte {p} nicht loeschen: {e}", flush=True)
+            _state["wishes"] = [x for x in _state["wishes"] if x.get("id") != wid]
+            save_wishes()
+            await push_wishes()
 
     elif t == "enrich_track":
         path = msg.get("path", "")
@@ -4022,6 +4075,103 @@ lock()
 </body>
 </html>"""
 
+# ── Musikwuensche ────────────────────────────────────────────────────────────
+# Gaeste wuenschen sich Titel ueber eine eigene Seite. Der Titel wird sofort
+# heruntergeladen und analysiert, damit er beim Annehmen ohne Wartezeit
+# spielbar ist. In die Warteschlange kommt er erst, wenn der DJ zustimmt.
+_wish_counter = 0
+
+def load_wishes():
+    global _wish_counter
+    try:
+        if WISHES_FILE.exists():
+            _state["wishes"] = json.loads(WISHES_FILE.read_text(encoding="utf-8"))
+            _wish_counter = max((w.get("id", 0) for w in _state["wishes"]), default=0)
+    except Exception as e:
+        print(f"[wishes] konnte nicht geladen werden: {e}", flush=True)
+        _state["wishes"] = []
+
+def save_wishes():
+    try:
+        WISHES_FILE.write_text(json.dumps(_state.get("wishes", []),
+                                          ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as e:
+        print(f"[wishes] konnte nicht gespeichert werden: {e}", flush=True)
+
+async def push_wishes():
+    await broadcast({"type": "wishes", "items": _state.get("wishes", [])})
+
+def _title_matches(a: str, b: str) -> bool:
+    na, nb = _norm_queue_title(a), _norm_queue_title(b)
+    if not na or not nb:
+        return False
+    return SequenceMatcher(None, na, nb).ratio() >= 0.82
+
+def _queue_eta_sec(idx: int) -> float:
+    """Sekunden, bis der Titel an Position idx an der Reihe ist."""
+    q  = _state.get("queue", [])
+    ci = _state.get("current_idx", -1)
+    if idx <= ci:
+        return 0.0
+    dur = _state.get("duration_ms", 0) / 1000
+    pos = _state.get("position_ms", 0) / 1000
+    rem = max(0.0, dur - pos) if dur > 0 else 0.0
+    for j in range(ci + 1, idx):
+        if 0 <= j < len(q):
+            rem += q[j].get("duration_sec", 0) or 0
+    return rem
+
+def _wish_title_status(title: str) -> dict:
+    """Laeuft der Titel schon, lief er bereits, oder wuenscht ihn schon wer?"""
+    # 1. Steht er in der Warteschlange? Dann die Uhrzeit dazu.
+    for i, q in enumerate(_state.get("queue", [])):
+        if _title_matches(title, q.get("title", "")):
+            if i == _state.get("current_idx", -1):
+                return {"state": "playing"}
+            if q.get("played"):
+                continue
+            return {"state": "queued", "in_sec": round(_queue_eta_sec(i))}
+    # 2. Lief er heute schon?
+    for entry in _state.get("play_log", []):
+        if _title_matches(title, entry.get("title", "")):
+            return {"state": "played", "at": entry.get("played_at", 0)}
+    # 3. Hat ihn schon jemand gewuenscht?
+    for w in _state.get("wishes", []):
+        if w.get("status") != "abgelehnt" and _title_matches(title, w.get("title", "")):
+            return {"state": "wished", "count": w.get("count", 1)}
+    return {"state": "free"}
+
+async def _process_wish(wish: dict):
+    """Titel herunterladen und analysieren, damit er sofort spielbar ist."""
+    def _set(status: str, **kw):
+        wish["status"] = status
+        wish.update(kw)
+        save_wishes()
+
+    _set("laedt")
+    await push_wishes()
+    try:
+        path = await run_download(wish["url"], _state.get("wish_format", "mp3-best"))
+    except Exception as e:
+        _set("fehler", error=str(e)[:120]); await push_wishes(); return
+
+    if not path or not os.path.exists(path):
+        # Den echten Grund aus dem Download-Eintrag holen — "fehlgeschlagen"
+        # allein hilft beim Auflegen niemandem weiter.
+        eintrag = next((d for d in _state.get("downloads", [])
+                        if d.get("url") == wish["url"] and d.get("error_msg")), None)
+        grund = (eintrag or {}).get("error_msg") or "Download fehlgeschlagen"
+        _set("fehler", error=grund[:120]); await push_wishes(); return
+
+    _set("analysiert", path=path)
+    await push_wishes()
+    try:
+        await _enrich_track(path, force=True)
+    except Exception:
+        pass          # ohne BPM/LUFS ist er trotzdem spielbar
+    _set("bereit", path=path)
+    await push_wishes()
+
 remote_app = FastAPI()
 remote_app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
@@ -4062,6 +4212,177 @@ async def remote_cover(i: int = -1):
         return Response(status_code=404)
     return Response(content=art, media_type="image/jpeg",
                     headers={"Cache-Control": "public, max-age=3600"})
+
+_WISH_HTML = """<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Musikwunsch</title>
+<meta name="theme-color" content="#0d1625">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0a0f1a;color:#c8d8f0;font-family:system-ui,sans-serif;padding-bottom:30px}
+.hdr{background:#0d1625;padding:14px;border-bottom:1px solid #1a2838;text-align:center}
+.logo{color:#e07800;font-weight:700;font-size:18px}.logo span{color:#3b82f6}
+.sub{font-size:11px;color:#4a6080;margin-top:3px}
+.wrap{padding:16px 14px}
+.inp{width:100%;background:#0d1625;border:1px solid #2a3848;border-radius:8px;color:#c8d8f0;font-size:16px;padding:12px 14px;outline:none}
+.inp:focus{border-color:#e07800}
+.note{font-size:11px;color:#4a6080;margin:10px 2px 14px;line-height:1.5}
+.r{display:flex;align-items:center;gap:10px;padding:11px 0;border-bottom:1px solid #131e2e}
+.r-i{flex:1;min-width:0}
+.r-t{font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r-s{font-size:11px;margin-top:3px}
+.s-free{color:#4a6080}.s-queued{color:#e0a040}.s-played{color:#5a7090}
+.s-wished{color:#3b82f6}.s-playing{color:#75d595}
+.b{background:#0d2010;border:1px solid #1a4020;border-radius:8px;color:#75d595;font-size:13px;padding:10px 14px;cursor:pointer;flex-shrink:0}
+.b:disabled{background:#141a24;border-color:#232f3f;color:#3a5068;cursor:default}
+.msg{text-align:center;padding:18px 10px;font-size:13px;color:#75d595}
+.empty{text-align:center;padding:24px 10px;font-size:12px;color:#4a6080}
+</style>
+</head>
+<body>
+<div class="hdr">
+  <div class="logo">Synthi<span>MIX</span></div>
+  <div class="sub">Was m&#246;chtest du h&#246;ren?</div>
+</div>
+<div class="wrap">
+  <input class="inp" id="q" type="search" placeholder="Titel oder K&#252;nstler&#8230;" autocomplete="off">
+  <div class="note" id="note">Such deinen Titel und tipp auf W&#252;nschen. Der DJ bekommt ihn angezeigt.</div>
+  <div id="res"></div>
+</div>
+<script>
+var ws,_t,_busy={}
+function conn(){
+  if(ws&&(ws.readyState===0||ws.readyState===1))return
+  ws=new WebSocket('ws://'+location.host+'/wunsch/ws')
+  ws.onclose=function(){setTimeout(conn,2000)}
+  ws.onerror=function(){ws.close()}
+  ws.onmessage=function(e){
+    var m=JSON.parse(e.data)
+    if(m.type==='wish_results')show(m.results||[])
+    else if(m.type==='wish_ack'){
+      document.getElementById('note').innerHTML='<div class=msg>&#10003; '+esc(m.title||'Dein Wunsch')+' ist beim DJ angekommen.</div>'
+      document.getElementById('res').innerHTML=''
+      document.getElementById('q').value=''
+    }
+    else if(m.type==='wish_deny'){
+      document.getElementById('note').innerHTML='<div class=msg style="color:#e0a040">'+esc(m.text||'Das ging nicht.')+'</div>'
+    }
+  }
+}
+function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function clock(ts){var d=new Date(ts*1000);return('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2)}
+function inClock(sec){return clock(Date.now()/1000+sec)}
+document.getElementById('q').oninput=function(){
+  var v=this.value.trim()
+  clearTimeout(_t)
+  if(v.length<2){document.getElementById('res').innerHTML='';return}
+  _t=setTimeout(function(){
+    document.getElementById('res').innerHTML='<div class=empty>Suche&#8230;</div>'
+    if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'wish_search',query:v}))
+  },400)
+}
+function show(rs){
+  window._rs=rs
+  if(!rs.length){document.getElementById('res').innerHTML='<div class=empty>Nichts gefunden</div>';return}
+  document.getElementById('res').innerHTML=rs.map(function(r,i){
+    var st=r.status||{},txt='',cls='s-free',dis=''
+    if(st.state==='playing'){txt='l&#228;uft gerade';cls='s-playing';dis=' disabled'}
+    else if(st.state==='queued'){txt='l&#228;uft etwa um '+inClock(st.in_sec||0)+' Uhr';cls='s-queued';dis=' disabled'}
+    else if(st.state==='played'){txt='lief um '+clock(st.at||0)+' Uhr';cls='s-played'}
+    else if(st.state==='wished'){txt='schon gew&#252;nscht'+(st.count>1?' ('+st.count+'x)':'');cls='s-wished';dis=' disabled'}
+    else txt=r.uploader||''
+    return'<div class=r><div class=r-i><div class=r-t>'+esc(r.title)+'</div><div class="r-s '+cls+'">'+txt+'</div></div>'+
+      '<button class=b'+dis+' onclick="wish('+i+',this)">W&#252;nschen</button></div>'
+  }).join('')
+}
+function wish(i,btn){
+  var r=(window._rs||[])[i]
+  if(!r||_busy[r.url])return
+  _busy[r.url]=1;btn.disabled=true;btn.textContent='&#8230;'
+  ws.send(JSON.stringify({type:'wish_add',url:r.url,title:r.title}))
+}
+conn()
+</script>
+</body>
+</html>"""
+
+@remote_app.get("/wunsch")
+async def wish_page():
+    return HTMLResponse(_WISH_HTML)
+
+# Wie viele offene Wuensche ein Geraet gleichzeitig haben darf. Ohne Grenze
+# kippt ein einzelner Spassvogel die Liste voll.
+_WISH_LIMIT_PER_CLIENT = 3
+
+@remote_app.websocket("/wunsch/ws")
+async def wish_ws(websocket: WebSocket):
+    """Bewusst getrennt vom Remote: hier gibt es keine Wiedergabesteuerung."""
+    global _wish_counter
+    await websocket.accept()
+    who = websocket.client.host if websocket.client else "?"
+    try:
+        while True:
+            msg = await websocket.receive_json()
+            t = msg.get("type", "")
+
+            if t == "wish_search":
+                q = (msg.get("query") or "").strip()
+                if q:
+                    asyncio.create_task(_do_wish_search(q, websocket))
+
+            elif t == "wish_add":
+                url   = (msg.get("url") or "").strip()
+                title = (msg.get("title") or "").strip()
+                if not url.startswith("http"):
+                    continue
+
+                offen = [w for w in _state.get("wishes", []) if w.get("from") == who]
+                if len(offen) >= _WISH_LIMIT_PER_CLIENT:
+                    await websocket.send_text(json.dumps({"type": "wish_deny",
+                        "text": f"Du hast schon {len(offen)} Wuensche offen. Warte, bis der DJ sie bearbeitet hat."}))
+                    continue
+
+                # Schon gewuenscht? Dann nur hochzaehlen — das zeigt dem DJ,
+                # was die Leute wirklich hoeren wollen.
+                vorhanden = next((w for w in _state.get("wishes", [])
+                                  if w.get("url") == url or _title_matches(title, w.get("title", ""))), None)
+                if vorhanden:
+                    vorhanden["count"] = vorhanden.get("count", 1) + 1
+                    save_wishes()
+                    await push_wishes()
+                    await websocket.send_text(json.dumps({"type": "wish_ack", "title": title}))
+                    continue
+
+                _wish_counter += 1
+                wish = {"id": _wish_counter, "url": url, "title": title,
+                        "from": who, "count": 1, "status": "neu",
+                        "path": None, "error": "", "created_at": int(time.time())}
+                _state.setdefault("wishes", []).append(wish)
+                save_wishes()
+                await push_wishes()
+                await websocket.send_text(json.dumps({"type": "wish_ack", "title": title}))
+                asyncio.create_task(_process_wish(wish))
+    except Exception:
+        pass
+
+async def _do_wish_search(query: str, ws: WebSocket):
+    base_args = ["--flat-playlist", "-j", "--no-playlist", "--quiet"]
+    results = await _run_search_cmd(_yt(f"ytmsearch8:{query}", *base_args))
+    if not results:
+        results = await _run_search_cmd(_yt(f"ytsearch8:{query}", *base_args))
+    results = [r for r in results if not _is_unwanted_result(r)]
+    results.sort(key=lambda r: r.get("_score", 0), reverse=True)
+    try:
+        await ws.send_text(json.dumps({"type": "wish_results", "results": [
+            {"url": r["url"], "title": r["title"], "uploader": r.get("uploader", ""),
+             "status": _wish_title_status(r["title"])}
+            for r in results[:8]
+        ]}))
+    except Exception:
+        pass
 
 @remote_app.get("/manifest.json")
 async def remote_manifest():

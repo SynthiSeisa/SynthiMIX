@@ -44,6 +44,7 @@ export const radioStatus         = writable(null)   // null | { title, similar_t
 export const trackIdentified     = writable(null)   // null | { title, artist, album, score, path, error }
 export const fpcalcInstalling    = writable(false)
 export const fpcalcInstallError  = writable(null)
+export const wishes              = writable([])   // Musikwuensche der Gaeste
 export const playlistChoice      = writable(null)   // null | {pending:true} | {url, format, track_title, playlist_title, count}
 export const spotdlInstalling    = writable(false)
 export const spotdlInstallText   = writable(null)   // Fortschrittstext während des Downloads
@@ -252,6 +253,7 @@ function connect() {
       case 'fpcalc_install_progress': fpcalcInstalling.set(true);  fpcalcInstallError.set(null); break
       case 'fpcalc_install_done':     fpcalcInstalling.set(false); break
       case 'fpcalc_install_error':    fpcalcInstalling.set(false); fpcalcInstallError.set(msg.text ?? 'Fehler'); break
+      case 'wishes':                  wishes.set(msg.items || []); break
       case 'playlist_choice_pending': playlistChoice.set({ pending: true }); break
       case 'playlist_choice_cancel':  playlistChoice.set(null); break
       case 'playlist_choice':         playlistChoice.set({ ...msg, pending: false }); break

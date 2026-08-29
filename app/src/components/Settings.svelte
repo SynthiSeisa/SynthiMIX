@@ -138,16 +138,22 @@
     setTimeout(() => urlCopied = false, 1800)
   }
 
-  let qrCanvas = $state(null)
-  $effect(() => {
-    const url = $remoteStatus?.url
-    if (qrCanvas && url) {
-      QRCode.toCanvas(qrCanvas, url, {
-        width: 160, margin: 2,
-        color: { dark: '#e07800', light: '#070c18' }
-      })
-    }
-  })
+  let qrCanvas     = $state(null)
+  let wishQrCanvas = $state(null)
+  // Der Wunsch-QR ist der, den man ausdruckt. Er bleibt gueltig, solange der
+  // Rechner dieselbe Adresse behaelt — dafuer im Router eine feste IP
+  // vergeben, sonst zeigt der Zettel beim naechsten Mal ins Leere.
+  const wishUrl = $derived($remoteStatus?.url ? $remoteStatus.url + '/wunsch' : '')
+
+  function malen(canvas, url) {
+    if (!canvas || !url) return
+    QRCode.toCanvas(canvas, url, {
+      width: 160, margin: 2,
+      color: { dark: '#e07800', light: '#070c18' }
+    })
+  }
+  $effect(() => { malen(qrCanvas, $remoteStatus?.url) })
+  $effect(() => { malen(wishQrCanvas, wishUrl) })
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -620,9 +626,20 @@
                 <span class="remote-hint">Im Handy-Browser öffnen (gleiches WLAN)</span>
                 <button class="action-btn" onclick={() => window.electron?.openPath($remoteStatus?.url)} title="Im Standard-Browser öffnen">Im Browser öffnen ↗</button>
               </div>
-              <div class="qr-wrap">
-                <canvas bind:this={qrCanvas} class="qr-canvas"></canvas>
-                <span class="qr-hint">Mit Kamera scannen</span>
+              <div class="qr-row">
+                <div class="qr-wrap">
+                  <canvas bind:this={qrCanvas} class="qr-canvas"></canvas>
+                  <span class="qr-hint">FERNBEDIENUNG</span>
+                </div>
+                <div class="qr-wrap">
+                  <canvas bind:this={wishQrCanvas} class="qr-canvas"></canvas>
+                  <span class="qr-hint">MUSIKWÜNSCHE</span>
+                </div>
+              </div>
+              <div class="hint" style="text-align:center;margin-bottom:8px">
+                Der rechte Code führt auf die Wunsch-Seite — dort können Gäste nur
+                Titel wünschen, nicht die Wiedergabe steuern. Zum Ausdrucken sollte
+                der Rechner im Router eine feste IP bekommen.
               </div>
               <button class="action-btn danger" onclick={() => send({ type: 'remote_stop' })}>Server stoppen</button>
             {:else}
@@ -919,6 +936,7 @@
   .remote-hint { font-size: 10px; color: var(--c-tx6); }
   .url-val { cursor: default; }
   .url-val:hover { color: var(--c-tx2); }
+  .qr-row { display: flex; justify-content: center; gap: 22px; }
   .qr-wrap { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 12px 0 8px; }
   .qr-canvas { border-radius: 6px; border: 1px solid var(--c-br2); }
   .qr-hint { font-size: 9px; color: var(--c-tx6); letter-spacing: .06em; }

@@ -1,6 +1,13 @@
 <script>
-  import { settingsOpen, send, backendLogs, notes } from '../stores/ws.js'
+  import { settingsOpen, send, backendLogs, notes, wishes } from '../stores/ws.js'
+  import WishesDialog from './WishesDialog.svelte'
   const win = window.electron ?? {}
+
+  // ── Musikwuensche ─────────────────────────────────────────────────────────
+  let wishesOpen = $state(false)
+  // Nur was noch Aufmerksamkeit braucht — Fehler zaehlen mit, damit sie
+  // nicht unbemerkt liegenbleiben.
+  const offeneWuensche = $derived($wishes.length)
 
   // ── Theme toggle ──────────────────────────────────────────────────────────
   let isDark = $state((localStorage.getItem('synthimix-theme') || 'dark') === 'dark')
@@ -190,6 +197,8 @@
       {/if}
     </div>
     <button class="ctrl theme-btn" onclick={toggleTheme} title={isDark ? 'Helles Theme' : 'Dunkles Theme'}>{isDark ? '☀' : '☾'}</button>
+    <button class="tb-btn tb-wish" onclick={() => wishesOpen = !wishesOpen}
+            title="Musikw&#252;nsche der G&#228;ste">&#9834;{#if offeneWuensche}<span class="wish-badge">{offeneWuensche}</span>{/if}</button>
     <button class="tb-btn" onclick={() => settingsOpen.set(true)} title="Einstellungen">&#9881;</button>
   </div>
   <div class="controls" role="toolbar">
@@ -232,6 +241,10 @@
   </div>
 {/if}
 
+{#if wishesOpen}
+  <WishesDialog onclose={() => wishesOpen = false} />
+{/if}
+
 <style>
   .titlebar {
     display: flex;
@@ -262,6 +275,12 @@
   .update-btn.ready:hover  { background: var(--c-green-br); }
 
   .tb-actions { display:flex; align-items:center; gap:4px; margin-left:auto; -webkit-app-region:no-drag; }
+  .tb-wish { position:relative; }
+  .wish-badge {
+    position:absolute; top:1px; right:0;
+    background:var(--c-accent); color:#fff; font-size:8px; line-height:1;
+    min-width:12px; padding:2px 3px; border-radius:6px; text-align:center;
+  }
   .tb-btn { background:none; border:none; color:var(--c-tx6); font-size:14px; width:28px; height:28px; cursor:pointer; border-radius:3px; display:flex; align-items:center; justify-content:center; transition:color .1s, background .1s; }
   .tb-btn:hover { color:var(--c-tx2); background:var(--c-br2); }
   .tb-help { font-size:11px; font-weight:700; border:1px solid var(--c-br2); border-radius:50%; width:18px; height:18px; }
