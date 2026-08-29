@@ -2012,7 +2012,13 @@ async def handle_message(ws: WebSocket, msg: dict):
             if folder not in _state["watched_folders"]:
                 _state["watched_folders"].append(folder)
                 save_settings()
-            asyncio.create_task(scan_folder(folder))
+
+        async def _scan_all():
+            # Ohne Ordnerauswahl alles neu einlesen — vorher passierte hier
+            # schlicht nichts, etwa wenn der Knopf aus dem Remote kam.
+            for f in _scan_folders():
+                await scan_folder(f)
+        asyncio.create_task(_scan_all())
 
     elif t == "set_scan_recursive":
         _state["scan_recursive"] = bool(msg.get("enabled", True))
@@ -2600,14 +2606,35 @@ async def scan_folder(folder: str):
     await asyncio.sleep(4)
     await broadcast({"type": "scan_status", "text": ""})
 
+def _scan_folders() -> list[str]:
+    """Beobachtete Ordner samt Download-Ordner.
+
+    Der Download-Ordner steht bewusst nicht in watched_folders — er soll
+    mitziehen, wenn der Nutzer ihn umstellt. Frisch geladene Titel sollen
+    trotzdem in der Bibliothek auftauchen, ohne ihn extra hinzuzufuegen.
+    """
+    folders = [f for f in _state.get("watched_folders", []) if os.path.isdir(f)]
+    dl = _state.get("download_dir") or str(BASE_DIR / "Downloads")
+    if not os.path.isdir(dl):
+        return folders
+
+    dl_n      = os.path.normcase(os.path.abspath(dl))
+    recursive = _state.get("scan_recursive", True)
+    for f in folders:
+        f_n = os.path.normcase(os.path.abspath(f))
+        # Schon abgedeckt: selber Ordner, oder Unterordner eines rekursiv
+        # durchsuchten — sonst wuerde alles doppelt eingelesen.
+        if dl_n == f_n or (recursive and dl_n.startswith(f_n + os.sep)):
+            return folders
+    return folders + [dl]
+
 async def _auto_scan_loop():
     while True:
         interval = _state.get("auto_scan_interval_min", 0)
         if interval > 0:
             await asyncio.sleep(interval * 60)
-            for folder in list(_state.get("watched_folders", [])):
-                if os.path.isdir(folder):
-                    await scan_folder(folder)
+            for folder in _scan_folders():
+                await scan_folder(folder)
         else:
             await asyncio.sleep(60)
 
@@ -2666,7 +2693,7 @@ async def _watcher_loop():
     await asyncio.sleep(15)   # initial delay — let app settle
     while True:
         try:
-            folders   = list(_state.get("watched_folders", []))
+            folders   = _scan_folders()
             recursive = _state.get("scan_recursive", True)
             if folders:
                 existing = {t["path"] for t in _state["library"]}
@@ -3586,6 +3613,9 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
         probe = await loop.run_in_executor(None, _probe_sync, hdr["path"])
         _append_history(url, hdr.get("title", ""), hdr["path"], probe.get("bitrate_kbps", 0))
         await broadcast({"type": "history", "items": _state["history"][:100]})
+        # Einzelne Downloads durchlaufen kein _done() — ohne das hier fehlten
+        # sie in der Bibliothek, bis irgendwann ein Scan lief.
+        await _auto_add_to_library(hdr["path"])
 
     await push_downloads(force=True)
     return hdr.get("path") if hdr.get("path") and os.path.exists(hdr.get("path", "")) else None
