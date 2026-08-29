@@ -1,6 +1,6 @@
 <script>
   import { untrack } from 'svelte'
-  import { downloads, searchResults, send } from '../stores/ws.js'
+  import { downloads, searchResults, send, openSettings } from '../stores/ws.js'
 
   let input     = $state('')
   let fmt       = $state('mp3-best')
@@ -321,6 +321,10 @@
                     {#if dl.error_msg || dl.status_text}
                       <span class="track-errmsg">{(dl.error_msg || dl.status_text || '').slice(0, 48)}</span>
                     {/if}
+                    {#if dl.fix_tab}
+                      <button class="act-sm fix" onclick={(e) => { e.stopPropagation(); openSettings(dl.fix_tab) }}
+                        title="Einstellungen öffnen">Einrichten</button>
+                    {/if}
                     {#if dl.url}
                       <button class="act-sm retry" onclick={(e) => { e.stopPropagation(); send({ type: 'download_add', url: dl.url, format: dl.fmt || 'mp3-best' }) }}
                         title="Erneut versuchen">↺</button>
@@ -365,7 +369,7 @@
     transition:border-color .12s, color .12s, background .12s;
   }
   .fmt-chip:hover  { border-color:var(--c-tx6); color:var(--c-tx3); }
-  .fmt-chip.active { border-color:var(--c-accent); color:var(--c-accent); background:#e0780012; }
+  .fmt-chip.active { border-color:var(--c-accent); color:var(--c-accent); background:color-mix(in srgb, var(--c-accent) 7%, transparent); }
   .fmt-label { font-weight:700; letter-spacing:.03em; }
   .fmt-sub   { font-size:9px; opacity:.6; }
   .fmt-chip.active .fmt-sub { opacity:.85; }
@@ -534,6 +538,8 @@
   .track-done   { font-size:11px; color:var(--c-green); flex-shrink:0; }
   .track-err    { font-size:11px; color:var(--c-red); flex-shrink:0; }
   .track-errmsg { font-size:10px; color:var(--c-red); flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .act-sm.fix { color:var(--c-warn-tx); border-color:var(--c-warn-br); }
+  .act-sm.fix:hover { color:var(--c-accent); border-color:var(--c-accent); }
   .act-sm.retry { color:var(--c-accent); }
   .act-sm.retry:hover { color:var(--c-accent); border-color:var(--c-accent); }
 

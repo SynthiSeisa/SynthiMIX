@@ -837,7 +837,7 @@
   .meta span:first-child::before { content: ''; }
   .meta span::before { content: '· '; }
   .bpm-pending { color: var(--c-tx7) !important; font-style: italic; }
-  .lufs-warn { color: #c08030 !important; font-style: italic; }
+  .lufs-warn { color: var(--c-warn-tx) !important; font-style: italic; }
   .controls { display: flex; align-items: center; gap: 6px; }
   .ctrl {
     background: none; border: none; color: var(--c-tx4); font-size: 14px;
@@ -853,7 +853,7 @@
     display: flex; align-items: center; justify-content: center;
     transition: background .15s; flex-shrink: 0;
   }
-  .play:hover { background: #e0780020; }
+  .play:hover { background: color-mix(in srgb, var(--c-accent) 13%, transparent); }
   .time     { font-size: 11px; color: var(--c-tx5); font-variant-numeric: tabular-nums; }
   .time-sep { color: var(--c-tx6); font-size: 11px; }
 
@@ -884,7 +884,7 @@
   .fdr-groove {
     position: absolute;
     width: 3px; top: 5px; bottom: 5px;
-    background: linear-gradient(to bottom, #2a5070 0%, #0a1420 35%);
+    background: linear-gradient(to bottom, var(--c-br3) 0%, var(--c-bg4) 35%);
     border-radius: 2px;
     box-shadow: inset 0 1px 4px rgba(0,0,0,.9), 0 0 4px rgba(0,80,120,.3);
     pointer-events: none;

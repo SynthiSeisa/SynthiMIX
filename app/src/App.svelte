@@ -213,6 +213,17 @@
     --c-green:  #2a8a4a;
     --c-red:    #c04040;
     --c-red-bg: #1a0808;
+    /* Waveform wird auf Canvas gezeichnet und liest diese Werte zur Laufzeit */
+    --c-wf-head:       rgba(255,255,255,0.90);
+    --c-wf-zone:       rgba(86,96,112,0.62);
+    --c-wf-zone-edge:  rgba(150,166,190,0.55);
+    --c-wf-zone-label: rgba(196,208,226,0.82);
+    /* Farbige Flaechen: Grund / Rahmen / Schrift je Bedeutung. Im dunklen
+       Theme dunkle Kacheln mit heller Schrift, im hellen genau andersherum. */
+    --c-green-br: #2a6a30;  --c-green-tx: #4a9a50;  --c-green-bg: #0e1a10;
+    --c-red-br:   #8a3030;  --c-red-tx:   #e06060;
+    --c-blue-br:  #2a5888;  --c-blue-tx:  #6aa0e0;  --c-blue-bg:  #0e1a2c;
+    --c-warn-br:  #604020;  --c-warn-tx:  #e08040;  --c-warn-bg:  #1a1008;
   }
   :global(:root[data-theme="light"]) {
     --c-bg:     #f4f0eb;
@@ -240,6 +251,14 @@
     --c-green:  #1a7030;
     --c-red:    #b82020;
     --c-red-bg: #fff0f0;
+    --c-wf-head:       rgba(20,16,12,0.88);
+    --c-wf-zone:       rgba(150,142,132,0.55);
+    --c-wf-zone-edge:  rgba(90,84,76,0.65);
+    --c-wf-zone-label: rgba(30,26,20,0.85);
+    --c-green-br: #8ac098;  --c-green-tx: #1a7030;  --c-green-bg: #eaf6ec;
+    --c-red-br:   #d89a9a;  --c-red-tx:   #b82020;
+    --c-blue-br:  #93b6e0;  --c-blue-tx:  #1a5cb0;  --c-blue-bg:  #e8f0fb;
+    --c-warn-br:  #e0b483;  --c-warn-tx:  #9a5000;  --c-warn-bg:  #fdf1e3;
   }
   :global(*, *::before, *::after) { box-sizing: border-box; margin: 0; padding: 0; }
   :global(body) {

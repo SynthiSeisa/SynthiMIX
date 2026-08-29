@@ -1,5 +1,5 @@
 <script>
-  import { settings, settingsOpen, appSettings, send, toolsInfo, updateProgress,
+  import { settings, settingsOpen, settingsTab, appSettings, send, toolsInfo, updateProgress,
            loudnormOnDl, loudnormTarget, loudnormTp, autoMixEnabled, playMode,
            playlistFolderEnabled, dlFilenameFormat, downloadDir, remoteStatus,
            autoScanIntervalMin, scanRecursive, remoteAutostart,
@@ -9,6 +9,11 @@
            spotdlInstalling, spotdlInstallError, spotdlInstallText } from '../stores/ws.js'
 
   let tab = $state('playback')
+  // Wird die Seite aus einer Fehlermeldung heraus geoeffnet, springt sie
+  // direkt auf den passenden Tab statt den Nutzer suchen zu lassen.
+  $effect(() => {
+    if ($settingsTab) { tab = $settingsTab; settingsTab.set(null) }
+  })
 
   const TABS = [
     { id: 'playback', label: 'Wiedergabe', icon: '▶' },
@@ -755,10 +760,6 @@
     color: var(--c-tx5); text-transform: uppercase; margin-bottom: 10px;
   }
 
-  .hint code {
-    background: var(--c-bg3); border: 1px solid var(--c-br1); border-radius: 2px;
-    padding: 1px 4px; font-size: 10px; color: var(--c-accent2); font-family: monospace;
-  }
   .hint {
     font-size: 10px; color: var(--c-tx6); line-height: 1.5;
     margin-top: 2px;
@@ -802,7 +803,7 @@
     background: var(--c-tx6);
     transition: left .18s, background .18s;
   }
-  .tog.on { background: var(--c-accent); border-color: #c06000; }
+  .tog.on { background: var(--c-accent); border-color: var(--c-accent2); }
   .tog.on::after { left: 19px; background: #fff; }
 
   /* ── Radio groups ───────────────────────────────────────────────────────── */
@@ -814,7 +815,7 @@
     transition: all .12s;
   }
   .radio-opt:hover { border-color: var(--c-tx7); color: var(--c-tx3); }
-  .radio-opt.active { border-color: var(--c-accent); color: var(--c-accent); background: #e0780010; }
+  .radio-opt.active { border-color: var(--c-accent); color: var(--c-accent); background: color-mix(in srgb, var(--c-accent) 6%, transparent); }
 
   /* Vertical radio (filename format) */
   .radio-group.vertical { flex-direction: column; gap: 4px; margin-top: 8px; }
@@ -825,7 +826,7 @@
     cursor: pointer; text-align: left; transition: all .12s;
   }
   .radio-opt-v:hover { border-color: var(--c-tx7); background: var(--c-sel); }
-  .radio-opt-v.active { border-color: var(--c-accent); background: #e0780008; }
+  .radio-opt-v.active { border-color: var(--c-accent); background: color-mix(in srgb, var(--c-accent) 3%, transparent); }
   .ro-label { font-size: 12px; color: var(--c-tx4); flex-shrink: 0; }
   .radio-opt-v.active .ro-label { color: var(--c-accent); }
   .ro-example { font-size: 10px; color: var(--c-tx7); font-family: monospace; }
@@ -898,10 +899,10 @@
   /* ── Remote Tab ─────────────────────────────────────────────────────────── */
   .remote-desc { font-size: 11px; color: var(--c-tx5); line-height: 1.6; margin-bottom: 10px; }
   .remote-status { display: flex; align-items: center; gap: 7px; font-size: 12px; margin-bottom: 10px; }
-  .remote-status.on { color: #75d595; }
+  .remote-status.on { color: var(--c-green-tx); }
   .remote-status.off { color: var(--c-tx5); }
   .remote-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .remote-dot.on  { background: #75d595; }
+  .remote-dot.on  { background: var(--c-green-tx); }
   .remote-dot.off { background: var(--c-tx6); }
   .remote-url { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
   .url-label { font-size: 10px; color: var(--c-tx5); flex-shrink: 0; }
@@ -913,7 +914,7 @@
     flex-shrink: 0; transition: border-color .1s, color .1s;
   }
   .copy-url-btn:hover { border-color: var(--c-tx5); color: var(--c-tx3); }
-  .copy-url-btn.copied { border-color: var(--c-green); color: #75d595; }
+  .copy-url-btn.copied { border-color: var(--c-green); color: var(--c-green-tx); }
   .remote-url-actions { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
   .remote-hint { font-size: 10px; color: var(--c-tx6); }
   .url-val { cursor: default; }

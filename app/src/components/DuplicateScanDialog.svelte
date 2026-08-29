@@ -246,131 +246,131 @@
     display: flex; align-items: center; justify-content: center;
   }
   .panel {
-    background: #06090f; border: 1px solid #1a2838; border-radius: 6px;
+    background: var(--c-bg2); border: 1px solid var(--c-br2); border-radius: 6px;
     width: 720px; max-height: 82vh;
     display: flex; flex-direction: column;
     box-shadow: 0 20px 60px rgba(0,0,0,.9);
   }
   .hdr {
     display: flex; align-items: center; gap: 10px; padding: 12px 16px;
-    border-bottom: 1px solid #0e1828; flex-shrink: 0;
+    border-bottom: 1px solid var(--c-br1); flex-shrink: 0;
   }
   .title {
-    font-size: 10px; font-weight: 700; letter-spacing: 2px; color: #4a6080;
+    font-size: 10px; font-weight: 700; letter-spacing: 2px; color: var(--c-tx6);
   }
   .subtitle {
-    font-size: 11px; color: #3a5068;
+    font-size: 11px; color: var(--c-tx7);
   }
   .mode-toggle {
     margin-left: auto; padding: 3px 12px;
-    background: #0a1018; border: 1px solid #1a2838; border-radius: 3px;
-    color: #5a7090; font-size: 10px; cursor: pointer;
+    background: var(--c-bg2); border: 1px solid var(--c-br2); border-radius: 3px;
+    color: var(--c-tx5); font-size: 10px; cursor: pointer;
     transition: border-color .1s, color .1s, background .1s;
   }
-  .mode-toggle:hover { border-color: #3a5878; color: #8aaac8; }
-  .mode-toggle.active { background: #0e1a2c; border-color: #2a5888; color: #6aa0e0; }
+  .mode-toggle:hover { border-color: var(--c-br3); color: var(--c-tx4); }
+  .mode-toggle.active { background: var(--c-blue-bg); border-color: var(--c-blue-br); color: var(--c-blue-tx); }
   .remove-all-btn {
     padding: 3px 12px;
-    background: #180808; border: 1px solid #3a1010; border-radius: 3px;
-    color: #a04040; font-size: 10px; cursor: pointer;
+    background: var(--c-red-bg); border: 1px solid var(--c-red-bg); border-radius: 3px;
+    color: var(--c-red-br); font-size: 10px; cursor: pointer;
     transition: border-color .1s, color .1s;
   }
-  .remove-all-btn:hover { border-color: #c04040; color: #e06060; }
+  .remove-all-btn:hover { border-color: var(--c-red-tx); color: var(--c-red-tx); }
 
   .filter-bar {
     display: flex; align-items: center; gap: 8px;
-    padding: 7px 16px; background: #07101a; border-bottom: 1px solid #0e1828;
+    padding: 7px 16px; background: var(--c-bg2); border-bottom: 1px solid var(--c-br1);
     flex-shrink: 0;
   }
   .folder-filter {
-    flex: 1; background: #060c18; border: 1px solid #1a2838;
-    border-radius: 3px; color: #7a9ab8; font-size: 11px;
+    flex: 1; background: var(--c-bg2); border: 1px solid var(--c-br2);
+    border-radius: 3px; color: var(--c-tx4); font-size: 11px;
     padding: 4px 8px; outline: none;
   }
   .del-checked-btn {
-    padding: 4px 12px; background: #180808; border: 1px solid #3a1010; border-radius: 3px;
-    color: #c04040; font-size: 10px; cursor: pointer; white-space: nowrap;
+    padding: 4px 12px; background: var(--c-red-bg); border: 1px solid var(--c-red-bg); border-radius: 3px;
+    color: var(--c-red-tx); font-size: 10px; cursor: pointer; white-space: nowrap;
     transition: border-color .1s, color .1s;
   }
-  .del-checked-btn:hover { border-color: #e06060; color: #ff7070; }
+  .del-checked-btn:hover { border-color: var(--c-red-tx); color: var(--c-red-tx); }
 
   .folder-item-count {
-    font-size: 10px; color: #3a5068; flex-shrink: 0;
+    font-size: 10px; color: var(--c-tx7); flex-shrink: 0;
   }
   .track-row.checkable { padding-left: 12px; }
   .track-check {
-    flex-shrink: 0; width: 14px; height: 14px; cursor: pointer; accent-color: #3a6ab0;
+    flex-shrink: 0; width: 14px; height: 14px; cursor: pointer; accent-color: var(--c-blue-br);
   }
   .close-btn {
-    background: none; border: none; color: #3a5070; font-size: 13px;
+    background: none; border: none; color: var(--c-tx7); font-size: 13px;
     cursor: pointer; padding: 4px 6px; border-radius: 3px;
     transition: color .1s, background .1s;
   }
-  .close-btn:hover { color: #e06060; background: #1a0808; }
+  .close-btn:hover { color: var(--c-red-tx); background: var(--c-red-bg); }
 
   /* Folder bulk-delete bar */
   .folder-bar {
     display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
-    padding: 7px 16px; background: #07101a; border-bottom: 1px solid #0e1828;
+    padding: 7px 16px; background: var(--c-bg2); border-bottom: 1px solid var(--c-br1);
     flex-shrink: 0;
   }
   .folder-bar-label {
     font-size: 9px; font-weight: 700; letter-spacing: .08em;
-    color: #3a5068; text-transform: uppercase; flex-shrink: 0; margin-right: 2px;
+    color: var(--c-tx7); text-transform: uppercase; flex-shrink: 0; margin-right: 2px;
   }
   .folder-del-btn {
-    padding: 3px 10px; background: #100b08; border: 1px solid #3a2010;
-    border-radius: 3px; color: #8a5030; font-size: 10px; cursor: pointer;
+    padding: 3px 10px; background: var(--c-warn-bg); border: 1px solid var(--c-warn-bg);
+    border-radius: 3px; color: var(--c-warn-br); font-size: 10px; cursor: pointer;
     transition: border-color .1s, color .1s; white-space: nowrap;
   }
-  .folder-del-btn:hover { border-color: #c06020; color: #e08040; }
+  .folder-del-btn:hover { border-color: var(--c-warn-tx); color: var(--c-warn-tx); }
   .folder-count {
-    font-size: 9px; color: #604020; margin-left: 2px;
+    font-size: 9px; color: var(--c-warn-br); margin-left: 2px;
   }
 
   .body { overflow-y: auto; padding: 8px 0; }
 
   .done {
-    padding: 40px; text-align: center; font-size: 14px; color: #3a9a50;
+    padding: 40px; text-align: center; font-size: 14px; color: var(--c-green-tx);
   }
 
   .group {
-    border-bottom: 1px solid #080d18; padding: 8px 0;
+    border-bottom: 1px solid var(--c-br1); padding: 8px 0;
   }
   .group-hdr {
     display: flex; align-items: center; gap: 8px;
     padding: 4px 16px 6px; min-width: 0;
   }
   .group-title {
-    font-size: 12px; font-weight: 600; color: #8aaac8;
+    font-size: 12px; font-weight: 600; color: var(--c-tx4);
     flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .skip-btn {
-    background: none; border: 1px solid #1a2838; border-radius: 3px;
-    color: #3a5068; font-size: 10px; padding: 2px 8px; cursor: pointer;
+    background: none; border: 1px solid var(--c-br2); border-radius: 3px;
+    color: var(--c-tx7); font-size: 10px; padding: 2px 8px; cursor: pointer;
     flex-shrink: 0; transition: border-color .1s, color .1s;
   }
-  .skip-btn:hover { border-color: #3a5878; color: #5a8090; }
+  .skip-btn:hover { border-color: var(--c-br3); color: var(--c-tx5); }
 
   .track-row {
     display: flex; align-items: center; gap: 8px;
     padding: 5px 16px; min-height: 38px;
     transition: background 0.06s;
   }
-  .track-row:hover { background: #080e18; }
-  .track-row.best  { border-left: 3px solid #2a6a30; }
-  .track-row.worse { border-left: 3px solid #602020; }
+  .track-row:hover { background: var(--c-bg3); }
+  .track-row.best  { border-left: 3px solid var(--c-green-br); }
+  .track-row.worse { border-left: 3px solid var(--c-red-br); }
 
   .track-badge {
     font-size: 9px; font-weight: 700; letter-spacing: .05em;
     width: 52px; flex-shrink: 0; text-align: center;
   }
-  .track-row.best  .track-badge { color: #3a9a40; }
-  .track-row.worse .track-badge { color: #8a3030; }
+  .track-row.best  .track-badge { color: var(--c-green-tx); }
+  .track-row.worse .track-badge { color: var(--c-red-br); }
 
   .track-info { flex: 1; min-width: 0; }
   .track-title {
-    font-size: 12px; color: #a0b8cc;
+    font-size: 12px; color: var(--c-tx3);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .track-meta {
@@ -380,25 +380,25 @@
     font-size: 9px; padding: 1px 5px; border-radius: 2px;
     font-variant-numeric: tabular-nums;
   }
-  .meta-tag.q { background: #0e1a10; color: #3a8a40; }
-  .meta-tag.l { background: #0e1a28; color: #3a6080; }
-  .meta-tag.d { background: #0e1020; color: #4a5870; }
+  .meta-tag.q { background: var(--c-green-bg); color: var(--c-green-br); }
+  .meta-tag.l { background: var(--c-bg5); color: var(--c-tx7); }
+  .meta-tag.d { background: var(--c-bg4); color: var(--c-tx7); }
   .meta-path {
-    font-size: 10px; color: #2e4058;
+    font-size: 10px; color: var(--c-br3);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px;
   }
 
   .track-actions { display: flex; gap: 6px; flex-shrink: 0; }
   .keep-btn {
-    background: #061408; border: 1px solid #1a4020; border-radius: 3px;
-    color: #3a8040; font-size: 10px; padding: 3px 10px; cursor: pointer;
+    background: var(--c-green-bg); border: 1px solid var(--c-green-bg); border-radius: 3px;
+    color: var(--c-green-br); font-size: 10px; padding: 3px 10px; cursor: pointer;
     transition: border-color .1s, color .1s;
   }
-  .keep-btn:hover { border-color: #3a9040; color: #5ab060; }
+  .keep-btn:hover { border-color: var(--c-green-tx); color: var(--c-green-tx); }
   .del-btn {
-    background: #140606; border: 1px solid #3a1010; border-radius: 3px;
-    color: #8a3030; font-size: 10px; padding: 3px 10px; cursor: pointer;
+    background: var(--c-red-bg); border: 1px solid var(--c-red-bg); border-radius: 3px;
+    color: var(--c-red-br); font-size: 10px; padding: 3px 10px; cursor: pointer;
     transition: border-color .1s, color .1s;
   }
-  .del-btn:hover { border-color: #9a3030; color: #c04040; }
+  .del-btn:hover { border-color: var(--c-red-br); color: var(--c-red-tx); }
 </style>

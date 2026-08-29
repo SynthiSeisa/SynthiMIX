@@ -15,11 +15,11 @@ function startPythonBackend() {
     const backendDir = path.join(process.resourcesPath, 'backend')
     const dataDir    = app.getPath('userData')
     cmd  = path.join(backendDir, 'backend.exe')
-    args = ['--data-dir', dataDir]
+    args = ['--data-dir', dataDir, '--electron-exe', process.execPath]
     cwd  = backendDir
   } else {
     cmd  = 'python'
-    args = [path.join(__dirname, '../../backend/main.py')]
+    args = [path.join(__dirname, '../../backend/main.py'), '--electron-exe', process.execPath]
     cwd  = path.join(__dirname, '../../backend')
   }
   pythonProcess = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] })

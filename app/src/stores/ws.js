@@ -18,6 +18,13 @@ export const downloadTree       = writable({ folders: [], files: [] })
 export const downloadTreeLoaded = writable(false)
 export const playMode       = writable({ shuffle: false, repeat: 0 })
 export const settingsOpen  = writable(false)
+export const settingsTab   = writable(null)   // Tab, der beim Oeffnen gezeigt wird
+
+/** Einstellungen oeffnen, wahlweise direkt auf einem bestimmten Tab. */
+export function openSettings(tabId = null) {
+  if (tabId) settingsTab.set(tabId)
+  settingsOpen.set(true)
+}
 export const playlistFolderEnabled = writable(true)
 export const dlFilenameFormat      = writable('title')
 export const downloadDir           = writable('')

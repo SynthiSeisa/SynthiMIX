@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte'
-  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey } from '../stores/ws.js'
+  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings } from '../stores/ws.js'
   import BetterVersionDialog from './BetterVersionDialog.svelte'
   import DuplicateScanDialog from './DuplicateScanDialog.svelte'
 
@@ -1673,7 +1673,11 @@
       {/if}
       <div class="id-btns">
         <button class="id-cancel" onclick={() => identifyResult = null}>Schließen</button>
-        {#if !identifyResult.error}
+        {#if identifyResult.fix_tab}
+          <button class="id-apply" onclick={() => { const t = identifyResult.fix_tab; identifyResult = null; openSettings(t) }}>
+            In den Einstellungen einrichten
+          </button>
+        {:else if !identifyResult.error}
           <button class="id-apply" onclick={applyIdentifyResult}>Metadaten übernehmen</button>
         {/if}
       </div>
@@ -1971,7 +1975,7 @@
     padding: 0 2px; font-size: 11px; color: var(--c-tx5); flex-shrink: 0;
   }
   .t-child:hover .t-unpin-btn { opacity: 0.5; }
-  .t-unpin-btn:hover { opacity: 1 !important; color: #e05050; }
+  .t-unpin-btn:hover { opacity: 1 !important; color: var(--c-red-tx); }
 
   /* ── Pin-Button auf Download-Ordnern ───────────────────────────────────── */
   .t-pin-btn {
@@ -2089,7 +2093,7 @@
     cursor: default;
     background: var(--c-bg);
   }
-  .nav-handle:hover { background: #e0780044; }
+  .nav-handle:hover { background: color-mix(in srgb, var(--c-accent) 27%, transparent); }
   .nav-collapse-btn {
     position: absolute;
     top: 50%;
@@ -2113,7 +2117,7 @@
   .nav-collapse-btn:hover {
     color: var(--c-accent);
     background: var(--c-sel);
-    border-color: #e0780055;
+    border-color: color-mix(in srgb, var(--c-accent) 33%, transparent);
   }
 
   /* ── Right track area ──────────────────────────────────────────────────── */
@@ -2275,7 +2279,7 @@
   }
   .col-picker-item:hover { background: var(--c-sel); color: var(--c-tx2); }
   .col-picker-item input { accent-color: var(--c-blue); }
-  .warn-btn { color: #c07020 !important; border-color: #4a3010 !important; }
+  .warn-btn { color: var(--c-warn-tx) !important; border-color: var(--c-warn-br) !important; }
   .c-title {
     flex-shrink: 0;
     font-size: 12px;
@@ -2377,7 +2381,7 @@
     opacity: 0.7;
   }
 
-  .pl-drop-hover { background: #0c1e14 !important; outline: 1px solid #4a8060; }
+  .pl-drop-hover { background: var(--c-green-bg) !important; outline: 1px solid var(--c-green-br); }
 
   .pl-del {
     background: none;
@@ -2445,7 +2449,7 @@
     white-space: nowrap;
   }
   .dupe-toggle:hover { border-color: var(--c-accent); color: var(--c-accent); }
-  .dupe-toggle.active { border-color: #c07020; color: #c07020; }
+  .dupe-toggle.active { border-color: var(--c-warn-tx); color: var(--c-warn-tx); }
 
   /* ── Add-all button ───────────────────────────────────────────────────── */
   .add-all-btn {
@@ -2467,7 +2471,7 @@
     gap: 10px;
     padding: 10px 20px;
     background: var(--c-act-bg);
-    border: 1px solid #e0780044;
+    border: 1px solid color-mix(in srgb, var(--c-accent) 27%, transparent);
     margin: 0 12px 8px;
     border-radius: 3px;
   }
@@ -2529,11 +2533,11 @@
   }
   .meta-cancel:hover { border-color: var(--c-tx6); color: var(--c-tx4); }
   .meta-save {
-    background: #e0780015; border: 1px solid var(--c-accent); border-radius: 4px;
+    background: color-mix(in srgb, var(--c-accent) 8%, transparent); border: 1px solid var(--c-accent); border-radius: 4px;
     color: var(--c-accent); font-size: 11px; padding: 6px 20px; cursor: pointer;
     font-weight: 600; transition: background .1s;
   }
-  .meta-save:hover { background: #e0780030; }
+  .meta-save:hover { background: color-mix(in srgb, var(--c-accent) 19%, transparent); }
 
   /* ── Favoriten Dropdown ──────────────────────────────────────────────────── */
   .fav-wrap { position: relative; }

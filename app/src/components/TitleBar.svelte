@@ -256,10 +256,10 @@
     padding: 3px 8px; cursor: default; white-space: nowrap;
     border: 1px solid transparent; letter-spacing: 0.05em;
   }
-  .update-btn.available    { color: #60a0e0; border-color: #1a3a60; background: #0d1a2e; }
-  .update-btn.downloading  { color: #60c060; border-color: #1a3a1a; background: #0d1a0d; }
-  .update-btn.ready        { color: #fff; border-color: #2a7a2a; background: #1a5a1a; cursor: pointer; }
-  .update-btn.ready:hover  { background: #1e6e1e; }
+  .update-btn.available    { color: var(--c-blue-tx); border-color: var(--c-blue-br); background: var(--c-blue-bg); }
+  .update-btn.downloading  { color: var(--c-green-tx); border-color: var(--c-green-br); background: var(--c-green-bg); }
+  .update-btn.ready        { color: #fff; border-color: var(--c-green-br); background: var(--c-green); cursor: pointer; }
+  .update-btn.ready:hover  { background: var(--c-green-br); }
 
   .tb-actions { display:flex; align-items:center; gap:4px; margin-left:auto; -webkit-app-region:no-drag; }
   .tb-btn { background:none; border:none; color:var(--c-tx6); font-size:14px; width:28px; height:28px; cursor:pointer; border-radius:3px; display:flex; align-items:center; justify-content:center; transition:color .1s, background .1s; }
@@ -306,7 +306,7 @@
     line-height: 1.5;
   }
   .log-info    { color: var(--c-tx6); }
-  .log-analyze { color: #5a8a5a; }
+  .log-analyze { color: var(--c-green-tx); }
   .log-ffmpeg  { color: var(--c-tx5); }
   .log-err     { color: var(--c-red); background: var(--c-red-bg); }
   .log-empty   { padding: 20px; text-align: center; color: var(--c-tx7); font-size: 11px; }
@@ -360,7 +360,7 @@
     background: none; border: none; color: var(--c-tx6); font-size: 11px;
     cursor: pointer; padding: 2px 4px; border-radius: 2px; transition: color .1s;
   }
-  .help-hdr button:hover { color: #e06060; }
+  .help-hdr button:hover { color: var(--c-red-tx); }
   .help-row {
     display: flex; align-items: center; gap: 12px;
     padding: 5px 12px; border-bottom: 1px solid var(--c-br1);
@@ -382,7 +382,7 @@
     transition: background 0.1s, color 0.1s;
   }
   .controls button:hover { background: var(--c-br2); color: var(--c-tx3); }
-  .controls button.close:hover { background: #6a1a1a; color: #ff6060; }
+  .controls button.close:hover { background: var(--c-red); color: #fff; }
 
   /* ── Update-Popup ────────────────────────────────────────────────────────── */
   .upd-overlay {
@@ -396,7 +396,7 @@
     box-shadow: 0 20px 60px rgba(0,0,0,.9);
     display: flex; flex-direction: column; gap: 16px;
   }
-  .upd-icon { font-size: 32px; color: #3a8a40; text-align: center; line-height: 1; }
+  .upd-icon { font-size: 32px; color: var(--c-green-tx); text-align: center; line-height: 1; }
   .upd-body { text-align: center; }
   .upd-title {
     font-size: 14px; font-weight: 700; letter-spacing: .08em;
@@ -412,18 +412,18 @@
   }
   .upd-later:hover { border-color: var(--c-tx5); color: var(--c-tx3); }
   .upd-install {
-    padding: 7px 20px; background: #0e2a12; border: 1px solid #2a7a2a;
-    border-radius: 4px; color: #4ac050; font-size: 11px; font-weight: 600;
+    padding: 7px 20px; background: var(--c-green-bg); border: 1px solid var(--c-green-br);
+    border-radius: 4px; color: var(--c-green-tx); font-size: 11px; font-weight: 600;
     cursor: pointer; transition: background .1s, border-color .1s, color .1s;
   }
-  .upd-install:hover { background: #122e16; border-color: #3aba3a; color: #6ae070; }
+  .upd-install:hover { background: var(--c-green-bg); border-color: var(--c-green); color: var(--c-green-tx); }
 
   .upd-bar {
     height: 4px; background: var(--c-bg5); border-radius: 2px; overflow: hidden;
     margin-top: 10px;
   }
   .upd-bar-fill {
-    height: 100%; background: #2a6aaa; border-radius: 2px;
+    height: 100%; background: var(--c-blue-br); border-radius: 2px;
     transition: width .3s ease;
   }
   .upd-pct {

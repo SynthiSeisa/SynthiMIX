@@ -770,7 +770,7 @@
   .row.active  { background: var(--c-act-bg); }
   .row.played  { opacity: 0.55; }
   .row.q-sel   { background: var(--c-sel); }
-  .row.q-sel .stripe { background: #2a5aaa; }
+  .row.q-sel .stripe { background: var(--c-blue-br); }
 
   /* Drop indicator: orange line above the row */
   .row.drop-before  { box-shadow: inset 0 3px 0 0 var(--c-accent); background: color-mix(in srgb, var(--c-accent) 6%, var(--c-bg)) !important; }
@@ -920,8 +920,8 @@
   }
   .q-indicator:hover .q-tip { display: block; }
   .q-bad   { background: var(--c-red); }
-  .q-quiet { background: #c07020; }
-  .q-loud  { background: #c07020; }
+  .q-quiet { background: var(--c-warn-tx); }
+  .q-loud  { background: var(--c-warn-tx); }
   .q-good  { background: var(--c-green); }
 
   .am-status {
@@ -959,6 +959,6 @@
   .meta-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:4px; }
   .meta-cancel  { background:none; border:1px solid var(--c-br3); border-radius:4px; color:var(--c-tx4); padding:6px 14px; font-size:11px; cursor:pointer; }
   .meta-cancel:hover { border-color:var(--c-tx5); color:var(--c-tx3); }
-  .meta-save    { background:#8a4000; border:1px solid #b05000; border-radius:4px; color:#ffd090; padding:6px 14px; font-size:11px; cursor:pointer; }
-  .meta-save:hover { background:#a05000; }
+  .meta-save    { background:var(--c-warn-bg); border:1px solid var(--c-warn-br); border-radius:4px; color:var(--c-warn-tx); padding:6px 14px; font-size:11px; cursor:pointer; }
+  .meta-save:hover { background:var(--c-warn-br); }
 </style>

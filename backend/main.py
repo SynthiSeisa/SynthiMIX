@@ -68,6 +68,8 @@ from fastapi.middleware.cors import CORSMiddleware
 # ── paths ────────────────────────────────────────────────────────────────────
 # In packaged mode Electron passes --data-dir so we write to %APPDATA%\SynthiMIX
 _data_dir_arg = next((sys.argv[i+1] for i, a in enumerate(sys.argv) if a == '--data-dir' and i+1 < len(sys.argv)), None)
+# Electron reicht seinen eigenen Pfad durch — er dient yt-dlp als JS-Laufzeit
+_electron_exe = next((sys.argv[i+1] for i, a in enumerate(sys.argv) if a == '--electron-exe' and i+1 < len(sys.argv)), None)
 if _data_dir_arg:
     BASE_DIR = Path(_data_dir_arg)
     BASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1142,7 +1144,7 @@ async def _do_automix_inner(last_title: str):
         all_results: list[dict] = []
         seen_result_urls: set[str] = set()
         for sq in search_queries:
-            batch = await _run_search_cmd([YTDLP, f"ytmsearch15:{sq}"] + base_args)
+            batch = await _run_search_cmd(_yt(f"ytmsearch15:{sq}", *base_args))
             # Learn similar artists from whatever YTM returned
             _ingest_similar_artists(batch, sq)
             for r in batch:
@@ -1157,7 +1159,7 @@ async def _do_automix_inner(last_title: str):
         fallback_urls: set[str] = set()
         if not all_results:
             for sq in search_queries:
-                batch = await _run_search_cmd([YTDLP, f"ytsearch15:{sq} song"] + base_args)
+                batch = await _run_search_cmd(_yt(f"ytsearch15:{sq} song", *base_args))
                 for r in batch:
                     u = r.get("url", "")
                     if u and u not in seen_result_urls:
@@ -1549,11 +1551,11 @@ async def _acoustid_identify(path: str) -> dict:
     import urllib.request as _req, urllib.parse as _parse
     api_key = _state.get('acoustid_api_key', '').strip()
     if not api_key:
-        return {'error': 'Kein AcoustID API-Key konfiguriert (Einstellungen → Dienste)'}
+        return {'error': 'Kein AcoustID API-Key konfiguriert', 'fix_tab': 'services'}
 
     fpcalc = _find_fpcalc()
     if not fpcalc:
-        return {'error': 'fpcalc nicht gefunden. In den Einstellungen → Dienste → AcoustID installieren.'}
+        return {'error': 'fpcalc ist nicht installiert', 'fix_tab': 'services'}
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -2746,6 +2748,32 @@ def _queue_is_duplicate(path: str, title: str, fuzzy: bool = False) -> bool:
 _dl_counter = 0
 
 YTDLP = _find_tool("yt-dlp.exe", BASE_DIR, BASE_DIR / "bin")
+
+# ── JavaScript-Laufzeit fuer yt-dlp ──────────────────────────────────────────
+# Ohne sie warnt yt-dlp, dass die YouTube-Extraktion ohne JS-Runtime veraltet
+# ist und Formate fehlen koennen — irgendwann werden daraus echte Fehlschlaege.
+# Electron bringt Node mit: mit ELECTRON_RUN_AS_NODE=1 verhaelt sich die
+# SynthiMIX.exe wie ein node-Binary, das yt-dlp direkt benutzen kann. Damit
+# braucht es weder ein System-Node noch einen zusaetzlichen Download.
+def _find_js_runtime() -> list[str]:
+    if _electron_exe and os.path.exists(_electron_exe):
+        return ["--js-runtimes", f"node:{_electron_exe}"]
+    for name in ("deno", "node"):          # Fallback fuer den Dev-Betrieb
+        found = shutil.which(name)
+        if found:
+            return ["--js-runtimes", f"{name}:{found}"]
+    return []
+
+_JS_ARGS = _find_js_runtime()
+# Gilt fuer alle Kindprozesse dieses Backends. Betrifft nur die Faelle, in denen
+# tatsaechlich die Electron-Exe als Laufzeit gestartet wird; ffmpeg, yt-dlp und
+# spotdl ignorieren die Variable.
+os.environ["ELECTRON_RUN_AS_NODE"] = "1"
+print(f"[backend] JS-Laufzeit: {_JS_ARGS[1] if _JS_ARGS else 'keine gefunden'}", flush=True)
+
+def _yt(*args: str) -> list[str]:
+    """yt-dlp-Kommando inklusive JS-Laufzeit."""
+    return [YTDLP, *_JS_ARGS, *args]
 FFMPEG_DIR = str(Path(FFMPEG).parent) if FFMPEG != "ffmpeg" else ""
 
 # format-id → (audio_format, audio_quality)
@@ -2789,7 +2817,7 @@ async def _playlist_probe(url: str) -> dict:
     async def _run(args: list[str]) -> list[str]:
         try:
             pr = await asyncio.create_subprocess_exec(
-                YTDLP, *args, "--no-warnings", "--quiet", "--encoding", "utf-8", url,
+                *_yt(*args, "--no-warnings", "--quiet", "--encoding", "utf-8", url),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
                 creationflags=_NO_WINDOW)
             out, _ = await asyncio.wait_for(pr.communicate(), timeout=20)
@@ -2858,6 +2886,7 @@ def _ytdlp_cmd(url: str, fmt_id: str, out_dir: str, playlist_folder: str | None 
 
     cmd = [
         YTDLP,
+        *_JS_ARGS,
         "-x",
         "--audio-format", audio_fmt,
         "--audio-quality", quality,
@@ -2962,7 +2991,7 @@ async def _audit_playlist_for_videos(playlist_url: str) -> list[dict]:
     entries: list[dict] = []
     try:
         proc = await asyncio.create_subprocess_exec(
-            YTDLP, *base_args, playlist_url,
+            *_yt(*base_args, playlist_url),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             creationflags=_NO_WINDOW)
         async for raw in proc.stdout:
@@ -2994,7 +3023,7 @@ async def _audit_playlist_for_videos(playlist_url: str) -> list[dict]:
         query = re.sub(_VIDEO_TITLE_RE, '', title).strip(' -|')
         if not query:
             continue
-        results = await _run_search_cmd([YTDLP, f"ytmsearch5:{query}"] + search_base)
+        results = await _run_search_cmd(_yt(f"ytmsearch5:{query}", *search_base))
         if not results:
             continue
         # Filter live recordings and overlong tracks before scoring
@@ -3036,9 +3065,9 @@ async def do_search(query: str, ws: WebSocket):
     if FFMPEG_DIR:
         base_args += ["--ffmpeg-location", FFMPEG_DIR]
 
-    results = await _run_search_cmd([YTDLP, f"ytmsearch10:{query}"] + base_args)
+    results = await _run_search_cmd(_yt(f"ytmsearch10:{query}", *base_args))
     if not results:
-        results = await _run_search_cmd([YTDLP, f"ytsearch10:{query}"] + base_args)
+        results = await _run_search_cmd(_yt(f"ytsearch10:{query}", *base_args))
 
     results = [r for r in results if not _is_unwanted_result(r)]
     results.sort(key=lambda r: r["_score"], reverse=True)
@@ -3077,7 +3106,9 @@ async def run_spotify_download(url: str, fmt_id: str = "mp3-best"):
     if not spotdl_cmd:
         hdr["status"]      = "error"
         hdr["status_text"] = "spotdl nicht gefunden"
-        hdr["error_msg"]   = "Einstellungen → Download → spotdl installieren"
+        hdr["error_msg"]   = "spotdl ist nicht installiert"
+        # Sagt dem Frontend, welcher Einstellungen-Tab das Problem loest
+        hdr["fix_tab"]     = "download"
         await push_downloads(force=True)
         return
 
@@ -3195,8 +3226,8 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
     if url.startswith("http") and _is_playlist(url):
         try:
             pr = await asyncio.create_subprocess_exec(
-                YTDLP, '--print', 'playlist_title', '--playlist-items', '1',
-                '--no-warnings', '--quiet', '--encoding', 'utf-8', url,
+                *_yt('--print', 'playlist_title', '--playlist-items', '1',
+                     '--no-warnings', '--quiet', '--encoding', 'utf-8', url),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
                 creationflags=_NO_WINDOW)
             out, _ = await asyncio.wait_for(pr.communicate(), timeout=15)
@@ -3997,9 +4028,9 @@ async def _do_yt_search_remote(query: str, ws: WebSocket):
     base_args = ["--flat-playlist", "-j", "--no-playlist", "--quiet"]
     if FFMPEG_DIR:
         base_args += ["--ffmpeg-location", FFMPEG_DIR]
-    results = await _run_search_cmd([YTDLP, f"ytmsearch8:{query}"] + base_args)
+    results = await _run_search_cmd(_yt(f"ytmsearch8:{query}", *base_args))
     if not results:
-        results = await _run_search_cmd([YTDLP, f"ytsearch8:{query}"] + base_args)
+        results = await _run_search_cmd(_yt(f"ytsearch8:{query}", *base_args))
     results = [r for r in results if not _is_unwanted_result(r)]
     results.sort(key=lambda r: r.get("_score", 0), reverse=True)
     try:
