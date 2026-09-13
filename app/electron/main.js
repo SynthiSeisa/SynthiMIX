@@ -162,14 +162,18 @@ ipcMain.on('win-toggle-fullscreen', () => {
 })
 ipcMain.on('win-close', () => mainWindow?.close())
 
-// Open file/folder in Explorer
-ipcMain.handle('open-path', (e, filePath) => {
+// Datei im Explorer zeigen bzw. URL im Browser oeffnen
+ipcMain.handle('open-path', (e, target) => {
   const fs = require('fs')
-  if (filePath && fs.existsSync(filePath)) {
-    shell.showItemInFolder(filePath)
-  } else {
-    shell.openPath(path.join(__dirname, '../../Downloads'))
-  }
+  if (!target) return
+  // Die Remote-Adresse kommt auch hier an. Als Datei gesucht fand sie sich nie,
+  // und "Im Browser oeffnen" tat deshalb schlicht nichts.
+  if (/^https?:\/\//i.test(target)) return shell.openExternal(target)
+  if (fs.existsSync(target)) return shell.showItemInFolder(target)
+  // Datei verschoben oder geloescht: wenigstens den Ordner zeigen, in dem sie
+  // lag. Der fruehere Rueckfall auf ../../Downloads existiert im Installer nicht.
+  const dir = path.dirname(target)
+  if (fs.existsSync(dir)) return shell.openPath(dir)
 })
 
 // Folder picker

@@ -288,6 +288,8 @@
                 <!-- Single track done -->
                 <button class="act queue" onclick={() => addToQueue(s)}>+ Queue</button>
                 <button class="act next" onclick={() => insertNext(s)}>▶ Nächster</button>
+                <button class="act explorer" onclick={() => openInExplorer(s)}
+                        title="Datei im Explorer anzeigen">📂 Explorer</button>
               {/if}
               {#if !active}
                 <button class="rm-group" onclick={() => removeGroup(g)} title="Entfernen">✕</button>
@@ -315,6 +317,8 @@
                     <div class="track-acts">
                       <button class="act-sm queue" onclick={(e) => { e.stopPropagation(); addToQueue(dl) }}>+ Q</button>
                       <button class="act-sm next" onclick={(e) => { e.stopPropagation(); insertNext(dl) }}>▶</button>
+                      <button class="act-sm explorer" onclick={(e) => { e.stopPropagation(); openInExplorer(dl) }}
+                              title="Im Explorer öffnen">📂</button>
                     </div>
                   {:else if dl.status === 'error'}
                     <span class="track-err" title={dl.error_msg || dl.status_text || ''}>✗</span>
@@ -503,6 +507,8 @@
   .act.queue:hover { color:var(--c-tx3); border-color:var(--c-tx5); background:var(--c-bg5); }
   .act.next  { color:var(--c-tx4); border-color:var(--c-br2); }
   .act.next:hover { color:var(--c-tx2); border-color:var(--c-tx5); background:var(--c-br1); }
+  .act.explorer { color:var(--c-tx5); border-color:var(--c-br2); }
+  .act.explorer:hover { color:var(--c-tx2); border-color:var(--c-tx5); background:var(--c-br1); }
 
   .rm-group {
     background:none; border:1px solid transparent; border-radius:4px;
@@ -553,6 +559,8 @@
   .act-sm.queue:hover { color:var(--c-tx3); border-color:var(--c-tx5); }
   .act-sm.next  { color:var(--c-tx5); }
   .act-sm.next:hover  { color:var(--c-tx2); border-color:var(--c-tx5); }
+  .act-sm.explorer { color:var(--c-tx5); }
+  .act-sm.explorer:hover { color:var(--c-tx2); border-color:var(--c-tx5); }
 
   .spinner { display:inline-block; animation:spin 1s linear infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }
