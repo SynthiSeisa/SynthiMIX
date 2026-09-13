@@ -1,6 +1,6 @@
 <script>
-  import { onMount } from 'svelte'
-  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings } from '../stores/ws.js'
+  import { onMount, untrack } from 'svelte'
+  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected } from '../stores/ws.js'
   import BetterVersionDialog from './BetterVersionDialog.svelte'
   import DuplicateScanDialog from './DuplicateScanDialog.svelte'
 
@@ -119,12 +119,76 @@
   }
 
   // ── Nav section expand/collapse ───────────────────────────────────────────
-  let secFsOpen       = $state(false)
-  let secArtistOpen   = $state(false)
-  let secAlbumOpen    = $state(false)
-  let secGenreOpen    = $state(false)
-  let secDlOpen       = $state(true)
-  let secPlaylistOpen = $state(true)
+  // Auf-/zugeklappte Abschnitte und die zuletzt offene Ansicht werden gemerkt.
+  // Vorher stand die Nav nach jedem Start wieder im Auslieferungszustand,
+  // waehrend angeheftete Ordner und Spaltenbreiten laengst gespeichert wurden.
+  const NAV_KEY   = 'synthimix-nav'
+  const _navSaved = (() => { try { return JSON.parse(localStorage.getItem(NAV_KEY) ?? '{}') } catch { return {} } })()
+  const _secSaved = _navSaved.sections ?? {}
+  let secFsOpen       = $state(_secSaved.fs       ?? false)
+  let secArtistOpen   = $state(_secSaved.artist   ?? false)
+  let secAlbumOpen    = $state(_secSaved.album    ?? false)
+  let secGenreOpen    = $state(_secSaved.genre    ?? false)
+  let secDlOpen       = $state(_secSaved.dl       ?? true)
+  let secPlaylistOpen = $state(_secSaved.playlist ?? true)
+
+  // Nur Ansichten, die sich allein aus Bibliothek, Playlisten oder dem
+  // Download-Baum ergeben. "Mein Computer" braeuchte eine Ordnerabfrage,
+  // "Duplikate" einen Scan — die startet man lieber bewusst.
+  function restorableMode(mode) {
+    if (['all', 'recent', 'history', 'dl_recent', 'dl_all'].includes(mode)) return mode
+    if (/^(artist|album|genre|playlist):/.test(mode)) return mode
+    if (mode.startsWith('dl:') && !mode.startsWith('dl:file:')) return mode
+    return null
+  }
+
+  let _navRestored = false
+  $effect(() => {
+    const sections = { fs: secFsOpen, artist: secArtistOpen, album: secAlbumOpen,
+                       genre: secGenreOpen, dl: secDlOpen, playlist: secPlaylistOpen }
+    const mode = navMode
+    // Waehrend der Suche aufgeklappte Abschnitte sind kein gewollter Zustand.
+    if (navQ) return
+    // Solange die gemerkte Ansicht noch nicht wiederhergestellt ist, steht
+    // navMode auf dem Startwert — der darf die gespeicherte nicht ueberschreiben.
+    const saveMode = _navRestored ? (restorableMode(mode) ?? 'all') : (_navSaved.mode ?? 'all')
+    try { localStorage.setItem(NAV_KEY, JSON.stringify({ sections, mode: saveMode })) } catch {}
+  })
+
+  // Gemerkte Ansicht wiederherstellen, sobald die noetigen Daten da sind.
+  // Gibt es das Ziel nicht mehr (Playlist geloescht, Album umbenannt), bleibt
+  // es bei "Alle Titel".
+  $effect(() => {
+    if (_navRestored) return
+    const want = _navSaved.mode
+    if (!want || want === 'all' || !restorableMode(want)) { _navRestored = true; return }
+    if (!$connected) return
+
+    if (want.startsWith('playlist:')) {
+      if (!$playlists.length) return
+      const pl = $playlists.find(x => 'playlist:' + x.path === want)
+      _navRestored = true
+      if (pl) untrack(() => openPlaylistInLibrary(pl))
+      return
+    }
+    if (want.startsWith('dl')) {
+      if (!$downloadTreeLoaded) { untrack(() => loadDlTree()); return }
+      _navRestored = true
+      untrack(() => selectNav(want))
+      return
+    }
+    if (/^(artist|album|genre):/.test(want)) {
+      if (!$library.length) return
+      const kind = want.slice(0, want.indexOf(':'))
+      const val  = want.slice(want.indexOf(':') + 1)
+      const list = kind === 'artist' ? artists : kind === 'album' ? albums : genres
+      _navRestored = true
+      if (list.some(x => x.toLowerCase() === val)) untrack(() => selectNav(want))
+      return
+    }
+    _navRestored = true
+    untrack(() => selectNav(want))
+  })
 
   // ── Nav tree search ───────────────────────────────────────────────────────
   let navSearch = $state('')
@@ -153,15 +217,53 @@
     const seen = new Set()
     return raw.filter(f => seen.has(f.path) ? false : (seen.add(f.path), true))
   })
-  // auto-expand sections with hits
+  // Abschnitte mit Treffern aufklappen — und nach dem Leeren des Suchfelds
+  // wieder in den Zustand von vorher bringen. Frueher blieben sie offen.
+  let _preFilterSec = null
   $effect(() => {
-    if (!navQ) return
+    if (!navQ) {
+      if (_preFilterSec) {
+        const s = _preFilterSec
+        _preFilterSec = null
+        secArtistOpen = s.artist; secAlbumOpen = s.album; secGenreOpen = s.genre
+        secPlaylistOpen = s.playlist; secDlOpen = s.dl
+      }
+      return
+    }
+    if (!_preFilterSec) {
+      _preFilterSec = untrack(() => ({ artist: secArtistOpen, album: secAlbumOpen, genre: secGenreOpen,
+                                       playlist: secPlaylistOpen, dl: secDlOpen }))
+    }
     if (filteredArtists.length)  secArtistOpen   = true
     if (filteredAlbums.length)   secAlbumOpen    = true
     if (filteredGenres.length)   secGenreOpen    = true
     if (filteredPlaylists.length) secPlaylistOpen = true
     if (filteredDlFolders.length || filteredDlFiles.length) secDlOpen = true
   })
+
+  // Titelanzahl je Album und Genre, einmal pro Bibliotheksstand berechnet.
+  // Dieselben Regeln wie beim Filtern der Titelliste (exakt bzw. zerlegt).
+  const albumCounts = $derived.by(() => {
+    const m = new Map()
+    for (const t of $library) {
+      const a = (t.album ?? '').trim().toLowerCase()
+      if (a) m.set(a, (m.get(a) ?? 0) + 1)
+    }
+    return m
+  })
+  const genreCounts = $derived.by(() => {
+    const m = new Map()
+    for (const t of $library) {
+      for (const part of (t.genre ?? '').split(/[,;/]/)) {
+        const g = part.trim().toLowerCase()
+        if (g) m.set(g, (m.get(g) ?? 0) + 1)
+      }
+    }
+    return m
+  })
+
+  // Zaehler im Abschnittskopf: beim Filtern "Treffer / gesamt"
+  const zahl = (gefiltert, gesamt) => navQ ? `${gefiltert} / ${gesamt}` : gesamt
   // ── Favoriten dropdown ────────────────────────────────────────────────────
   let favOpen = $state(false)
 
@@ -195,9 +297,11 @@
 
   // ── A-Z Schnellsprung für Künstler ────────────────────────────────────────
   const AZ_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')
-  function jumpArtist(letter) {
+  // Getrennt nach Abschnitt, sonst sprang "A" bei den Alben zum ersten
+  // Kuenstler mit A, weil die Suche den ganzen Baum durchgeht.
+  function jumpLetter(kind, letter) {
     const tree = document.querySelector('.nav-tree')
-    const target = tree?.querySelector(`[data-aletter="${letter.toLowerCase()}"]`)
+    const target = tree?.querySelector(`[data-az="${kind}:${letter.toLowerCase()}"]`)
     if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
@@ -1230,7 +1334,7 @@
     <button class="t-sec-hdr" onclick={() => toggleSection('artist')}>
       <span class="t-chevron" class:open={secArtistOpen}>›</span>
       <span class="t-sec-label">Künstler</span>
-      <span class="t-sec-badge">{artists.length}</span>
+      <span class="t-sec-badge">{zahl(filteredArtists.length, artists.length)}</span>
     </button>
     {#if secArtistOpen}
       {#if filteredArtists.length > 8}
@@ -1238,7 +1342,7 @@
           {#each AZ_LETTERS as letter}
             {@const has = filteredArtists.some(a => a.toUpperCase().startsWith(letter))}
             <button class="az-btn {has ? '' : 'az-dim'}"
-                    onclick={() => has && jumpArtist(letter)}
+                    onclick={() => has && jumpLetter('artist', letter)}
                     title={letter}>{letter}</button>
           {/each}
         </div>
@@ -1246,7 +1350,7 @@
       {#each filteredArtists as artist}
         <button class="t-child {navMode === 'artist:' + artist.toLowerCase() ? 'active' : ''}"
                 onclick={() => selectNav('artist:' + artist.toLowerCase())}
-                data-aletter={artist[0]?.toLowerCase() ?? '#'}
+                data-az={'artist:' + (artist[0]?.toLowerCase() ?? '#')}
                 title={artist}>
           <i class="ti ti-user t-ico-sm" aria-hidden="true"></i>
           <span class="t-name">{artist}</span>
@@ -1259,15 +1363,27 @@
     <button class="t-sec-hdr" onclick={() => toggleSection('album')}>
       <span class="t-chevron" class:open={secAlbumOpen}>›</span>
       <span class="t-sec-label">Alben</span>
-      <span class="t-sec-badge">{albums.length}</span>
+      <span class="t-sec-badge">{zahl(filteredAlbums.length, albums.length)}</span>
     </button>
     {#if secAlbumOpen}
+      {#if filteredAlbums.length > 8}
+        <div class="artist-az">
+          {#each AZ_LETTERS as letter}
+            {@const has = filteredAlbums.some(a => a.toUpperCase().startsWith(letter))}
+            <button class="az-btn {has ? '' : 'az-dim'}"
+                    onclick={() => has && jumpLetter('album', letter)}
+                    title={letter}>{letter}</button>
+          {/each}
+        </div>
+      {/if}
       {#each filteredAlbums as album}
         <button class="t-child {navMode === 'album:' + album.toLowerCase() ? 'active' : ''}"
                 onclick={() => selectNav('album:' + album.toLowerCase())}
+                data-az={'album:' + (album[0]?.toLowerCase() ?? '#')}
                 title={album}>
           <i class="ti ti-vinyl t-ico-sm" aria-hidden="true"></i>
           <span class="t-name">{album}</span>
+          <span class="t-badge">{albumCounts.get(album.toLowerCase()) ?? 0}</span>
         </button>
       {/each}
     {/if}
@@ -1278,7 +1394,7 @@
     <button class="t-sec-hdr" onclick={() => toggleSection('genre')}>
       <span class="t-chevron" class:open={secGenreOpen}>›</span>
       <span class="t-sec-label">Genres</span>
-      <span class="t-sec-badge">{genres.length}</span>
+      <span class="t-sec-badge">{zahl(filteredGenres.length, genres.length)}</span>
     </button>
     {#if secGenreOpen}
       {#each filteredGenres as genre}
@@ -1287,6 +1403,7 @@
                 title={genre}>
           <i class="ti ti-tags t-ico-sm" aria-hidden="true"></i>
           <span class="t-name">{genre}</span>
+          <span class="t-badge">{genreCounts.get(genre.toLowerCase()) ?? 0}</span>
         </button>
       {/each}
     {/if}
@@ -1298,7 +1415,7 @@
          onkeydown={(e) => e.key === 'Enter' && toggleSection('playlist')}>
       <span class="t-chevron" class:open={secPlaylistOpen}>›</span>
       <span class="t-sec-label">Playlisten</span>
-      <span class="t-sec-badge">{$playlists.length}</span>
+      <span class="t-sec-badge">{zahl(filteredPlaylists.length, $playlists.length)}</span>
       <span class="t-sec-action" title="Queue als Playlist speichern" role="button" tabindex="0"
             onclick={(e) => { e.stopPropagation(); saveQueueAsPlaylist() }}
             onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), saveQueueAsPlaylist())}>+</span>

@@ -100,7 +100,12 @@ let ws = null
 let reconnectTimer = null
 
 function connect() {
-  ws = new WebSocket('ws://127.0.0.1:8765/ws')
+  // VITE_WS_PORT kommt nur aus "npm run dev:wstest" (.env.wstest). Laeuft das
+  // installierte SynthiMIX, belegt es 8765 — eine normale Dev-Vorschau haengt
+  // sich dann still an dessen Backend mit den echten Daten. Im gebauten
+  // Programm ist die Variable nicht gesetzt, dort bleibt es bei 8765.
+  const port = import.meta.env.VITE_WS_PORT || '8765'
+  ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
 
   ws.onopen = () => {
     connected.set(true)

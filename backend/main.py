@@ -142,6 +142,7 @@ async def lifespan(application: FastAPI):
     asyncio.create_task(_watcher_loop())
     asyncio.create_task(_auto_scan_loop())
     asyncio.create_task(_ytdlp_autoupdate_loop())
+    asyncio.create_task(_refresh_tag_meta_task())
     print("[backend] ready on ws://127.0.0.1:8765/ws", flush=True)
     yield
 
@@ -330,6 +331,12 @@ def load_library():
             "bitrate_kbps": t.get("bitrate_kbps") or t.get("bitrate") or 0,
             "comment":      _fix_mojibake(str(t.get("comment", ""))),
             "album_artist": _fix_mojibake(str(t.get("album_artist", ""))),
+            # Fehlten hier bis 1.4.2 — der Kuenstler ging dadurch bei jedem
+            # Start verloren, Album und Genre kamen gar nicht erst an.
+            "artist":       _fix_mojibake(str(t.get("artist", ""))),
+            "album":        _fix_mojibake(str(t.get("album", ""))),
+            "genre":        _fix_mojibake(str(t.get("genre", ""))),
+            "meta_rev":     int(t.get("meta_rev", 0)),
             "ext":          str(t.get("ext", Path(str(t.get("path",""))).suffix.lstrip('.').lower())),
             "mtime":        int(t.get("mtime", 0)),
             "play_count":   int(t.get("play_count", 0)),
@@ -626,6 +633,95 @@ def _probe_sync(path: str) -> dict:
         pass
     return result
 
+# Erhoehen, wenn Bibliothekseintraege neue Tag-Felder bekommen: der Bestand wird
+# dann beim naechsten Start einmal nachgelesen (siehe _refresh_tag_meta_task).
+_TAG_META_REV = 1
+
+def _read_tags_sync(path: str) -> dict | None:
+    """Nur Kuenstler, Album und Genre aus den Tags lesen.
+
+    Bewusst mutagen statt ffprobe: auf der Musik-Festplatte braucht ffprobe
+    rund 450 ms je Datei, mutagen unter 10 ms. Fuer 3500 Titel sind das knapp
+    eine halbe Stunde gegen eine halbe Minute (gemessen 09/2026).
+    """
+    try:
+        import mutagen
+        mf = mutagen.File(path)
+    except Exception:
+        return None
+    if mf is None:
+        return None
+    tags = mf.tags or {}
+    def _t(*keys):
+        for k in keys:
+            try:
+                v = tags.get(k)
+            except Exception:
+                continue
+            if v is None:
+                continue
+            if hasattr(v, 'text'):
+                return str(v.text[0]).strip() if v.text else ''
+            return (str(v[0]) if isinstance(v, list) else str(v)).strip()
+        return ''
+    album_artist = _t('TPE2', 'albumartist', 'album_artist', 'aART')
+    return {
+        "artist":       _t('TPE1', 'artist', '\xa9ART') or album_artist,
+        "album_artist": album_artist,
+        "album":        _t('TALB', 'album', '\xa9alb'),
+        "genre":        _t('TCON', 'genre', '\xa9gen'),
+    }
+
+async def _refresh_tag_meta_task():
+    """Kuenstler/Album/Genre fuer Bestandseintraege einmalig nachtragen.
+
+    Bis 1.4.2 wurden Album und Genre nie gespeichert, und load_library hat den
+    Kuenstler bei jedem Start verworfen. Die Navigation zeigte deshalb bei
+    Bibliotheken mit sauber getaggten Dateien fast keine Kuenstler und gar
+    keine Alben oder Genres. Gefuellt werden nur leere Felder — was jemand
+    von Hand eingetragen hat, bleibt stehen.
+    """
+    pending = [(lt["path"], {k: lt.get(k, "") for k in ("artist", "album_artist", "album", "genre")})
+               for lt in _state["library"]
+               if lt.get("path") and lt.get("meta_rev", 0) < _TAG_META_REV]
+    if not pending:
+        return
+
+    def _work():
+        # Nur lesen und Ergebnisse sammeln. Angewendet wird im Event-Loop,
+        # damit niemand die Bibliothek gleichzeitig speichert, waehrend hier
+        # an den Eintraegen geschrieben wird.
+        updates: dict[str, dict] = {}
+        for path, current in pending:
+            if not os.path.exists(path):
+                continue    # Laufwerk gerade nicht da: beim naechsten Start nochmal
+            tags = _read_tags_sync(path) or {}
+            updates[path] = {k: v for k, v in tags.items() if v and not current.get(k)}
+        return updates
+
+    loop = asyncio.get_running_loop()
+    updates = await loop.run_in_executor(None, _work)
+
+    ergaenzt = 0
+    for lt in _state["library"]:
+        upd = updates.get(lt.get("path"))
+        if upd is None:
+            continue
+        lt["meta_rev"] = _TAG_META_REV
+        if upd:
+            lt.update(upd)
+            ergaenzt += 1
+
+    if not updates:
+        return
+    save_library()
+    await push_library()
+    print(f"[library] Tags nachgelesen: {len(updates)} Dateien, {ergaenzt} ergaenzt", flush=True)
+    if ergaenzt:
+        await broadcast({"type": "scan_status", "text": f"Tags ergänzt: {ergaenzt} Titel"})
+        await asyncio.sleep(4)
+        await broadcast({"type": "scan_status", "text": ""})
+
 _analyze_running = False
 _analyze_cancel  = False
 _unanalyzable_paths: set[str] = set()   # Pfade die dauerhaft nicht analysierbar sind
@@ -728,6 +824,9 @@ async def _auto_add_to_library(path: str):
         "title":        probe["title"] or Path(path).stem,
         "artist":       probe.get("artist", ""),
         "album_artist": probe.get("album_artist", ""),
+        "album":        probe.get("album", ""),
+        "genre":        probe.get("genre", ""),
+        "meta_rev":     _TAG_META_REV,
         "folder":       Path(path).parent.name,
         "ext":          probe.get("ext", Path(path).suffix.lstrip('.').lower()),
         "duration_sec": probe["duration_sec"],
@@ -782,6 +881,9 @@ async def _enrich_track(path: str, force: bool = False):
             "title": probe.get("title") or p.stem,
             "artist": probe.get("artist") or "",
             "album_artist": probe.get("album_artist") or "",
+            "album": probe.get("album") or "",
+            "genre": probe.get("genre") or "",
+            "meta_rev": _TAG_META_REV,
             "comment": probe.get("comment") or "",
             "ext": probe.get("ext") or p.suffix.lstrip('.').lower(),
             "folder": p.parent.name,
@@ -2776,6 +2878,9 @@ def _scan_sync(folder: str) -> list[dict]:
                     "title":        probe["title"] or Path(f).stem,
                     "artist":       probe.get("artist", ""),
                     "album_artist": probe.get("album_artist", ""),
+                    "album":        probe.get("album", ""),
+                    "genre":        probe.get("genre", ""),
+                    "meta_rev":     _TAG_META_REV,
                     "folder":       Path(root).name,
                     "ext":          probe.get("ext", Path(f).suffix.lstrip('.').lower()),
                     "duration_sec": probe["duration_sec"],
@@ -2839,6 +2944,9 @@ async def _watcher_loop():
                             "title":        probe["title"] or Path(p).stem,
                             "artist":       probe.get("artist", ""),
                             "album_artist": probe.get("album_artist", ""),
+                            "album":        probe.get("album", ""),
+                            "genre":        probe.get("genre", ""),
+                            "meta_rev":     _TAG_META_REV,
                             "folder":       Path(p).parent.name,
                             "ext":          probe.get("ext", Path(p).suffix.lstrip('.').lower()),
                             "duration_sec": probe["duration_sec"],
