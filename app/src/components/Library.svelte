@@ -1027,7 +1027,7 @@
   })
 
   function removeHiddenDupes() {
-    if (!confirm(`${dupesHidden.size} doppelte Tracks (niedrigste Qualität) von Festplatte löschen?`)) return
+    if (!confirm(`${dupesHidden.size} doppelte Tracks (niedrigste Qualität) in den Papierkorb verschieben?`)) return
     for (const p of dupesHidden) send({ type: 'library_remove_disk', path: p })
   }
 
@@ -1894,9 +1894,9 @@
     <div class="meta-dialog" onclick={(e) => e.stopPropagation()}>
       <div class="meta-title">Von Festplatte löschen</div>
       {#if dlgDeletePaths.length === 1}
-        <div class="meta-hint">„{dlgDeletePaths[0].title}" wird dauerhaft gelöscht.</div>
+        <div class="meta-hint">„{dlgDeletePaths[0].title}" wird in den Papierkorb verschoben.</div>
       {:else}
-        <div class="meta-hint">{dlgDeletePaths.length} Tracks werden dauerhaft gelöscht.</div>
+        <div class="meta-hint">{dlgDeletePaths.length} Tracks werden in den Papierkorb verschoben.</div>
         <div style="max-height:120px;overflow-y:auto;margin-bottom:12px">
           {#each dlgDeletePaths as t}
             <div style="font-size:11px;color:#5a7898;padding:2px 0">{t.title}</div>

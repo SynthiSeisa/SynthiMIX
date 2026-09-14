@@ -1,5 +1,6 @@
 """Musikwuensche: was der Gast zu einem Titel angezeigt bekommt, und was
 Annehmen und Ablehnen auf DJ-Seite tun."""
+import os
 import time
 
 from tests.support import BackendTest, FakeWS, main
@@ -63,10 +64,22 @@ class WishDecisionTest(BackendTest):
         self.run_async(main.handle_message(FakeWS(), {"type": "wish_accept", "id": 1, "as_next": True}))
         self.assertEqual([t["path"] for t in main._state["queue"]], ["laeuft", str(f), "danach"])
 
-    def test_ablehnen_loescht_die_datei(self):
+    def test_ablehnen_schiebt_die_datei_in_den_papierkorb(self):
         w, f = self._wish()
         main._state["library"] = [{"path": str(f), "title": "Wunsch"}]
-        self.run_async(main.handle_message(FakeWS(), {"type": "wish_reject", "id": 1}))
+        # Attrappe statt echtem Papierkorb, sonst landet bei jedem Build eine
+        # Testdatei darin
+        verschoben = []
+        def attrappe(path):
+            verschoben.append(path)
+            os.remove(path)
+            return True
+        echt, main._move_to_trash = main._move_to_trash, attrappe
+        try:
+            self.run_async(main.handle_message(FakeWS(), {"type": "wish_reject", "id": 1}))
+        finally:
+            main._move_to_trash = echt
+        self.assertEqual(verschoben, [str(f)])
         self.assertFalse(f.exists())
         self.assertEqual(main._state["wishes"], [])
         self.assertEqual(main._state["library"], [])

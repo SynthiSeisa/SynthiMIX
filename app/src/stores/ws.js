@@ -45,6 +45,11 @@ export const trackIdentified     = writable(null)   // null | { title, artist, a
 export const fpcalcInstalling    = writable(false)
 export const fpcalcInstallError  = writable(null)
 export const wishes              = writable([])   // Musikwuensche der Gaeste
+// Eigener Store: im settings-Store landen nur volume/crossfade_s, dort kam der
+// Wert nie an — der Schalter stand in 1.4.2 dadurch immer auf aus.
+export const ytdlpAutoupdate     = writable(true)
+export const watchedFolders      = writable([])   // [{path, exists, tracks, inside}]
+export const watchedFolderImpact = writable(null) // {folder, tracks} — Antwort auf dry_run
 export const playlistChoice      = writable(null)   // null | {pending:true} | {url, format, track_title, playlist_title, count}
 export const spotdlInstalling    = writable(false)
 export const spotdlInstallText   = writable(null)   // Fortschrittstext während des Downloads
@@ -186,6 +191,7 @@ function connect() {
         if (msg.auto_scan_interval_min    !== undefined) autoScanIntervalMin.set(msg.auto_scan_interval_min)
         if (msg.favorites                 !== undefined) favorites.set(msg.favorites)
         if (msg.remote_autostart          !== undefined) remoteAutostart.set(msg.remote_autostart)
+        if (msg.ytdlp_autoupdate          !== undefined) ytdlpAutoupdate.set(msg.ytdlp_autoupdate)
         // bpm_analysis and normalize settings are authoritative from backend
         if (msg.bpm_analysis              !== undefined)
           appSettings.update(s => ({ ...s, bpmAnalysis: msg.bpm_analysis }))
@@ -259,6 +265,8 @@ function connect() {
       case 'fpcalc_install_done':     fpcalcInstalling.set(false); break
       case 'fpcalc_install_error':    fpcalcInstalling.set(false); fpcalcInstallError.set(msg.text ?? 'Fehler'); break
       case 'wishes':                  wishes.set(msg.items || []); break
+      case 'watched_folders':         watchedFolders.set(msg.items || []); break
+      case 'watched_folder_impact':   watchedFolderImpact.set({ folder: msg.folder, tracks: msg.tracks }); break
       case 'playlist_choice_pending': playlistChoice.set({ pending: true }); break
       case 'playlist_choice_cancel':  playlistChoice.set(null); break
       case 'playlist_choice':         playlistChoice.set({ ...msg, pending: false }); break

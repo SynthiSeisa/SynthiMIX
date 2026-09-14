@@ -2037,6 +2037,7 @@ async def handle_message(ws: WebSocket, msg: dict):
         # Ohne das hier haette ein frisch gestarteter Client die Wuensche erst
         # gesehen, wenn sich der naechste geaendert hat.
         await ws.send_text(json.dumps({"type": "wishes", "items": _state.get("wishes", [])}))
+        await ws.send_text(json.dumps({"type": "watched_folders", "items": _watched_folders_info()}))
         await ws.send_text(json.dumps({
             "type":             "settings",
             "volume":           _state["volume"],
@@ -2212,13 +2213,12 @@ async def handle_message(ws: WebSocket, msg: dict):
             # den Download-Ordner nicht vollmuellen.
             p = w.get("path", "")
             if p and os.path.exists(p) and msg.get("delete_file", True):
-                try:
-                    os.remove(p)
+                if await asyncio.get_running_loop().run_in_executor(None, _move_to_trash, p):
                     _state["library"] = [lt for lt in _state["library"] if lt.get("path") != p]
                     save_library()
                     await push_library()
-                except Exception as e:
-                    print(f"[wishes] konnte {p} nicht loeschen: {e}", flush=True)
+                else:
+                    print(f"[wishes] konnte {p} nicht in den Papierkorb verschieben", flush=True)
             _state["wishes"] = [x for x in _state["wishes"] if x.get("id") != wid]
             save_wishes()
             await push_wishes()
@@ -2282,14 +2282,20 @@ async def handle_message(ws: WebSocket, msg: dict):
 
     elif t == "library_remove_disk":
         path = msg.get("path", "")
-        _state["library"] = [lt for lt in _state["library"] if lt.get("path") != path]
-        save_library()
-        await push_library()
-        try:
-            if path and os.path.exists(path):
-                os.remove(path)
-        except Exception:
-            pass
+        if path:
+            # Erst in den Papierkorb, dann aus der Bibliothek. Frueher lief es
+            # andersherum, und ein fehlgeschlagenes Loeschen fiel niemandem auf:
+            # Eintrag weg, Datei noch da.
+            ok = True
+            if os.path.exists(path):
+                ok = await asyncio.get_running_loop().run_in_executor(None, _move_to_trash, path)
+            if ok:
+                _state["library"] = [lt for lt in _state["library"] if lt.get("path") != path]
+                save_library()
+                await push_library()
+            else:
+                await broadcast({"type": "scan_status",
+                                 "text": f"Konnte nicht in den Papierkorb: {Path(path).name} (in Benutzung?)"})
 
     elif t == "set_volume":
         _state["volume"] = min(100, max(0, int(float(msg.get("value", 80)))))
@@ -2397,9 +2403,15 @@ async def handle_message(ws: WebSocket, msg: dict):
     elif t == "scan_library":
         folder = msg.get("folder", "")
         if folder and os.path.isdir(folder):
-            if folder not in _state["watched_folders"]:
+            # Liegt der Ordner schon in einem rekursiv beobachteten, wird er
+            # ohnehin mit durchsucht — als eigener Eintrag waere er nur doppelt.
+            schon_drin = folder in _state["watched_folders"] or (
+                _state.get("scan_recursive", True)
+                and any(_path_in_folder(folder, f, True) for f in _state["watched_folders"]))
+            if not schon_drin:
                 _state["watched_folders"].append(folder)
                 save_settings()
+                await broadcast({"type": "watched_folders", "items": _watched_folders_info()})
 
         async def _scan_all():
             # Ohne Ordnerauswahl alles neu einlesen — vorher passierte hier
@@ -2407,6 +2419,28 @@ async def handle_message(ws: WebSocket, msg: dict):
             for f in _scan_folders():
                 await scan_folder(f)
         asyncio.create_task(_scan_all())
+
+    elif t == "get_watched_folders":
+        await ws.send_text(json.dumps({"type": "watched_folders", "items": _watched_folders_info()}))
+
+    elif t == "remove_watched_folder":
+        folder = msg.get("folder", "")
+        if folder in _state.get("watched_folders", []):
+            lost = _library_paths_lost_without(folder)
+            if msg.get("dry_run"):
+                # Nur ausrechnen, was verschwinden wuerde — fuer die Rueckfrage
+                await ws.send_text(json.dumps({"type": "watched_folder_impact",
+                                               "folder": folder, "tracks": len(lost)}))
+            else:
+                # Dateien bleiben unangetastet; nur die Bibliothek vergisst sie
+                _state["watched_folders"] = [f for f in _state["watched_folders"] if f != folder]
+                save_settings()
+                if lost:
+                    weg = set(lost)
+                    _state["library"] = [lt for lt in _state["library"] if lt.get("path") not in weg]
+                    save_library()
+                    await push_library()
+                await broadcast({"type": "watched_folders", "items": _watched_folders_info()})
 
     elif t == "set_scan_recursive":
         _state["scan_recursive"] = bool(msg.get("enabled", True))
@@ -2756,10 +2790,7 @@ async def handle_message(ws: WebSocket, msg: dict):
     elif t == "delete_playlist":
         pl_path = msg.get("path", "")
         if pl_path and os.path.exists(pl_path):
-            try:
-                os.remove(pl_path)
-            except Exception:
-                pass
+            await asyncio.get_running_loop().run_in_executor(None, _move_to_trash, pl_path)
             await ws.send_text(json.dumps({"type": "playlists",
                                            "items": _get_playlists()}))
 
@@ -2999,6 +3030,86 @@ async def scan_folder(folder: str):
     await broadcast({"type": "scan_status", "text": "Fertig · " + " · ".join(parts)})
     await asyncio.sleep(4)
     await broadcast({"type": "scan_status", "text": ""})
+
+def _move_to_trash(path: str) -> bool:
+    """Datei in den Windows-Papierkorb verschieben statt endgueltig loeschen.
+
+    Frueher stand hier os.remove — ein Fehlgriff beim Aufraeumen von
+    Duplikaten war nicht mehr rueckgaengig zu machen, und die Bibliothek
+    kennt einen Knopf, der alle ausgeblendeten Duplikate auf einmal loescht.
+    SHFileOperationW aus der Shell, damit keine zusaetzliche Bibliothek noetig
+    ist. Liefert True, wenn die Datei danach weg ist.
+    """
+    if not path or not os.path.exists(path):
+        return False
+    if sys.platform != "win32":
+        os.remove(path)
+        return True
+    import ctypes
+    from ctypes import wintypes
+
+    class SHFILEOPSTRUCTW(ctypes.Structure):
+        _fields_ = [("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT),
+                    ("pFrom", wintypes.LPCWSTR), ("pTo", wintypes.LPCWSTR),
+                    ("fFlags", ctypes.c_uint16), ("fAnyOperationsAborted", wintypes.BOOL),
+                    ("hNameMappings", wintypes.LPVOID), ("lpszProgressTitle", wintypes.LPCWSTR)]
+
+    FO_DELETE = 3
+    FOF_SILENT, FOF_NOCONFIRMATION, FOF_ALLOWUNDO, FOF_NOERRORUI = 0x0004, 0x0010, 0x0040, 0x0400
+    # pFrom muss doppelt nullterminiert sein; die zweite Null haengt ctypes an
+    op = SHFILEOPSTRUCTW(None, FO_DELETE, os.path.abspath(path) + "\0", None,
+                         FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI,
+                         False, None, None)
+    try:
+        rc = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+    except Exception as e:
+        print(f"[trash] {path}: {e}", flush=True)
+        return False
+    return rc == 0 and not op.fAnyOperationsAborted and not os.path.exists(path)
+
+def _path_in_folder(path: str, folder: str, recursive: bool) -> bool:
+    p = os.path.normcase(os.path.abspath(path))
+    f = os.path.normcase(os.path.abspath(folder))
+    if recursive:
+        return p.startswith(f + os.sep)
+    return os.path.dirname(p) == f
+
+def _watched_folders_info() -> list[dict]:
+    """Beobachtete Ordner fuer die Einstellungen: Titelanzahl und ob der
+    Ordner schon in einem anderen, rekursiv durchsuchten liegt (dann ist er
+    ueberfluessig und wird nur doppelt gescannt)."""
+    folders = list(_state.get("watched_folders", []))
+    recursive = _state.get("scan_recursive", True)
+    info = []
+    for f in folders:
+        inside = next((o for o in folders if o != f and recursive
+                       and _path_in_folder(f, o, True)), None)
+        info.append({
+            "path": f,
+            "exists": os.path.isdir(f),
+            "tracks": sum(1 for lt in _state.get("library", [])
+                          if _path_in_folder(lt.get("path", ""), f, recursive)),
+            "inside": inside,
+        })
+    return info
+
+def _library_paths_lost_without(folder: str) -> list[str]:
+    """Welche Bibliothekseintraege kein beobachteter Ordner und auch nicht der
+    Download-Ordner mehr abdeckt, wenn `folder` wegfaellt."""
+    recursive = _state.get("scan_recursive", True)
+    remaining = [f for f in _state.get("watched_folders", []) if f != folder]
+    dl = _state.get("download_dir") or str(BASE_DIR / "Downloads")
+    lost = []
+    for lt in _state.get("library", []):
+        path = lt.get("path", "")
+        if not _path_in_folder(path, folder, recursive):
+            continue
+        if any(_path_in_folder(path, f, recursive) for f in remaining):
+            continue
+        if dl and _path_in_folder(path, dl, recursive):
+            continue
+        lost.append(path)
+    return lost
 
 def _scan_folders() -> list[str]:
     """Beobachtete Ordner samt Download-Ordner.

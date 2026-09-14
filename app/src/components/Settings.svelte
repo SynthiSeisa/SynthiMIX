@@ -1,4 +1,5 @@
 <script>
+  import { untrack } from 'svelte'
   import { settings, settingsOpen, settingsTab, appSettings, send, toolsInfo, updateProgress,
            loudnormOnDl, loudnormTarget, loudnormTp, autoMixEnabled, playMode,
            playlistFolderEnabled, dlFilenameFormat, downloadDir, remoteStatus,
@@ -6,9 +7,36 @@
            spotifyClientId, spotifyClientSecret,
            lastfmApiKey, acoustidApiKey,
            fpcalcInstalling, fpcalcInstallError,
-           spotdlInstalling, spotdlInstallError, spotdlInstallText } from '../stores/ws.js'
+           spotdlInstalling, spotdlInstallError, spotdlInstallText,
+           watchedFolders, watchedFolderImpact, ytdlpAutoupdate } from '../stores/ws.js'
 
   let tab = $state('playback')
+
+  // ── Beobachtete Ordner ────────────────────────────────────────────────────
+  // Bisher liess sich ein Ordner hinzufuegen, aber weder ansehen noch wieder
+  // entfernen. Vor dem Entfernen wird ausgerechnet, wie viele Titel dann aus
+  // der Bibliothek verschwinden (die Dateien selbst bleiben).
+  let pendingRemove = $state(null)   // { folder, tracks: Zahl | null solange gerechnet wird }
+  function askRemoveFolder(folder) {
+    pendingRemove = { folder, tracks: null }
+    send({ type: 'remove_watched_folder', folder, dry_run: true })
+  }
+  $effect(() => {
+    const imp = $watchedFolderImpact
+    if (!imp) return
+    untrack(() => {
+      if (pendingRemove?.folder === imp.folder && pendingRemove.tracks === null)
+        pendingRemove = { folder: imp.folder, tracks: imp.tracks }
+    })
+  })
+  function confirmRemoveFolder() {
+    send({ type: 'remove_watched_folder', folder: pendingRemove.folder })
+    pendingRemove = null
+  }
+  async function addWatchedFolder() {
+    const folder = await window.electron?.pickFolder?.()
+    if (folder) send({ type: 'scan_library', folder })
+  }
   // Wird die Seite aus einer Fehlermeldung heraus geoeffnet, springt sie
   // direkt auf den passenden Tab statt den Nutzer suchen zu lassen.
   $effect(() => {
@@ -563,6 +591,41 @@
                 <span class="toggle-lbl">beim Scannen einschließen</span>
               </label>
             </div>
+
+            <div class="wf-head">Beobachtete Ordner</div>
+            {#if !$watchedFolders.length}
+              <p class="hint-text">Noch keine. Ordner über „Scannen" in der Bibliothek oder hier hinzufügen.</p>
+            {/if}
+            {#each $watchedFolders as wf (wf.path)}
+              <div class="wf-row">
+                <div class="wf-info">
+                  <span class="wf-path" title={wf.path}>{wf.path}</span>
+                  <span class="wf-meta">
+                    {wf.tracks} Titel
+                    {#if !wf.exists}<span class="wf-warn"> · Ordner nicht gefunden</span>{/if}
+                    {#if wf.inside}<span class="wf-warn" title={wf.inside}> · liegt in einem anderen beobachteten Ordner und wird dort schon mitgescannt — kann weg</span>{/if}
+                  </span>
+                  {#if pendingRemove?.folder === wf.path}
+                    <span class="wf-confirm">
+                      {#if pendingRemove.tracks === null}prüfe…
+                      {:else if pendingRemove.tracks === 0}Aus der Liste entfernen — kein Titel verschwindet aus der Bibliothek.
+                      {:else}{pendingRemove.tracks} Titel verschwinden aus der Bibliothek. Die Dateien bleiben auf der Platte.{/if}
+                    </span>
+                  {/if}
+                </div>
+                {#if pendingRemove?.folder === wf.path}
+                  <button class="action-btn danger" disabled={pendingRemove.tracks === null}
+                          onclick={confirmRemoveFolder}>Entfernen</button>
+                  <button class="action-btn" onclick={() => pendingRemove = null}>Abbrechen</button>
+                {:else}
+                  <button class="action-btn" onclick={() => askRemoveFolder(wf.path)}>Entfernen</button>
+                {/if}
+              </div>
+            {/each}
+            <div class="row" style="margin-top: 6px">
+              <span class="lbl"></span>
+              <button class="action-btn" onclick={addWatchedFolder}>+ Ordner hinzufügen</button>
+            </div>
           </div>
 
           <div class="group">
@@ -590,8 +653,8 @@
             </div>
             <div class="row">
               <span class="lbl">Automatisch aktuell halten</span>
-              <button class="tog {$settings.ytdlp_autoupdate ? 'on' : ''}"
-                onclick={() => send({ type: 'set_ytdlp_autoupdate', value: !$settings.ytdlp_autoupdate })}></button>
+              <button class="tog {$ytdlpAutoupdate ? 'on' : ''}"
+                onclick={() => send({ type: 'set_ytdlp_autoupdate', value: !$ytdlpAutoupdate })}></button>
             </div>
             <div class="hint" style="margin-bottom:10px">
               Prüft einmal täglich auf eine neue yt-dlp-Version. YouTube ändert
@@ -894,6 +957,13 @@
   .seg-btn:hover { border-color: var(--c-accent); color: var(--c-accent); }
   .seg-btn.active { border-color: var(--c-accent); color: var(--c-accent); background: var(--c-act-bg); }
   .hint-text { font-size: 10px; color: var(--c-tx7); margin: 4px 0 0; }
+  .wf-head { font-size: 10px; color: var(--c-tx5); margin: 14px 0 6px; }
+  .wf-row { display: flex; align-items: center; gap: 6px; padding: 5px 0; border-top: 1px solid var(--c-br1); }
+  .wf-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .wf-path { font-size: 11px; color: var(--c-tx2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wf-meta { font-size: 10px; color: var(--c-tx6); }
+  .wf-warn { color: var(--c-warn-tx); }
+  .wf-confirm { font-size: 10px; color: var(--c-tx3); }
   .toggle-wrap { display: flex; align-items: center; gap: 7px; cursor: pointer; }
   .toggle-wrap input[type=checkbox] { accent-color: var(--c-accent); width: 14px; height: 14px; cursor: pointer; }
   .toggle-lbl { font-size: 11px; color: var(--c-tx4); }

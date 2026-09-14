@@ -17,7 +17,7 @@
     if (checked.size === 0) return
     const msg = playlistMode
       ? `${checked.size} ausgewählte Kopien aus der Playlist entfernen?`
-      : `${checked.size} ausgewählte Kopien dauerhaft von der Festplatte löschen?`
+      : `${checked.size} ausgewählte Kopien in den Papierkorb verschieben?`
     if (!confirm(msg)) return
     for (const p of checked) onremove(p)
     const del = checked
@@ -115,7 +115,7 @@
     const count = groups.reduce((n, g) => n + g.others.length, 0)
     const msg = playlistMode
       ? `${count} niedrigwertige Kopien aus der Playlist entfernen?`
-      : `${count} niedrigwertige Kopien dauerhaft von der Festplatte löschen?`
+      : `${count} niedrigwertige Kopien in den Papierkorb verschieben?`
     if (!confirm(msg)) return
     for (const g of remaining) g.others.forEach(t => onremove(t.path))
     onclose()
@@ -194,7 +194,7 @@
                   <button class="keep-btn" onclick={() => keepOnly(group, track)}
                           title="Diese behalten, alle anderen in der Gruppe löschen">Behalten</button>
                   <button class="del-btn" onclick={() => removeTrack(group, track)}
-                          title={playlistMode ? 'Aus Playlist entfernen' : 'Diese Datei dauerhaft von der Festplatte löschen'}>{playlistMode ? '✕ Aus Playlist' : '🗑 Von Platte löschen'}</button>
+                          title={playlistMode ? 'Aus Playlist entfernen' : 'Diese Datei in den Papierkorb verschieben'}>{playlistMode ? '✕ Aus Playlist' : '🗑 In Papierkorb'}</button>
                 </div>
               </div>
             {/each}
@@ -227,7 +227,7 @@
                   <button class="keep-btn" onclick={() => keepOnly(group, track)}
                           title="Diese behalten, alle anderen in der Gruppe löschen">Behalten</button>
                   <button class="del-btn" onclick={() => removeTrack(group, track)}
-                          title={playlistMode ? 'Aus Playlist entfernen' : 'Diese Datei dauerhaft von der Festplatte löschen'}>{playlistMode ? '✕ Aus Playlist' : '🗑 Von Platte löschen'}</button>
+                          title={playlistMode ? 'Aus Playlist entfernen' : 'Diese Datei in den Papierkorb verschieben'}>{playlistMode ? '✕ Aus Playlist' : '🗑 In Papierkorb'}</button>
                 </div>
               </div>
             {/each}
