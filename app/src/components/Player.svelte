@@ -1,7 +1,8 @@
 <script>
   import { get } from 'svelte/store'
   import { untrack, onMount } from 'svelte'
-  import { playerState, nowPlaying, queue, waveform, waveformNext, settings, playMode, send, autoMixEnabled, appSettings, introSkipPaths, skipNextCrossfade, livePositionMs } from '../stores/ws.js'
+  import { keyCompat, keyTitle } from '../lib/keys.js'
+  import { library, playerState, nowPlaying, queue, waveform, waveformNext, settings, playMode, send, autoMixEnabled, appSettings, introSkipPaths, skipNextCrossfade, livePositionMs } from '../stores/ws.js'
   import Waveform from './Waveform.svelte'
 
   let elA = $state(null)
@@ -291,6 +292,12 @@
     if (rep === 2) return 0
     return -1
   })
+  // Tonart aus der Bibliothek, nicht aus dem Queue-Eintrag (der traegt sie nicht)
+  const keyByPath = $derived(new Map($library.filter(t => t.key).map(t => [t.path, t])))
+  const curKey    = $derived(keyByPath.get($nowPlaying?.path) ?? null)
+  const nextKey   = $derived(keyByPath.get(nextTrack?.path) ?? null)
+  const uebergang = $derived(keyCompat(curKey?.key, nextKey?.key))
+
   const nextTrack    = $derived(
     nextTrackIdx >= 0 && nextTrackIdx < $queue.length ? $queue[nextTrackIdx] : null
   )
@@ -739,6 +746,7 @@
           {:else if $appSettings.normalizeVolume && $nowPlaying}
             <span class="lufs-warn" title="Keine Lautstärkemessung — Normalisierung nicht aktiv für diesen Track">⚠ kein LUFS</span>
           {/if}
+          {#if curKey}<span class="{curKey.key_src === 'analyse' ? 'key-est' : ''}" title={keyTitle(curKey.key, curKey.key_src)}>{curKey.key}</span>{/if}
           {#if $nowPlaying?.bpm}<span>{$nowPlaying.bpm} BPM</span>
           {:else if $nowPlaying}<span class="bpm-pending">BPM…</span>{/if}
           {#if $nowPlaying?.play_count}<span>×{$nowPlaying.play_count}</span>{/if}
@@ -754,6 +762,12 @@
           <span class="next-arrow">↓</span>
           <span class="next-label">NÄCHSTER</span>
           <span class="next-title">{nextTrack.title}{nextTrack.artist ? ' · ' + nextTrack.artist : ''}</span>
+          {#if nextKey}
+            <span class="next-key next-key-{uebergang.level} {nextKey.key_src === 'analyse' ? 'key-est' : ''}"
+                  title={keyTitle(nextKey.key, nextKey.key_src) + (uebergang.label ? ' · ' + uebergang.label : '')}>
+              {uebergang.level === 'clash' ? '⚠ ' : uebergang.level === 'unknown' ? '' : '✓ '}{nextKey.key}
+            </span>
+          {/if}
           <span class="next-dur">{fmt(nextTrack.duration_sec * 1000)}</span>
         </div>
         <Waveform data={$waveformNext} position={0} introStart={nextIntroStart} introEnd={nextIntroEnd} height={20} />
@@ -934,4 +948,8 @@
   .next-label { font-size: 9px; font-weight: 700; letter-spacing: .08em; color: var(--c-tx5); text-transform: uppercase; flex-shrink: 0; }
   .next-title { flex: 1; font-size: 11px; color: var(--c-tx4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .next-dur   { font-size: 10px; color: var(--c-tx5); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+  .next-key { font-size: 9px; color: var(--c-tx5); flex-shrink: 0; margin-left: 6px; }
+  .next-key-same, .next-key-good { color: var(--c-green-tx); }
+  .next-key-clash { color: var(--c-warn-tx); }
+  .key-est { font-style: italic; opacity: .75; }
 </style>

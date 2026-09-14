@@ -67,6 +67,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # ── paths ────────────────────────────────────────────────────────────────────
 # In packaged mode Electron passes --data-dir so we write to %APPDATA%\SynthiMIX
+# SYNTHIMIX_PORT nur fuer Tests neben einem laufenden SynthiMIX, das 8765 belegt.
+# Electron setzt die Variable nicht; das Frontend verbindet sich fest auf 8765.
+_BACKEND_PORT = int(os.environ.get("SYNTHIMIX_PORT", "8765"))
+
 _data_dir_arg = next((sys.argv[i+1] for i, a in enumerate(sys.argv) if a == '--data-dir' and i+1 < len(sys.argv)), None)
 # Electron reicht seinen eigenen Pfad durch — er dient yt-dlp als JS-Laufzeit
 _electron_exe = next((sys.argv[i+1] for i, a in enumerate(sys.argv) if a == '--electron-exe' and i+1 < len(sys.argv)), None)
@@ -143,7 +147,7 @@ async def lifespan(application: FastAPI):
     asyncio.create_task(_auto_scan_loop())
     asyncio.create_task(_ytdlp_autoupdate_loop())
     asyncio.create_task(_refresh_tag_meta_task())
-    print("[backend] ready on ws://127.0.0.1:8765/ws", flush=True)
+    print(f"[backend] ready on ws://127.0.0.1:{_BACKEND_PORT}/ws", flush=True)
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -336,6 +340,8 @@ def load_library():
             "artist":       _fix_mojibake(str(t.get("artist", ""))),
             "album":        _fix_mojibake(str(t.get("album", ""))),
             "genre":        _fix_mojibake(str(t.get("genre", ""))),
+            "key":          _parse_key(t.get("key")) or "",
+            "key_src":      str(t.get("key_src", "")),
             "meta_rev":     int(t.get("meta_rev", 0)),
             "ext":          str(t.get("ext", Path(str(t.get("path",""))).suffix.lstrip('.').lower())),
             "mtime":        int(t.get("mtime", 0)),
@@ -574,10 +580,112 @@ def _estimate_bpm_sync(path: str) -> int:
     except Exception:
         return 0
 
+# ── Tonart ───────────────────────────────────────────────────────────────────
+# Gespeichert wird immer in musikalischer Schreibweise mit ♯ ("F♯m", "C").
+# Eingelesen wird alles, was in Tags vorkommt: rekordbox ("F♯m"), Mixed In Key
+# (Camelot "4A"), Traktor (Open Key "1m"), Varianten mit #, b und "minor".
+_KEY_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B']
+_KEY_FLATS = {'CB': 11, 'DB': 1, 'EB': 3, 'FB': 4, 'GB': 6, 'AB': 8, 'BB': 10}
+# Camelot-Nummer -> Tonhoehenklasse (0 = C). A = Moll, B = Dur.
+_CAMELOT_MINOR = {1: 8, 2: 3, 3: 10, 4: 5, 5: 0, 6: 7, 7: 2, 8: 9, 9: 4, 10: 11, 11: 6, 12: 1}
+_CAMELOT_MAJOR = {1: 11, 2: 6, 3: 1, 4: 8, 5: 3, 6: 10, 7: 5, 8: 0, 9: 7, 10: 2, 11: 9, 12: 4}
+
+def _parse_key(raw) -> str | None:
+    """Beliebige Tonart-Angabe -> "F♯m" / "C", oder None wenn nicht lesbar."""
+    if raw is None:
+        return None
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", errors="replace")
+    txt = str(raw).strip().replace('♯', '#').replace('♭', 'b')
+    if not txt:
+        return None
+    m = re.fullmatch(r'0?(1[0-2]|[1-9])\s*([ABab])', txt)                  # Camelot
+    if m:
+        minor = m.group(2).upper() == 'A'
+        pc = (_CAMELOT_MINOR if minor else _CAMELOT_MAJOR)[int(m.group(1))]
+        return _KEY_NAMES[pc] + ('m' if minor else '')
+    m = re.fullmatch(r'(1[0-2]|[1-9])\s*([dmDM])', txt)                     # Open Key
+    if m:
+        minor = m.group(2).lower() == 'm'
+        camelot = (int(m.group(1)) + 6) % 12 + 1
+        pc = (_CAMELOT_MINOR if minor else _CAMELOT_MAJOR)[camelot]
+        return _KEY_NAMES[pc] + ('m' if minor else '')
+    m = re.fullmatch(r'([A-Ga-g])\s*(#|b)?\s*(m|min|minor|moll|maj|major|dur)?', txt, re.I)
+    if not m:
+        return None
+    note, acc = m.group(1).upper(), m.group(2) or ''
+    if acc == 'b':
+        pc = _KEY_FLATS.get(note + 'B')
+        if pc is None:
+            return None
+    else:
+        pc = _KEY_NAMES.index(note)
+        if acc == '#':
+            pc = (pc + 1) % 12
+    suffix = (m.group(3) or '').lower()
+    minor = suffix in ('m', 'min', 'minor', 'moll')
+    return _KEY_NAMES[pc] + ('m' if minor else '')
+
+def _key_to_camelot(key) -> tuple[int, str] | None:
+    k = _parse_key(key)
+    if not k:
+        return None
+    minor = k.endswith('m')
+    pc = _KEY_NAMES.index(k[:-1] if minor else k)
+    table = _CAMELOT_MINOR if minor else _CAMELOT_MAJOR
+    num = next(n for n, v in table.items() if v == pc)
+    return num, 'A' if minor else 'B'
+
+def _key_compat(a, b) -> int:
+    """3 = gleiche Tonart, 2 = passt (Parallel- oder Nachbartonart), 0 = passt nicht,
+    -1 = mindestens eine Tonart unbekannt."""
+    ca, cb = _key_to_camelot(a), _key_to_camelot(b)
+    if not ca or not cb:
+        return -1
+    if ca == cb:
+        return 3
+    if ca[0] == cb[0]:
+        return 2
+    if ca[1] == cb[1] and (ca[0] - cb[0]) % 12 in (1, 11):
+        return 2
+    return 0
+
+def _make_library_entry(path: str, probe: dict, **overrides) -> dict:
+    """Bibliothekseintrag aus einem _probe_sync-Ergebnis.
+
+    Frueher bauten vier Stellen ihre Eintraege selbst — Album und Genre wurden
+    dabei ueberall vergessen. Neue Felder gehoeren ab jetzt nur noch hierher
+    (und in die Normalisierung von load_library).
+    """
+    p = Path(path)
+    key = _parse_key(probe.get("key")) or ""
+    entry = {
+        "path":         path,
+        "title":        probe.get("title") or p.stem,
+        "artist":       probe.get("artist", "") or "",
+        "album_artist": probe.get("album_artist", "") or "",
+        "album":        probe.get("album", "") or "",
+        "genre":        probe.get("genre", "") or "",
+        "key":          key,
+        "key_src":      "tag" if key else "",
+        "meta_rev":     _TAG_META_REV,
+        "folder":       p.parent.name,
+        "ext":          probe.get("ext") or p.suffix.lstrip('.').lower(),
+        "duration_sec": probe.get("duration_sec", 0),
+        "lufs":         -99.0,
+        "bpm":          probe.get("bpm", 0),
+        "bitrate_kbps": probe.get("bitrate_kbps", 0),
+        "comment":      probe.get("comment", "") or "",
+        "mtime":        int(os.path.getmtime(path)) if os.path.exists(path) else 0,
+        "play_count":   0,
+    }
+    entry.update(overrides)
+    return entry
+
 def _probe_sync(path: str) -> dict:
     result = {"duration_sec": 0.0, "bitrate_kbps": 0, "bpm": 0,
               "title": Path(path).stem, "artist": "", "album_artist": "",
-              "album": "", "genre": "",
+              "album": "", "genre": "", "key": "",
               "comment": "", "ext": Path(path).suffix.lstrip('.').lower()}
     try:
         r = subprocess.run(
@@ -596,6 +704,8 @@ def _probe_sync(path: str) -> dict:
         result["album_artist"] = tags.get("album_artist") or tags.get("albumartist") or ""
         result["album"]        = tags.get("album") or ""
         result["genre"]        = tags.get("genre") or ""
+        result["key"]          = _parse_key(tags.get("tkey") or tags.get("initialkey")
+                                            or tags.get("key")) or ""
         if result["duration_sec"] > 0:
             return result
     except Exception:
@@ -626,6 +736,7 @@ def _probe_sync(path: str) -> dict:
             result["album_artist"] = _t('TPE2','album_artist','aART','\xa9aAR')
             result["album"]        = _t('TALB','album','\xa9alb')
             result["genre"]        = _t('TCON','genre','\xa9gen')
+            result["key"]          = (_read_tags_sync(path) or {}).get("key", "")
             bpm_s = _t('TBPM','bpm')
             try: result["bpm"] = int(float(bpm_s)) if bpm_s else 0
             except ValueError: pass
@@ -635,7 +746,7 @@ def _probe_sync(path: str) -> dict:
 
 # Erhoehen, wenn Bibliothekseintraege neue Tag-Felder bekommen: der Bestand wird
 # dann beim naechsten Start einmal nachgelesen (siehe _refresh_tag_meta_task).
-_TAG_META_REV = 1
+_TAG_META_REV = 2      # 2: Tonart dazu
 
 def _read_tags_sync(path: str) -> dict | None:
     """Nur Kuenstler, Album und Genre aus den Tags lesen.
@@ -662,7 +773,12 @@ def _read_tags_sync(path: str) -> dict | None:
                 continue
             if hasattr(v, 'text'):
                 return str(v.text[0]).strip() if v.text else ''
-            return (str(v[0]) if isinstance(v, list) else str(v)).strip()
+            if isinstance(v, list):
+                v = v[0] if v else ''
+            # MP4-Freiform-Felder (iTunes initialkey) kommen als Bytes
+            if isinstance(v, (bytes, bytearray)):
+                return v.decode('utf-8', errors='replace').strip()
+            return str(v).strip()
         return ''
     album_artist = _t('TPE2', 'albumartist', 'album_artist', 'aART')
     return {
@@ -670,57 +786,153 @@ def _read_tags_sync(path: str) -> dict | None:
         "album_artist": album_artist,
         "album":        _t('TALB', 'album', '\xa9alb'),
         "genre":        _t('TCON', 'genre', '\xa9gen'),
+        "key":          _parse_key(_t('TKEY', 'initialkey', '----:com.apple.iTunes:initialkey')) or "",
     }
 
 async def _refresh_tag_meta_task():
-    """Kuenstler/Album/Genre fuer Bestandseintraege einmalig nachtragen.
+    """Tag-Felder der Bibliothek mit den Dateien abgleichen.
 
-    Bis 1.4.2 wurden Album und Genre nie gespeichert, und load_library hat den
-    Kuenstler bei jedem Start verworfen. Die Navigation zeigte deshalb bei
-    Bibliotheken mit sauber getaggten Dateien fast keine Kuenstler und gar
-    keine Alben oder Genres. Gefuellt werden nur leere Felder — was jemand
-    von Hand eingetragen hat, bleibt stehen.
+    Zwei Faelle:
+    - Eintraege aus einem aelteren Stand (meta_rev zu alt): Bis 1.4.2 wurden
+      Album und Genre nie gespeichert und der Kuenstler beim Start verworfen.
+      Hier werden nur leere Felder gefuellt, von Hand Gesetztes bleibt.
+    - Dateien, die sich seit dem Einlesen geaendert haben (mtime neuer): etwa
+      nach einem Durchlauf durch Mixed In Key. Dann gelten die Tags. Leere
+      Tags ueberschreiben nichts.
+    Eine Tonart aus dem Tag schlaegt immer eine eigene Schaetzung.
     """
-    pending = [(lt["path"], {k: lt.get(k, "") for k in ("artist", "album_artist", "album", "genre")})
-               for lt in _state["library"]
-               if lt.get("path") and lt.get("meta_rev", 0) < _TAG_META_REV]
-    if not pending:
-        return
+    FIELDS = ("artist", "album_artist", "album", "genre", "key")
+    snapshot = [(lt["path"], int(lt.get("mtime", 0) or 0), lt.get("meta_rev", 0),
+                 {k: lt.get(k, "") for k in FIELDS}, lt.get("key_src", ""))
+                for lt in _state["library"] if lt.get("path")]
 
     def _work():
         # Nur lesen und Ergebnisse sammeln. Angewendet wird im Event-Loop,
-        # damit niemand die Bibliothek gleichzeitig speichert, waehrend hier
-        # an den Eintraegen geschrieben wird.
+        # damit niemand die Bibliothek speichert, waehrend hier geschrieben wird.
         updates: dict[str, dict] = {}
-        for path, current in pending:
-            if not os.path.exists(path):
+        for path, mtime, rev, current, key_src in snapshot:
+            try:
+                file_mtime = int(os.path.getmtime(path))
+            except OSError:
                 continue    # Laufwerk gerade nicht da: beim naechsten Start nochmal
+            changed_on_disk = mtime > 0 and file_mtime > mtime
+            if rev >= _TAG_META_REV and not changed_on_disk:
+                continue
             tags = _read_tags_sync(path) or {}
-            updates[path] = {k: v for k, v in tags.items() if v and not current.get(k)}
+            upd: dict = {"meta_rev": _TAG_META_REV}
+            for k in ("artist", "album_artist", "album", "genre"):
+                v = tags.get(k)
+                if v and (changed_on_disk or not current.get(k)) and v != current.get(k):
+                    upd[k] = v
+            tag_key = tags.get("key")
+            if tag_key and (tag_key != current.get("key") or key_src != "tag"):
+                upd["key"] = tag_key
+                upd["key_src"] = "tag"
+            if changed_on_disk:
+                upd["mtime"] = file_mtime
+            updates[path] = upd
         return updates
 
     loop = asyncio.get_running_loop()
     updates = await loop.run_in_executor(None, _work)
+    if not updates:
+        return
 
     ergaenzt = 0
     for lt in _state["library"]:
         upd = updates.get(lt.get("path"))
         if upd is None:
             continue
-        lt["meta_rev"] = _TAG_META_REV
-        if upd:
-            lt.update(upd)
+        if any(k not in ("meta_rev", "mtime") for k in upd):
             ergaenzt += 1
+        lt.update(upd)
 
-    if not updates:
-        return
     save_library()
     await push_library()
-    print(f"[library] Tags nachgelesen: {len(updates)} Dateien, {ergaenzt} ergaenzt", flush=True)
+    print(f"[library] Tags abgeglichen: {len(updates)} Dateien, {ergaenzt} geaendert", flush=True)
     if ergaenzt:
         await broadcast({"type": "scan_status", "text": f"Tags ergänzt: {ergaenzt} Titel"})
         await asyncio.sleep(4)
         await broadcast({"type": "scan_status", "text": ""})
+
+# ── Tonart-Erkennung ─────────────────────────────────────────────────────────
+# Chromagramm per FFT, verglichen mit den Tonart-Profilen nach Temperley
+# (Kostka-Payne). Gemessen im September 2026 an 120 Titeln der Bibliothek, die
+# eine Tonart von Mixed In Key oder rekordbox trugen:
+#   alle Schaetzungen:        45 % exakt, 64 % harmonisch passend
+#   nur ausreichend sichere:  62 % exakt, 73 % passend (etwa die Haelfte)
+# Getestete Verfeinerungen (Log-/Wurzelkompression, Spektralspitzen, Trennung
+# von Schlagzeug und Toenen) brachten nichts bzw. schadeten. Deshalb werden nur
+# sichere Ergebnisse uebernommen und als "analyse" markiert; Mixed In Key ist
+# klar genauer, eine Tonart aus dem Tag hat immer Vorrang.
+_KEY_PROFILE_MAJOR = (0.748, 0.060, 0.488, 0.082, 0.670, 0.460, 0.096, 0.715, 0.104, 0.366, 0.057, 0.400)
+_KEY_PROFILE_MINOR = (0.712, 0.084, 0.474, 0.618, 0.049, 0.460, 0.105, 0.747, 0.404, 0.067, 0.133, 0.330)
+_KEY_MIN_MARGIN = 0.09   # Abstand zur zweitbesten Tonart; darunter lieber keine Angabe
+
+_numpy_state: bool | None = None
+def _numpy_ok() -> bool:
+    global _numpy_state
+    if _numpy_state is None:
+        try:
+            import numpy  # noqa: F401
+            _numpy_state = True
+        except Exception:
+            _numpy_state = False
+            print("[key] numpy nicht verfuegbar — Tonart nur aus Tags", flush=True)
+    return _numpy_state
+
+def _key_from_chroma(chroma) -> tuple[str, float]:
+    """Bestpassende Tonart und ihr Abstand zur zweitbesten."""
+    import numpy as np
+    maj, mino = np.array(_KEY_PROFILE_MAJOR), np.array(_KEY_PROFILE_MINOR)
+    scores = []
+    for tonic in range(12):
+        scores.append((float(np.corrcoef(chroma, np.roll(maj, tonic))[0, 1]), tonic, False))
+        scores.append((float(np.corrcoef(chroma, np.roll(mino, tonic))[0, 1]), tonic, True))
+    scores.sort(reverse=True)
+    best, second = scores[0], scores[1]
+    return _KEY_NAMES[best[1]] + ('m' if best[2] else ''), best[0] - second[0]
+
+def _detect_key_sync(path: str) -> str | None:
+    """Tonart schaetzen. "" = nicht sicher genug oder nicht dekodierbar,
+    None = Erkennung gar nicht moeglich (numpy fehlt)."""
+    if not _numpy_ok():
+        return None
+    import numpy as np
+    sr, n_fft, hop = 11025, 8192, 4096
+    x = np.zeros(0, dtype=np.float32)
+    # Ab Sekunde 30 und bis zu zwei Minuten: Intros sind oft nur Schlagzeug.
+    # Kurze Titel beginnen dafuer von vorn.
+    for start in ("30", None):
+        cmd = [FFMPEG, "-nostdin", "-v", "error"] + (["-ss", start] if start else []) + \
+              ["-i", path, "-t", "120", "-ac", "1", "-ar", str(sr), "-f", "f32le", "-"]
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=120, creationflags=_NO_WINDOW)
+        except Exception:
+            return ""
+        x = np.frombuffer(r.stdout, dtype=np.float32)
+        if len(x) > sr * 10:
+            break
+    if len(x) < n_fft * 4:
+        return ""
+    n_frames = 1 + (len(x) - n_fft) // hop
+    idx = np.arange(n_fft)[None, :] + hop * np.arange(n_frames)[:, None]
+    mag = np.abs(np.fft.rfft(x[idx] * np.hanning(n_fft)[None, :], axis=1))
+    freqs = np.fft.rfftfreq(n_fft, 1 / sr)
+    sel = (freqs >= 65) & (freqs <= 2000)
+    midi = 69 + 12 * np.log2(freqs[sel] / 440.0)
+    pitch_class = np.round(midi).astype(int) % 12
+    # Frequenzen nahe der Halbton-Mitte zaehlen mehr, gegen Uebersprechen
+    weight = np.exp(-((midi - np.round(midi)) ** 2) / (2 * 0.15 ** 2))
+    m = mag[:, sel] * weight[None, :]
+    chroma = np.stack([m[:, pitch_class == k].sum(axis=1) for k in range(12)], axis=1)
+    energy = chroma.sum(axis=1)
+    if not np.any(energy > 0):
+        return ""
+    keep = energy > np.percentile(energy, 20)    # leise Stellen nicht mitzaehlen
+    chroma = (chroma[keep] / (energy[keep, None] + 1e-9)).mean(axis=0)
+    key, margin = _key_from_chroma(chroma)
+    return key if margin >= _KEY_MIN_MARGIN else ""
 
 _analyze_running = False
 _analyze_cancel  = False
@@ -738,7 +950,8 @@ async def _analyze_library_meta_task():
         tracks  = list(_state["library"])
         pending = [lt for lt in tracks if lt.get("path") and os.path.exists(lt["path"])
                    and not lt.get("unanalyzable")
-                   and (lt.get("lufs", -99) <= -90 or not lt.get("bpm"))]
+                   and (lt.get("lufs", -99) <= -90 or not lt.get("bpm")
+                        or (not lt.get("key") and lt.get("key_src") != "none" and _numpy_ok()))]
         total   = len(pending)
         done    = 0
         changed = False
@@ -750,6 +963,7 @@ async def _analyze_library_meta_task():
             path = lt.get("path", "")
             need_lufs = lt.get("lufs", -99) <= -90
             need_bpm  = not lt.get("bpm")
+            need_key  = not lt.get("key") and lt.get("key_src") != "none"
             try:
                 if need_lufs:
                     lufs = await loop.run_in_executor(None, _compute_lufs_sync, path)
@@ -767,6 +981,12 @@ async def _analyze_library_meta_task():
                     bpm = await loop.run_in_executor(None, _estimate_bpm_sync, path)
                     if bpm:
                         lt["bpm"] = bpm
+                        changed = True
+                if need_key:
+                    est = await loop.run_in_executor(None, _detect_key_sync, path)
+                    if est is not None:
+                        lt["key"] = est
+                        lt["key_src"] = "analyse" if est else "none"
                         changed = True
             except Exception as e:
                 print(f"[analyze_meta] {Path(path).name}: {e}")
@@ -819,24 +1039,7 @@ async def _auto_add_to_library(path: str):
         return
     loop  = asyncio.get_running_loop()
     probe = await loop.run_in_executor(None, _probe_sync, path)
-    _state["library"].append({
-        "path":         path,
-        "title":        probe["title"] or Path(path).stem,
-        "artist":       probe.get("artist", ""),
-        "album_artist": probe.get("album_artist", ""),
-        "album":        probe.get("album", ""),
-        "genre":        probe.get("genre", ""),
-        "meta_rev":     _TAG_META_REV,
-        "folder":       Path(path).parent.name,
-        "ext":          probe.get("ext", Path(path).suffix.lstrip('.').lower()),
-        "duration_sec": probe["duration_sec"],
-        "lufs":         -99.0,
-        "bpm":          probe["bpm"],
-        "bitrate_kbps": probe["bitrate_kbps"],
-        "comment":      probe.get("comment", ""),
-        "mtime":        int(os.path.getmtime(path)) if os.path.exists(path) else 0,
-        "play_count":   0,
-    })
+    _state["library"].append(_make_library_entry(path, probe))
     save_library()
     await push_library()
 
@@ -874,26 +1077,11 @@ async def _enrich_track(path: str, force: bool = False):
     if lib_entry is None and os.path.exists(path):
         # Track noch nicht in der Bibliothek → mit vollständigen Metadaten anlegen
         probe = await loop.run_in_executor(None, _probe_sync, path)
-        p = Path(path)
-        mtime = int(os.path.getmtime(path))
-        lib_entry = {
-            "path": path,
-            "title": probe.get("title") or p.stem,
-            "artist": probe.get("artist") or "",
-            "album_artist": probe.get("album_artist") or "",
-            "album": probe.get("album") or "",
-            "genre": probe.get("genre") or "",
-            "meta_rev": _TAG_META_REV,
-            "comment": probe.get("comment") or "",
-            "ext": probe.get("ext") or p.suffix.lstrip('.').lower(),
-            "folder": p.parent.name,
-            "duration_sec": duration or probe.get("duration_sec", 0),
-            "lufs": lufs if lufs > -90 else -99.0,
-            "bpm": bpm or probe.get("bpm", 0),
-            "bitrate_kbps": probe.get("bitrate_kbps", 0),
-            "mtime": mtime,
-            "play_count": 0,
-        }
+        lib_entry = _make_library_entry(
+            path, probe,
+            duration_sec=duration or probe.get("duration_sec", 0),
+            lufs=lufs if lufs > -90 else -99.0,
+            bpm=bpm or probe.get("bpm", 0))
         _state["library"].append(lib_entry)
         lib_changed = True
     elif lib_entry is not None:
@@ -907,8 +1095,19 @@ async def _enrich_track(path: str, force: bool = False):
         # lufs == -98.0 → Datei nicht gefunden (temporär) → nichts markieren
         if bpm  and not lib_entry.get("bpm"):                       lib_entry["bpm"]          = bpm;      lib_changed = True
         if duration > 0 and not lib_entry.get("duration_sec", 0):  lib_entry["duration_sec"] = duration; lib_changed = True
+
+    # Tonart nur schaetzen, wenn weder ein Tag eine liefert noch eine
+    # fruehere Erkennung schon ergebnislos war ("none").
+    if lib_entry is not None and not lib_entry.get("key") and lib_entry.get("key_src") != "none":
+        est = await loop.run_in_executor(None, _detect_key_sync, path)
+        if est is not None:
+            lib_entry["key"] = est
+            lib_entry["key_src"] = "analyse" if est else "none"
+            lib_changed = True
     if lib_changed:
         save_library()
+        if lib_entry is not None:
+            await broadcast({"type": "track_meta_update", "track": lib_entry})
 
     save_queue()
     await broadcast({"type": "track_enriched", "path": path, "art": art, "lufs": lufs, "bpm": bpm, "duration_sec": duration})
@@ -1212,7 +1411,9 @@ async def _do_automix_inner(last_title: str):
             and _norm_title(lt.get("title", "")) not in played_norm
         ]
         if candidates:
-            pick = random.choice(candidates)
+            ci = _state.get("current_idx", -1)
+            cur_path = _state["queue"][ci].get("path", "") if 0 <= ci < len(_state["queue"]) else ""
+            pick = _pick_harmonic(candidates, cur_path)
             _state["queue"].append({
                 "path":         pick["path"],
                 "title":        pick["title"],
@@ -1472,6 +1673,21 @@ async def _lastfm_similar(artist: str, title: str, api_key: str, limit: int = 30
     return [{'artist': t.get('artist', {}).get('name', '') if isinstance(t.get('artist'), dict) else str(t.get('artist', '')),
              'title': t.get('name', '')} for t in tracks]
 
+def _library_key(path: str) -> str:
+    lt = next((x for x in _state.get("library", []) if x.get("path") == path), None)
+    return (lt or {}).get("key", "") or ""
+
+def _pick_harmonic(candidates: list[dict], ref_path: str) -> dict:
+    """Zufaellig, aber bevorzugt unter den Titeln, deren Tonart zum Referenztitel
+    passt. Ohne bekannte Tonart oder ohne passenden Kandidaten wie bisher
+    zufaellig aus allen — bevorzugt, nicht ausgeschlossen."""
+    ref = _library_key(ref_path)
+    if ref:
+        passend = [c for c in candidates if _key_compat(ref, c.get("key")) >= 2]
+        if passend:
+            return random.choice(passend)
+    return random.choice(candidates)
+
 async def _radio_fill():
     global _radio_fill_running
     if _radio_fill_running:
@@ -1509,6 +1725,7 @@ async def _radio_fill():
         if api_key:
             similar = await _lastfm_similar(artist, title, api_key)
             if similar:
+                treffer: list[dict] = []    # in Last.fm-Reihenfolge
                 for s in similar:
                     s_artist = s['artist'].lower()
                     s_title  = s['title'].lower()
@@ -1523,13 +1740,19 @@ async def _radio_fill():
                         if score > best_score and t_score > 0.7:
                             best_score = score
                             best = lt
-                    if best:
-                        best_match = best
-                        break
+                    if best and best not in treffer:
+                        treffer.append(best)
+                        if len(treffer) >= 8:
+                            break
+                # Der aehnlichste Titel, dessen Tonart passt — sonst der aehnlichste
+                ref = _library_key(np.get('path', ''))
+                passend = [t for t in treffer if ref and _key_compat(ref, t.get('key')) >= 2]
+                if passend or treffer:
+                    best_match = (passend or treffer)[0]
 
-        # Fallback: random track from library not in queue
+        # Fallback: Titel aus der Bibliothek, bevorzugt harmonisch passend
         if not best_match:
-            best_match = random.choice(candidates_total)
+            best_match = _pick_harmonic(candidates_total, np.get('path', ''))
 
         track = {
             'path':         best_match.get('path', ''),
@@ -2873,24 +3096,7 @@ def _scan_sync(folder: str) -> list[dict]:
             if Path(f).suffix.lower() in AUDIO_EXTS:
                 full = str(Path(os.path.join(root, f)))  # normalisiert Slashes auf Windows
                 probe = _probe_sync(full)
-                result.append({
-                    "path":         full,
-                    "title":        probe["title"] or Path(f).stem,
-                    "artist":       probe.get("artist", ""),
-                    "album_artist": probe.get("album_artist", ""),
-                    "album":        probe.get("album", ""),
-                    "genre":        probe.get("genre", ""),
-                    "meta_rev":     _TAG_META_REV,
-                    "folder":       Path(root).name,
-                    "ext":          probe.get("ext", Path(f).suffix.lstrip('.').lower()),
-                    "duration_sec": probe["duration_sec"],
-                    "lufs":         -99.0,
-                    "bpm":          probe["bpm"],
-                    "bitrate_kbps": probe["bitrate_kbps"],
-                    "comment":      probe.get("comment", ""),
-                    "mtime":        int(os.path.getmtime(full)),
-                    "play_count":   0,
-                })
+                result.append(_make_library_entry(full, probe))
     return result
 
 def _find_new_audio_paths(folder: str, existing: set[str], recursive: bool) -> list[str]:
@@ -2939,24 +3145,7 @@ async def _watcher_loop():
                     new_tracks = []
                     for p in new_paths:
                         probe = await loop.run_in_executor(None, _probe_sync, p)
-                        new_tracks.append({
-                            "path":         p,
-                            "title":        probe["title"] or Path(p).stem,
-                            "artist":       probe.get("artist", ""),
-                            "album_artist": probe.get("album_artist", ""),
-                            "album":        probe.get("album", ""),
-                            "genre":        probe.get("genre", ""),
-                            "meta_rev":     _TAG_META_REV,
-                            "folder":       Path(p).parent.name,
-                            "ext":          probe.get("ext", Path(p).suffix.lstrip('.').lower()),
-                            "duration_sec": probe["duration_sec"],
-                            "lufs":         -99.0,
-                            "bpm":          probe["bpm"],
-                            "bitrate_kbps": probe["bitrate_kbps"],
-                            "comment":      probe.get("comment", ""),
-                            "mtime":        int(os.path.getmtime(p)),
-                            "play_count":   0,
-                        })
+                        new_tracks.append(_make_library_entry(p, probe))
                     _state["library"].extend(new_tracks)
                     save_library()
                     await push_library()
@@ -4845,4 +5034,4 @@ async def _stop_remote_server():
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8765, log_level="warning")
+    uvicorn.run(app, host="127.0.0.1", port=_BACKEND_PORT, log_level="warning")

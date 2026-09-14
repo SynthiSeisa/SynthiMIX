@@ -1,6 +1,12 @@
 <script>
   import { get } from 'svelte/store'
+  import { keyCompat, keyTitle } from '../lib/keys.js'
   import { queue, playerState, library, playlists, playMode, send, automixStatus, introSkipPaths, settings, appSettings, skipNextCrossfade, autoRemovePlayed, livePositionMs, selectionOwner, radioEnabled, radioStatus, lastfmApiKey } from '../stores/ws.js'
+
+  // Tonart kommt aus der Bibliothek: Queue-Eintraege entstehen an vielen Stellen
+  // und tragen sie nicht selbst mit.
+  const keyByPath = $derived(new Map($library.filter(t => t.key).map(t => [t.path, t])))
+  function keyOf(track) { return keyByPath.get(track?.path) ?? null }
 
   // ── Shuffle / Repeat ────────────────────────────────────────────────────────
   const shuffle = $derived($playMode.shuffle)
@@ -505,6 +511,12 @@
             <span class="pc">×{track.play_count}</span>
           {/if}
 
+          {#if keyOf(track)}
+            {@const k = keyOf(track)}
+            {@const uebergang = i > 0 ? keyCompat(keyOf($queue[i - 1])?.key, k.key) : { level: 'unknown', label: '' }}
+            <span class="key key-{uebergang.level} {k.key_src === 'analyse' ? 'key-est' : ''}"
+                  title={keyTitle(k.key, k.key_src) + (uebergang.label ? ' · Übergang vom vorherigen Titel: ' + uebergang.label : '')}>{k.key}</span>
+          {/if}
           <span class="dur">{fmt(track.duration_sec)}</span>
           {#if played && track.played_at}
             {@const d = new Date(track.played_at * 1000)}
@@ -961,4 +973,8 @@
   .meta-cancel:hover { border-color:var(--c-tx5); color:var(--c-tx3); }
   .meta-save    { background:var(--c-warn-bg); border:1px solid var(--c-warn-br); border-radius:4px; color:var(--c-warn-tx); padding:6px 14px; font-size:11px; cursor:pointer; }
   .meta-save:hover { background:var(--c-warn-br); }
+  .key { font-size: 9px; color: var(--c-tx5); min-width: 26px; text-align: right; flex-shrink: 0; }
+  .key-same, .key-good { color: var(--c-green-tx); }
+  .key-clash { color: var(--c-warn-tx); }
+  .key-est { font-style: italic; opacity: .75; }
 </style>

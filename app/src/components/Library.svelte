@@ -2,6 +2,7 @@
   import { onMount, untrack } from 'svelte'
   import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected } from '../stores/ws.js'
   import BetterVersionDialog from './BetterVersionDialog.svelte'
+  import { keySortValue, keyTitle } from '../lib/keys.js'
   import DuplicateScanDialog from './DuplicateScanDialog.svelte'
 
   let showDupeScan     = $state(false)
@@ -451,6 +452,13 @@
         } else if (sortCol === 'title') {
           av = getTrackArtistTitle(a).title.toLowerCase()
           bv = getTrackArtistTitle(b).title.toLowerCase()
+        } else if (sortCol === 'key') {
+          // Nach Camelot statt alphabetisch: passende Tonarten stehen beieinander.
+          // Titel ohne Tonart immer ans Ende — sonst stehen beim Umdrehen
+          // tausende leere Zellen oben.
+          if (!a.key !== !b.key) return a.key ? -1 : 1
+          av = keySortValue(a.key)
+          bv = keySortValue(b.key)
         } else {
           const key = sortCol === 'duration' ? 'duration_sec'
                     : sortCol === 'bitrate'  ? 'bitrate_kbps'
@@ -595,11 +603,13 @@
     })
 
     if (q) {
+      const qKey = q.replace('#', '♯')
       list = list.filter(t => {
         const { artist, title } = getTrackArtistTitle(t)
         return title.toLowerCase().includes(q) ||
                artist.toLowerCase().includes(q) ||
-               (t.folder ?? '').toLowerCase().includes(q)
+               (t.folder ?? '').toLowerCase().includes(q) ||
+               (t.key ?? '').toLowerCase() === qKey
       })
     }
 
@@ -710,7 +720,7 @@
 
   function setSort(key) {
     if (sortCol === key) sortAsc = !sortAsc
-    else { sortCol = key; sortAsc = key === 'title' }
+    else { sortCol = key; sortAsc = key === 'title' || key === 'key' }   // Tonart beginnt bei 1A
   }
 
   // ── Column system (widths, visibility, order — all persisted) ───────────
@@ -725,12 +735,13 @@
     { key: 'duration',     label: 'Dauer'            },
     { key: 'lufs',         label: 'LUFS'             },
     { key: 'bpm',          label: 'BPM'              },
+    { key: 'key',          label: 'Tonart'           },
     { key: 'bitrate',      label: 'kbps'             },
     { key: 'comment',      label: 'Kanal'            },
     { key: 'mtime',        label: 'Geändert'         },
   ]
-  const COL_DEFAULTS  = { title: 180, artist: 120, album: 130, genre: 90, album_artist: 110, folder: 100, ext: 40, duration: 46, lufs: 42, bpm: 38, bitrate: 40, comment: 110, mtime: 76 }
-  const COL_VIS_DEF   = { title: true, artist: true, album: false, genre: false, album_artist: false, folder: false, ext: false, duration: true, lufs: true, bpm: true, bitrate: true, comment: false, mtime: false }
+  const COL_DEFAULTS  = { title: 180, artist: 120, album: 130, genre: 90, album_artist: 110, folder: 100, ext: 40, duration: 46, lufs: 42, bpm: 38, key: 44, bitrate: 40, comment: 110, mtime: 76 }
+  const COL_VIS_DEF   = { title: true, artist: true, album: false, genre: false, album_artist: false, folder: false, ext: false, duration: true, lufs: true, bpm: true, key: true, bitrate: true, comment: false, mtime: false }
   const COL_ORDER_DEF = ALL_COL_DEFS.map(c => c.key)
 
   function _loadColState() {
@@ -740,9 +751,15 @@
   let colWidths  = $state({ ...COL_DEFAULTS,  ...(_cs.widths  || {}) })
   let colVisible = $state({ ...COL_VIS_DEF,   ...(_cs.visible || {}) })
   // Gespeicherte Reihenfolge laden, fehlende neue Spalten am Ende anhängen
-  const _savedOrder = Array.isArray(_cs.order) ? _cs.order : [...COL_ORDER_DEF]
-  const _missingCols = COL_ORDER_DEF.filter(k => !_savedOrder.includes(k))
-  let colOrder   = $state([..._savedOrder, ..._missingCols])
+  // Neue Spalten landen hinter ihrem Vorgaenger aus der Standardreihenfolge
+  // statt ganz am Ende — "Tonart" soll neben "BPM" auftauchen.
+  const _savedOrder = Array.isArray(_cs.order) ? [..._cs.order] : [...COL_ORDER_DEF]
+  for (const [i, k] of COL_ORDER_DEF.entries()) {
+    if (_savedOrder.includes(k)) continue
+    const prev = COL_ORDER_DEF.slice(0, i).reverse().find(p => _savedOrder.includes(p))
+    _savedOrder.splice(prev ? _savedOrder.indexOf(prev) + 1 : 0, 0, k)
+  }
+  let colOrder   = $state(_savedOrder)
   const cols     = $derived(colOrder.map(k => ALL_COL_DEFS.find(c => c.key === k)).filter(c => c && colVisible[c.key]))
 
   function saveColState() {
@@ -1739,6 +1756,10 @@
                     </span>
                   {:else if col.key === 'bpm'}
                     <span class="cell num" style="width:{colWidths.bpm}px">{track.bpm || ''}</span>
+                  {:else if col.key === 'key'}
+                    <span class="cell num key-cell {track.key_src === 'analyse' ? 'key-est' : ''}"
+                          style="width:{colWidths.key}px"
+                          title={keyTitle(track.key, track.key_src)}>{track.key || ''}</span>
                   {:else if col.key === 'bitrate'}
                     <span class="cell num" style="width:{colWidths.bitrate}px">{track.bitrate_kbps || ''}</span>
                   {:else if col.key === 'comment'}
@@ -2730,4 +2751,7 @@
   .id-cancel:hover { border-color: var(--c-tx4); color: var(--c-tx2); }
   .id-apply   { background: var(--c-accent); border: none; border-radius: 3px; color: #fff; font-size: 11px; padding: 5px 14px; cursor: pointer; }
   .id-apply:hover { background: var(--c-accent2); }
+  .key-cell { color: var(--c-tx3); }
+  /* Selbst geschaetzt statt aus Mixed In Key / rekordbox: sichtbar zurueckhaltender */
+  .key-est  { color: var(--c-tx6); font-style: italic; }
 </style>

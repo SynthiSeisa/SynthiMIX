@@ -6,3 +6,4 @@ h11==0.14.0
 anyio==4.6.2
 mutagen==1.47.0
 Pillow==11.0.0
+numpy==2.3.2

@@ -3,6 +3,7 @@
 # Voraussetzungen: Python 3.11+, Node.js 20+, pip install pyinstaller
 
 param(
+    [switch]$SkipTests,     # -SkipTests   → Backend-Tests überspringen
     [switch]$SkipBackend,   # -SkipBackend → PyInstaller-Schritt überspringen
     [switch]$SkipFrontend   # -SkipFrontend → Vite-Build überspringen
 )
@@ -14,6 +15,21 @@ $root = $PSScriptRoot
 function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Ok($msg)   { Write-Host "    OK: $msg" -ForegroundColor Green }
 function Fail($msg) { Write-Host "    FEHLER: $msg" -ForegroundColor Red; exit 1 }
+
+# ── 0. Backend-Tests ─────────────────────────────────────────────────────────
+# Mehrere Fehler steckten wochenlang unbemerkt drin (Künstler beim Laden
+# verworfen, Fehlschläge als fertig gemeldet …). Ein roter Test stoppt den Build,
+# bevor so etwas in einen Installer gelangt.
+if (-not $SkipTests) {
+    Step "Backend-Tests..."
+    Push-Location "$rootackend"
+    $env:PYTHONIOENCODING = 'utf-8'
+    python -m unittest discover -s tests -t .
+    $testExit = $LASTEXITCODE
+    Pop-Location
+    if ($testExit -ne 0) { Fail "Tests fehlgeschlagen — Build abgebrochen (-SkipTests zum Überspringen)" }
+    Ok "alle Tests grün"
+}
 
 # ── 1. Python-Backend mit PyInstaller bündeln ────────────────────────────────
 if (-not $SkipBackend) {

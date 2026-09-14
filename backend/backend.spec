@@ -35,7 +35,8 @@ a = Analysis(
     ],
     hookspath=[],
     runtime_hooks=[],
-    excludes=['tkinter', 'matplotlib', 'numpy', 'scipy', 'pandas'],
+    # numpy wird fuer die Tonart-Erkennung gebraucht (_detect_key_sync)
+    excludes=['tkinter', 'matplotlib', 'scipy', 'pandas'],
     noarchive=False,
 )
 
