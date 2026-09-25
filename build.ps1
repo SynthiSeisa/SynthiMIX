@@ -22,7 +22,7 @@ function Fail($msg) { Write-Host "    FEHLER: $msg" -ForegroundColor Red; exit 1
 # bevor so etwas in einen Installer gelangt.
 if (-not $SkipTests) {
     Step "Backend-Tests..."
-    Push-Location "$rootackend"
+    Push-Location "$root\backend"
     $env:PYTHONIOENCODING = 'utf-8'
     python -m unittest discover -s tests -t .
     $testExit = $LASTEXITCODE
