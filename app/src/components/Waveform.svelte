@@ -28,7 +28,7 @@
     ctx.beginPath(); ctx.moveTo(b - 0.5, 0); ctx.lineTo(b - 0.5, h); ctx.stroke()
     if (label && (b - a) > 26 && h >= 16) {
       ctx.fillStyle = theme.label
-      ctx.font = `bold ${Math.max(7, Math.floor(h * 0.28))}px monospace`
+      ctx.font = `700 ${Math.max(10, Math.min(12, Math.floor(h * 0.3)))}px 'Segoe UI', system-ui, sans-serif`
       ctx.textBaseline = 'middle'
       ctx.fillText(label, a + 4, h / 2)
     }

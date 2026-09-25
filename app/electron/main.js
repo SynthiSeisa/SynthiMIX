@@ -7,6 +7,23 @@ const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 
 let mainWindow = null
 let pythonProcess = null
+let quitting = false          // beim Beenden das Backend nicht neu starten
+let backendRestarts = []      // Zeitpunkte der letzten Neustarts
+
+// Nur eine SynthiMIX-Instanz. Ein zweiter Start haengte sich sonst an das
+// Backend der ersten — zwei Fenster spielten dieselbe Warteschlange ab und
+// schickten beide beim Crossfade "naechster Titel".
+const gotLock = app.requestSingleInstanceLock()
+if (!gotLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow) return
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+  })
+}
 
 function startPythonBackend() {
   let cmd, args, cwd
@@ -25,7 +42,23 @@ function startPythonBackend() {
   pythonProcess = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
   pythonProcess.stdout.on('data', d => console.log('[python]', d.toString().trim()))
   pythonProcess.stderr.on('data', d => console.error('[python]', d.toString().trim()))
-  pythonProcess.on('exit', code => console.log('[python] exited', code))
+  pythonProcess.on('exit', code => {
+    console.log('[python] exited', code)
+    pythonProcess = null
+    if (quitting) return
+    // Stirbt das Backend mitten im Auflegen, lief die Musik zwar weiter, aber
+    // ohne Warteschlange, Downloads und Crossfade-Steuerung. Neu starten —
+    // das Frontend verbindet sich von selbst wieder. Hoechstens 5x pro Minute,
+    // damit ein dauerhaft kaputtes Backend nicht in einer Schleife haengt.
+    const now = Date.now()
+    backendRestarts = backendRestarts.filter(t => now - t < 60000)
+    if (backendRestarts.length >= 5) {
+      console.error('[python] startet immer wieder neu, gebe auf')
+      return
+    }
+    backendRestarts.push(now)
+    setTimeout(() => { if (!quitting) startPythonBackend() }, 1000)
+  })
 }
 
 function createSplash() {
@@ -122,6 +155,7 @@ function setupAutoUpdater() {
 }
 
 app.whenReady().then(() => {
+  if (!gotLock) return
   if (!process.env.YTDL_DEV) startPythonBackend()
   setTimeout(() => {
     createWindow()
@@ -138,9 +172,11 @@ app.whenReady().then(() => {
   })
 })
 
+app.on('before-quit', () => { quitting = true })
 app.on('will-quit', () => globalShortcut.unregisterAll())
 
 app.on('window-all-closed', () => {
+  quitting = true
   if (pythonProcess) { try { pythonProcess.kill() } catch (e) {} }
   if (process.platform !== 'darwin') app.quit()
 })

@@ -118,3 +118,34 @@ class RefreshTagsTest(BackendTest):
         main._state["library"] = [{"path": str(weg), "title": "x", "meta_rev": 0, "mtime": 1}]
         self.run_async(main._refresh_tag_meta_task())
         self.assertEqual(main._state["library"][0]["meta_rev"], 0)
+
+
+class NormalizeTest(BackendTest):
+    """Normalisieren darf die Datei nicht schlechter machen als vorher."""
+
+    def test_bitrate_cover_und_tags_bleiben(self):
+        self.require_ffmpeg()
+        import subprocess
+        src = self.make_audio(self.tmp / "roh.mp3", seconds=6, tones=[(440, 0.1), (660, 0.05)],
+                              tags={"key": "8A", "title": "Test"})
+        cover = self.tmp / "cover.jpg"
+        ziel = self.tmp / "song.mp3"
+        subprocess.run([main.FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=64x64",
+                        "-frames:v", "1", str(cover)], check=True, creationflags=main._NO_WINDOW)
+        # 320 kbps mit eingebettetem Cover — so sehen gekaufte Titel aus
+        subprocess.run([main.FFMPEG, "-y", "-v", "error", "-i", str(src), "-i", str(cover),
+                        "-map", "0:a", "-map", "1", "-c:a", "libmp3lame", "-b:a", "320k",
+                        "-c:v", "copy", "-disposition:v", "attached_pic", "-map_metadata", "0",
+                        "-id3v2_version", "3", str(ziel)], check=True, creationflags=main._NO_WINDOW)
+
+        self.assertTrue(main._normalize_one_sync(str(ziel), -10.0, -1.5))
+
+        kbps, _ = main._audio_stream_info(str(ziel))
+        self.assertGreaterEqual(kbps, 300)          # frueher: 128
+        probe = subprocess.run([main.FFPROBE, "-v", "quiet", "-print_format", "json",
+                                "-show_streams", "-show_format", str(ziel)],
+                               capture_output=True, text=True, creationflags=main._NO_WINDOW)
+        daten = __import__("json").loads(probe.stdout)
+        self.assertIn("video", [s["codec_type"] for s in daten["streams"]])   # Cover
+        self.assertEqual(daten["format"]["tags"].get("TKEY"), "8A")
+        self.assertAlmostEqual(main._compute_lufs_sync(str(ziel)), -10.0, delta=1.0)

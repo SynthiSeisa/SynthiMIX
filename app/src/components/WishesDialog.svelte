@@ -31,20 +31,20 @@
 
 <svelte:window onkeydown={onkey} />
 
-<div class="overlay" onclick={onclose} role="presentation">
-  <div class="panel" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+<div class="dlg-overlay" onclick={onclose} role="presentation">
+  <div class="dlg panel" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Musikwünsche">
 
     <div class="hdr">
-      <span class="title">MUSIKWÜNSCHE</span>
+      <span class="dlg-title">Musikwünsche</span>
       <span class="cnt">{sorted.length}</span>
-      <button class="close-btn" onclick={onclose} title="Schließen">✕</button>
+      <button class="btn btn-icon btn-sm close-btn" onclick={onclose} title="Schließen" aria-label="Schließen"><i class="ti ti-x"></i></button>
     </div>
 
     <div class="body">
       {#if !sorted.length}
         <div class="empty">
           Noch keine Wünsche.<br>
-          Gäste erreichen die Seite über den QR-Code in den Einstellungen unter Remote.
+          Gäste erreichen die Seite über den QR-Code unter Einstellungen → Remote.
         </div>
       {:else}
         {#each sorted as w (w.id)}
@@ -52,10 +52,13 @@
             <div class="w-info">
               <div class="w-title" title={w.title}>
                 {w.title}
-                {#if (w.count ?? 1) > 1}<span class="w-cnt">{w.count}×</span>{/if}
+                {#if (w.count ?? 1) > 1}<span class="w-cnt">{w.count}× gewünscht</span>{/if}
               </div>
               <div class="w-meta">
-                <span class="w-state s-{w.status}">{LABEL[w.status] ?? w.status}</span>
+                <span class="w-state s-{w.status}">
+                  <i class="ti {w.status === 'bereit' ? 'ti-check' : w.status === 'fehler' ? 'ti-alert-triangle' : 'ti-download'}"></i>
+                  {LABEL[w.status] ?? w.status}
+                </span>
                 {#if w.error}<span class="w-err" title={w.error}>{w.error}</span>{/if}
                 <span class="w-time">{uhr(w.created_at)}</span>
               </div>
@@ -63,13 +66,14 @@
 
             <div class="w-btns">
               {#if w.status === 'bereit'}
-                <button class="w-b next" onclick={() => send({ type: 'wish_accept', id: w.id, as_next: true })}
-                        title="Direkt als nächsten Titel einreihen">▶ Nächster</button>
-                <button class="w-b ok" onclick={() => send({ type: 'wish_accept', id: w.id })}
-                        title="Ans Ende der Warteschlange">+ Queue</button>
+                <button class="btn btn-sm btn-primary" onclick={() => send({ type: 'wish_accept', id: w.id, as_next: true })}
+                        title="Direkt als nächsten Titel einreihen"><i class="ti ti-player-track-next"></i> Nächster</button>
+                <button class="btn btn-sm" onclick={() => send({ type: 'wish_accept', id: w.id })}
+                        title="Ans Ende der Warteschlange"><i class="ti ti-playlist-add"></i> Queue</button>
               {/if}
-              <button class="w-b no" onclick={() => send({ type: 'wish_reject', id: w.id })}
-                      title="Ablehnen — die heruntergeladene Datei wird gelöscht">✕</button>
+              <button class="btn btn-icon btn-sm btn-danger" onclick={() => send({ type: 'wish_reject', id: w.id })}
+                      title="Ablehnen — nur eine eigens dafür geladene Datei wandert in den Papierkorb"
+                      aria-label="Wunsch ablehnen"><i class="ti ti-x"></i></button>
             </div>
           </div>
         {/each}
@@ -80,65 +84,26 @@
 </div>
 
 <style>
-  .overlay {
-    position: fixed; inset: 0; z-index: 2000;
-    background: rgba(0,0,0,.75); backdrop-filter: blur(3px);
-    display: flex; align-items: center; justify-content: center;
+  .panel { width: 600px; max-height: 78vh; padding: 0; gap: 0; }
+  .hdr { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-5); border-bottom: 1px solid var(--c-br1); flex-shrink: 0; }
+  .cnt {
+    font-size: var(--fs-cap); font-weight: 700; color: var(--c-on-accent); background: var(--c-accent);
+    border-radius: 10px; padding: 1px 7px; font-variant-numeric: tabular-nums;
   }
-  .panel {
-    background: var(--c-bg3); border: 1px solid var(--c-br2); border-radius: 6px;
-    width: 560px; max-height: 78vh; display: flex; flex-direction: column;
-    box-shadow: 0 20px 60px rgba(0,0,0,.9);
-  }
-
-  .hdr {
-    display: flex; align-items: center; gap: 8px;
-    padding: 11px 16px; border-bottom: 1px solid var(--c-br1); flex-shrink: 0;
-  }
-  .title { font-size: 10px; font-weight: 700; letter-spacing: 1.8px; color: var(--c-tx6); }
-  .cnt   { font-size: 10px; color: var(--c-accent); }
-  .close-btn {
-    margin-left: auto; background: none; border: none; color: var(--c-tx7);
-    font-size: 12px; cursor: pointer; padding: 4px 8px; border-radius: 3px;
-  }
-  .close-btn:hover { color: var(--c-red); }
-
+  .close-btn { margin-left: auto; }
   .body { flex: 1; overflow-y: auto; }
-  .empty {
-    padding: 34px 24px; text-align: center;
-    font-size: 12px; color: var(--c-tx6); line-height: 1.7;
-  }
+  .empty { padding: 40px var(--sp-5); text-align: center; font-size: var(--fs-body); color: var(--c-tx3); line-height: 1.6; }
 
-  .w-row {
-    display: flex; align-items: center; gap: 10px;
-    padding: 9px 16px; border-bottom: 1px solid var(--c-br1);
-  }
-  .w-info  { flex: 1; min-width: 0; }
-  .w-title {
-    font-size: 12px; color: var(--c-tx2);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  .w-cnt   { color: var(--c-accent); font-size: 11px; margin-left: 6px; }
-  .w-meta  { display: flex; align-items: center; gap: 8px; margin-top: 3px; }
-  .w-state { font-size: 10px; }
-  .s-bereit     { color: var(--c-green-tx); }
-  .s-laedt,
-  .s-analysiert { color: var(--c-tx5); }
-  .s-neu        { color: var(--c-tx6); }
-  .s-fehler     { color: var(--c-red-tx); }
-  .w-err {
-    font-size: 10px; color: var(--c-red-tx);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px;
-  }
-  .w-time { font-size: 10px; color: var(--c-tx7); margin-left: auto; }
-
-  .w-btns { display: flex; gap: 6px; flex-shrink: 0; }
-  .w-b {
-    background: none; border: 1px solid var(--c-br2); border-radius: 3px;
-    color: var(--c-tx5); font-size: 10px; padding: 4px 9px; cursor: pointer;
-    font-family: inherit; white-space: nowrap;
-  }
-  .w-b.ok:hover   { color: var(--c-green-tx); border-color: var(--c-green-br); }
-  .w-b.next:hover { color: var(--c-accent);   border-color: var(--c-accent); }
-  .w-b.no:hover   { color: var(--c-red-tx);   border-color: var(--c-red-br); }
+  .w-row { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-5); border-bottom: 1px solid var(--c-br1); }
+  .w-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .w-title { font-size: var(--fs-lg); font-weight: 600; color: var(--c-tx1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .w-cnt { margin-left: var(--sp-2); font-size: var(--fs-sm); font-weight: 600; color: var(--c-accent-tx); }
+  .w-meta { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-sm); }
+  .w-state { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; }
+  .s-bereit { color: var(--c-green-tx); }
+  .s-laedt, .s-analysiert, .s-neu { color: var(--c-tx3); }
+  .s-fehler { color: var(--c-red-tx); }
+  .w-err { color: var(--c-red-tx); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+  .w-time { margin-left: auto; color: var(--c-tx4); font-variant-numeric: tabular-nums; }
+  .w-btns { display: flex; gap: var(--sp-1); flex-shrink: 0; }
 </style>

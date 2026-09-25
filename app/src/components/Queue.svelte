@@ -1,12 +1,28 @@
 <script>
   import { get } from 'svelte/store'
-  import { keyCompat, keyTitle } from '../lib/keys.js'
+  import { keyCompat } from '../lib/keys.js'
+  import KeyChip from './KeyChip.svelte'
   import { queue, playerState, library, playlists, playMode, send, automixStatus, introSkipPaths, settings, appSettings, skipNextCrossfade, autoRemovePlayed, livePositionMs, selectionOwner, radioEnabled, radioStatus, lastfmApiKey } from '../stores/ws.js'
 
   // Tonart kommt aus der Bibliothek: Queue-Eintraege entstehen an vielen Stellen
   // und tragen sie nicht selbst mit.
   const keyByPath = $derived(new Map($library.filter(t => t.key).map(t => [t.path, t])))
   function keyOf(track) { return keyByPath.get(track?.path) ?? null }
+  // BPM ebenso: die Bibliothek misst nach, der Queue-Eintrag behaelt den alten Stand
+  const bpmByPath = $derived(new Map($library.filter(t => t.bpm).map(t => [t.path, t.bpm])))
+  function bpmOf(track) { return bpmByPath.get(track?.path) ?? track?.bpm ?? null }
+
+  // Spalten, umschaltbar im •••-Menue (Titel und Dauer immer)
+  const QCOLS = [
+    ['qShowEta',   'Startzeit'],
+    ['qShowKey',   'Tonart'],
+    ['qShowBpm',   'BPM'],
+    ['qShowPlays', 'Wiedergaben (×N)'],
+  ]
+  const showKey   = $derived($appSettings.qShowKey ?? false)
+  const showBpm   = $derived($appSettings.qShowBpm ?? false)
+  const showEta   = $derived($appSettings.qShowEta ?? true)
+  const showPlays = $derived($appSettings.qShowPlays ?? false)
 
   // ── Shuffle / Repeat ────────────────────────────────────────────────────────
   const shuffle = $derived($playMode.shuffle)
@@ -45,7 +61,7 @@
 
   function shuffleQueue()         { send({ type: 'queue_shuffle' }) }
   function shuffleUnplayed()      { send({ type: 'queue_shuffle_unplayed' }); showMenu = false }
-  function shuffleSelected()      { send({ type: 'queue_shuffle_selected', indices: [...qSelected] }); showMenu = false }
+  function shuffleSelected()      { send({ type: 'queue_shuffle_selected', indices: [...qSelected] }); showMenu = false; qSelected = new Set() }
   function markAllUnplayed()      { send({ type: 'queue_mark_unplayed' }); showMenu = false }
   function removePlayed()         { send({ type: 'queue_remove_played' }); showMenu = false }
   function removeQueueDuplicates(){ send({ type: 'queue_remove_duplicates' }); showMenu = false }
@@ -87,7 +103,16 @@
   let showMenu  = $state(false)
   let showPlaylists = $state(false)
 
-  function toggleMenu() { showMenu = !showMenu; showPlaylists = false }
+  // Fest positioniert: die Warteschlange schneidet ein absolut gesetztes Menue ab
+  let menuBtn = $state(null)
+  let menuPos = $state('')
+  function toggleMenu() {
+    if (!showMenu && menuBtn) {
+      const r = menuBtn.getBoundingClientRect()
+      menuPos = `right:${window.innerWidth - r.right}px;top:${r.bottom + 4}px;max-height:${window.innerHeight - r.bottom - 16}px`
+    }
+    showMenu = !showMenu; showPlaylists = false
+  }
 
   // ── Drag: library → queue ──────────────────────────────────────────────────
   function onContainerDragOver(e) {
@@ -339,18 +364,31 @@
     return result
   })
 
-  const remainingStr = $derived.by(() => {
+  const remainingSecs = $derived.by(() => {
     const idx = $playerState.current_idx
-    if (idx < 0 || $queue.length === 0) return ''
+    if (idx < 0 || $queue.length === 0) return null
     const last  = $queue.length - 1
     const secs  = etaSecs[last]
-    if (secs === null) return ''
-    const grand = secs + ($queue[last]?.duration_sec ?? 0)
+    if (secs === null) return null
+    return secs + ($queue[last]?.duration_sec ?? 0)
+  })
+  const remainingStr = $derived.by(() => {
+    const grand = remainingSecs
+    if (grand === null) return ''
     const h = Math.floor(grand / 3600)
     const m = Math.floor((grand % 3600) / 60)
     const s = Math.floor(grand % 60)
-    return h > 0 ? `−${h}h ${m}m` : m > 0 ? `−${m}m ${String(s).padStart(2,'0')}s` : `−${s}s`
+    return h > 0 ? `−${h} h ${m} min` : m > 0 ? `−${m} min ${String(s).padStart(2,'0')} s` : `−${s} s`
   })
+  // Uhrzeit, zu der die Warteschlange durchgelaufen ist
+  const endClock = $derived.by(() => {
+    if (remainingSecs === null) return ''
+    const d = new Date(Date.now() + remainingSecs * 1000)
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  })
+  // Der naechste Titel (bei Zufallswiedergabe entscheidet der Player, dann ohne Markierung)
+  const nextIdx = $derived(!shuffle && $playerState.current_idx >= 0 && $playerState.current_idx + 1 < $queue.length
+                           ? $playerState.current_idx + 1 : -1)
 
   function trackEta(i) {
     const secs = etaSecs[i]
@@ -388,7 +426,11 @@
   onclick={(e) => {
     if (!e.target.closest('.queue-header')) { showMenu = false; showPlaylists = false }
     if (!e.target.closest('.q-ctx')) closeRowCtx()
-    if (!e.target.closest('.queue-list')) qSelected = new Set()
+    // Markierung nur bei Klicks ausserhalb der Warteschlange verwerfen. Vorher
+    // reichte schon der Klick aufs •••-Menue — "Nur markierte mischen" und
+    // "Nur markierte speichern" waren dadurch nie erreichbar.
+    if (!e.target.closest('.queue-outer') && !e.target.closest('.meta-overlay') &&
+        !e.target.closest('.q-ctx')) qSelected = new Set()
   }}
   onkeydown={qKeydown}
 />
@@ -403,32 +445,23 @@
 
   <!-- Header -->
   <div class="queue-header">
-    <span class="queue-title">WARTESCHLANGE</span>
+    <span class="eyebrow">Warteschlange</span>
     <span class="queue-count">{$queue.length}</span>
-    {#if remainingStr}
-      <span class="queue-dur" title="Restzeit ab jetzt">{remainingStr}</span>
-    {:else if totalDurStr}
-      <span class="queue-dur">{totalDurStr}</span>
-    {/if}
-    {#if $automixStatus}
-      <span class="am-status">{$automixStatus}</span>
-    {/if}
-    <button class="radio-btn {$radioEnabled ? 'on' : ''}"
+    <button class="btn btn-sm" class:is-active={$radioEnabled}
             title={$lastfmApiKey ? ($radioEnabled ? 'Radio-Modus deaktivieren' : 'Radio-Modus: Queue automatisch mit ähnlichen Tracks füllen') : 'Last.fm API-Key in Einstellungen → Dienste eintragen'}
             onclick={() => send({ type: 'set_radio', enabled: !$radioEnabled })}>
-      ⊹ Radio
+      <i class="ti ti-radio"></i> Radio
     </button>
-    {#if $radioStatus}
-      <span class="radio-added" title="Ähnlich zu: {$radioStatus.similar_to}">+ {$radioStatus.title}</span>
-    {/if}
 
     <div class="header-actions">
-      <button class="hdr-btn {shuffle ? 'active' : ''}" onclick={toggleShuffle} title="Zufallswiedergabe">⇄</button>
-      <button class="hdr-btn {repeat > 0 ? 'active' : ''}" onclick={cycleRepeat} title="Wiederholen">{repeatLabel}</button>
+      <button class="btn btn-icon btn-sm" class:is-active={shuffle} onclick={toggleShuffle}
+              title={shuffle ? 'Zufallswiedergabe an' : 'Zufallswiedergabe aus'} aria-label="Zufallswiedergabe" aria-pressed={shuffle}><i class="ti ti-arrows-shuffle"></i></button>
+      <button class="btn btn-icon btn-sm" class:is-active={repeat > 0} onclick={cycleRepeat}
+              title={repeat === 1 ? 'Titel wiederholen' : repeat === 2 ? 'Warteschlange wiederholen' : 'Wiederholen aus'} aria-label="Wiederholen"><i class="ti {repeat === 1 ? 'ti-repeat-once' : 'ti-repeat'}"></i></button>
       <div class="menu-wrap">
-        <button class="hdr-btn menu-btn" onclick={toggleMenu} title="Menü">•••</button>
+        <button class="btn btn-icon btn-sm" class:is-active={showMenu} bind:this={menuBtn} onclick={toggleMenu} title="Menü" aria-label="Menü"><i class="ti ti-dots"></i></button>
         {#if showMenu}
-          <div class="dropdown">
+          <div class="ctx-menu dropdown" style={menuPos}>
             <button onclick={savePlaylist}>Als Playlist speichern</button>
             <button onclick={() => { showPlaylists = !showPlaylists }}>
               In Playlist öffnen{showPlaylists ? ' ▲' : ' ▶'}
@@ -440,7 +473,7 @@
                 {#each $playlists as pl}
                   <div class="dd-pl-row">
                     <button class="dd-pl-name" onclick={() => loadPlaylist(pl.path)}>{pl.name}</button>
-                    <button class="dd-pl-del" onclick={() => deletePlaylist(pl.path)} title="Löschen">✕</button>
+                    <button class="dd-pl-del ctx-danger" onclick={() => deletePlaylist(pl.path)} title="Playlist löschen" aria-label="Playlist löschen"><i class="ti ti-trash"></i></button>
                   </div>
                 {/each}
               {/if}
@@ -451,26 +484,53 @@
               <button onclick={shuffleSelected}>Nur markierte mischen ({qSelected.size})</button>
             {/if}
             {#if $playerState.current_idx >= 0}
-              <button onclick={() => { scrollToCurrent(); showMenu = false }}>⦿ Zum aktuellen Track</button>
+              <button onclick={() => { scrollToCurrent(); showMenu = false }}>Zum laufenden Titel springen</button>
             {/if}
-            <div class="dd-sep"></div>
+            <div class="ctx-sep"></div>
             <button onclick={markAllUnplayed}>Alle als ungespielt markieren</button>
             <button onclick={removePlayed}>Gespielte entfernen</button>
             <button onclick={removeQueueDuplicates}>Duplikate entfernen</button>
             <button onclick={toggleAutoRemove} class:dd-active={$autoRemovePlayed}>
-              {$autoRemovePlayed ? '✓ ' : ''}Gespielte auto. entfernen
+              <i class="ti {$autoRemovePlayed ? 'ti-check' : 'ti-minus'} dd-check"></i> Gespielte automatisch entfernen
             </button>
-            <div class="dd-sep"></div>
-            <button onclick={clearQueue} class="dd-danger">Queue leeren</button>
+            <div class="ctx-sep"></div>
+            <!-- Spalten: Menue bleibt offen, damit man mehrere umschalten kann -->
+            <span class="dd-head">Anzeigen</span>
+            {#each QCOLS as [k, label]}
+              <button role="menuitemcheckbox" aria-checked={!!$appSettings[k]} class:dd-active={$appSettings[k]}
+                      onclick={() => appSettings.update(s => ({ ...s, [k]: !s[k] }))}>
+                <i class="ti {$appSettings[k] ? 'ti-check' : 'ti-minus'} dd-check"></i> {label}
+              </button>
+            {/each}
+            <div class="ctx-sep"></div>
+            <button onclick={clearQueue} class="ctx-danger">Queue leeren</button>
           </div>
         {/if}
       </div>
     </div>
   </div>
 
+  <!-- Restzeit und Ende: eigene Zeile, damit beides gross lesbar bleibt -->
+  {#if remainingStr || totalDurStr || $automixStatus || $radioStatus}
+    <div class="queue-sub">
+      {#if remainingStr}
+        <span class="queue-dur" title="Restzeit ab jetzt">{remainingStr}</span>
+        <span class="queue-end">Ende ~{endClock}</span>
+      {:else if totalDurStr}
+        <span class="queue-dur">{totalDurStr}</span>
+      {/if}
+      {#if $automixStatus}
+        <span class="am-status">{$automixStatus}</span>
+      {/if}
+      {#if $radioStatus}
+        <span class="radio-added" title="Ähnlich zu: {$radioStatus.similar_to}">+ {$radioStatus.title}</span>
+      {/if}
+    </div>
+  {/if}
+
   <!-- Drop: Einfügelinie oben wenn Cursor über leerem Bereich -->
   {#if isDragOver && dragOver === null}
-    <div class="drop-banner">+ Hier einreihen</div>
+    <div class="drop-banner"><i class="ti ti-plus"></i> Hier einreihen</div>
   {/if}
 
   <!-- Track list -->
@@ -481,8 +541,9 @@
       {#each $queue as track, i}
         {@const active = i === $playerState.current_idx}
         {@const played = track.played && !active}
+        {@const isNext = i === nextIdx}
         <div
-          class="row {active ? 'active' : played ? 'played' : ''} {dragOver === i ? 'drop-before' : ''} {qSelected.has(i) ? 'q-sel' : ''}"
+          class="row {active ? 'active' : played ? 'played' : ''} {isNext ? 'next' : ''} {dragOver === i ? 'drop-before' : ''} {qSelected.has(i) ? 'q-sel' : ''}"
           draggable="true"
           ondragstart={(e) => onRowDragStart(e, i)}
           ondragover={(e) => onRowDragOver(e, i)}
@@ -492,41 +553,46 @@
           ondblclick={() => mixNow(i)}
           oncontextmenu={(e) => openRowCtx(e, i)}>
 
-          <span class="drag-handle" title="Verschieben">⋮⋮</span>
+          <span class="drag-handle" title="Verschieben"><i class="ti ti-grip-vertical"></i></span>
           <!-- Fester Platz für Qualitätspunkt — verhindert Verschiebung wenn kein Punkt -->
           <span class="q-indicator {qualityClass(track)}">
             {#if qualityTitle(track)}
               <span class="q-tip">{qualityTitle(track)}</span>
             {/if}
           </span>
-          <div class="stripe"></div>
-
-          <span class="idx" onclick={() => play(i)}>
-            {#if active}<span class="play-dot">▶</span>{:else}{i + 1}{/if}
+          <span class="idx" onclick={() => play(i)} title="Sofort abspielen">
+            {#if active}<i class="ti ti-player-play-filled"></i>{:else}{i + 1}{/if}
           </span>
 
-          <span class="title" title={track.title}>{track.title}</span>
+          <span class="title" title={active ? `Läuft: ${track.title}` : isNext ? `Als Nächstes: ${track.title}` : track.title}>{track.title}</span>
 
-          {#if track.play_count > 0}
-            <span class="pc">×{track.play_count}</span>
+          {#if showPlays && track.play_count > 0}
+            <span class="pc" title="So oft gespielt">×{track.play_count}</span>
           {/if}
 
-          {#if keyOf(track)}
+          {#if showBpm}
+            {@const bpm = bpmOf(track)}
+            <span class="bpm">{bpm ? Math.round(bpm) : ''}</span>
+          {/if}
+
+          {#if showKey && keyOf(track)}
             {@const k = keyOf(track)}
-            {@const uebergang = i > 0 ? keyCompat(keyOf($queue[i - 1])?.key, k.key) : { level: 'unknown', label: '' }}
-            <span class="key key-{uebergang.level} {k.key_src === 'analyse' ? 'key-est' : ''}"
-                  title={keyTitle(k.key, k.key_src) + (uebergang.label ? ' · Übergang vom vorherigen Titel: ' + uebergang.label : '')}>{k.key}</span>
+            {@const uebergang = i > 0 ? keyCompat(keyOf($queue[i - 1])?.key, k.key) : null}
+            <span class="key"><KeyChip key={k.key} src={k.key_src} compat={uebergang} hint="Übergang vom vorherigen Titel: " /></span>
           {/if}
           <span class="dur">{fmt(track.duration_sec)}</span>
-          {#if played && track.played_at}
-            {@const d = new Date(track.played_at * 1000)}
-            <span class="eta played-at">{d.getHours().toString().padStart(2,'0')}:{d.getMinutes().toString().padStart(2,'0')}</span>
-          {:else if !active}
-            {@const eta = trackEta(i)}
-            {#if eta}<span class="eta">{eta}</span>{/if}
+          <!-- Startzeit-Spalte immer ausgeben (auch leer), damit die Dauer buendig bleibt -->
+          {#if showEta}
+            {#if played && track.played_at}
+              {@const d = new Date(track.played_at * 1000)}
+              <span class="eta played-at">{d.getHours().toString().padStart(2,'0')}:{d.getMinutes().toString().padStart(2,'0')}</span>
+            {:else}
+              <span class="eta">{active ? '' : (trackEta(i) ?? '')}</span>
+            {/if}
           {/if}
 
-          <button class="remove" onclick={(e) => { e.stopPropagation(); remove(i) }}>✕</button>
+          <button class="btn btn-icon btn-sm remove" onclick={(e) => { e.stopPropagation(); remove(i) }}
+                  title="Aus der Warteschlange entfernen" aria-label="Aus der Warteschlange entfernen"><i class="ti ti-x"></i></button>
         </div>
       {/each}
       <!-- drop zone after last item -->
@@ -539,40 +605,40 @@
 </div>
 
 {#if plNameDialog}
-<div class="meta-overlay" onclick={() => plNameDialog = false} role="dialog">
-  <div class="meta-dialog" onclick={(e) => e.stopPropagation()}>
-    <div class="meta-title">Playlist speichern</div>
-    <label class="meta-label">Name
-      <input class="meta-input" bind:value={plNameValue} placeholder="Playlist-Name…"
+<div class="dlg-overlay" onclick={() => plNameDialog = false} role="dialog">
+  <div class="dlg" onclick={(e) => e.stopPropagation()}>
+    <div class="dlg-title">Playlist speichern</div>
+    <label class="dlg-field">Name
+      <input class="field" bind:value={plNameValue} placeholder="Playlist-Name…"
              onkeydown={(e) => { if (e.key === 'Enter') confirmSavePlaylist(); if (e.key === 'Escape') plNameDialog = false }}
              use:focus />
     </label>
     {#if qSelected.size > 0}
-      <label class="meta-check">
+      <label class="dlg-check">
         <input type="checkbox" bind:checked={plSaveOnlySelected} />
         Nur markierte Tracks speichern ({qSelected.size})
       </label>
     {/if}
-    <label class="meta-check">
+    <label class="dlg-check">
       <input type="checkbox" bind:checked={plClearAfterSave} />
       Queue nach dem Speichern leeren
     </label>
-    <div class="meta-actions">
-      <button class="meta-cancel" onclick={() => plNameDialog = false}>Abbrechen</button>
-      <button class="meta-save" onclick={confirmSavePlaylist}>Speichern</button>
+    <div class="dlg-actions">
+      <button class="btn" onclick={() => plNameDialog = false}>Abbrechen</button>
+      <button class="btn btn-primary" onclick={confirmSavePlaylist}>Speichern</button>
     </div>
   </div>
 </div>
 {/if}
 
 {#if dlgClearPending}
-<div class="meta-overlay" onclick={() => dlgClearPending = false} role="dialog">
-  <div class="meta-dialog" onclick={(e) => e.stopPropagation()}>
-    <div class="meta-title">Queue leeren?</div>
-    <div class="meta-hint">Alle {$queue.length} Tracks werden entfernt.</div>
-    <div class="meta-actions">
-      <button class="meta-cancel" onclick={() => dlgClearPending = false}>Abbrechen</button>
-      <button class="meta-save" style="background:#7a1a1a;border-color:#9a2a2a"
+<div class="dlg-overlay" onclick={() => dlgClearPending = false} role="dialog">
+  <div class="dlg" onclick={(e) => e.stopPropagation()}>
+    <div class="dlg-title">Queue leeren?</div>
+    <div class="dlg-hint">Alle {$queue.length} Tracks werden entfernt.</div>
+    <div class="dlg-actions">
+      <button class="btn" onclick={() => dlgClearPending = false}>Abbrechen</button>
+      <button class="btn btn-danger"
               onclick={() => { send({ type: 'queue_clear' }); dlgClearPending = false; showMenu = false }}>Leeren</button>
     </div>
   </div>
@@ -580,401 +646,154 @@
 {/if}
 
 {#if dlgDeletePath}
-<div class="meta-overlay" onclick={() => dlgDeletePath = null} role="dialog">
-  <div class="meta-dialog" onclick={(e) => e.stopPropagation()}>
-    <div class="meta-title">Playlist löschen?</div>
-    <div class="meta-hint">Diese Aktion kann nicht rückgängig gemacht werden.</div>
-    <div class="meta-actions">
-      <button class="meta-cancel" onclick={() => dlgDeletePath = null}>Abbrechen</button>
-      <button class="meta-save" style="background:#7a1a1a;border-color:#9a2a2a"
-              onclick={() => { send({ type: 'delete_playlist', path: dlgDeletePath }); dlgDeletePath = null; showMenu = false }}>Löschen</button>
+<div class="dlg-overlay" onclick={() => dlgDeletePath = null} role="dialog">
+  <div class="dlg" onclick={(e) => e.stopPropagation()}>
+    <div class="dlg-title">Playlist löschen?</div>
+    <div class="dlg-hint">Die Playlist-Datei wandert in den Papierkorb. Die Titel selbst bleiben unberührt.</div>
+    <div class="dlg-actions">
+      <button class="btn" onclick={() => dlgDeletePath = null}>Abbrechen</button>
+      <button class="btn btn-danger"
+              onclick={() => { send({ type: 'delete_playlist', path: dlgDeletePath }); dlgDeletePath = null; showMenu = false }}>In den Papierkorb</button>
     </div>
   </div>
 </div>
 {/if}
 
 {#if qCtxMenu}
-  <div class="q-ctx"
+  <div class="ctx-menu q-ctx"
        style="left:{Math.min(qCtxMenu.x, window.innerWidth - 200)}px;top:{Math.min(qCtxMenu.y, window.innerHeight - 160)}px">
     <button onclick={() => { play(qCtxMenu.idx); closeRowCtx() }}>Abspielen</button>
-    <button class="ctx-mix" onclick={() => { mixNow(qCtxMenu.idx); closeRowCtx() }}>⇌ Mix Now</button>
+    <button class="ctx-mix" onclick={() => { mixNow(qCtxMenu.idx); closeRowCtx() }}>Jetzt mischen</button>
     <button onclick={() => { skipIntroFor($queue[qCtxMenu.idx]?.path); play(qCtxMenu.idx); closeRowCtx() }}>Intro überspringen</button>
-    <div class="q-ctx-sep"></div>
+    <div class="ctx-sep"></div>
     {#if qSelected.size > 1 && qSelected.has(qCtxMenu.idx)}
-      <button class="q-ctx-danger" onclick={() => { removeSelected(); closeRowCtx() }}>{qSelected.size} löschen</button>
+      <button class="ctx-danger" onclick={() => { removeSelected(); closeRowCtx() }}>{qSelected.size} löschen</button>
     {:else}
-      <button class="q-ctx-danger" onclick={() => { remove(qCtxMenu.idx); closeRowCtx() }}>Löschen</button>
+      <button class="ctx-danger" onclick={() => { remove(qCtxMenu.idx); closeRowCtx() }}>Löschen</button>
     {/if}
   </div>
 {/if}
 
 <style>
-  .queue-outer {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    position: relative;
-  }
+  .queue-outer { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
   .queue-outer.drag-over { box-shadow: inset 0 0 0 2px var(--c-accent); }
 
-  /* ── Header ─────────────────────────────────────────────────────────────── */
+  /* ── Kopf: Restzeit und Ende gross, Werkzeuge rechts ─────────────────── */
   .queue-header {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 0 8px;
-    height: 30px;
-    flex-shrink: 0;
-    border-bottom: 1px solid var(--c-br1);
-    background: var(--c-bg2);
+    display: flex; align-items: center; gap: var(--sp-2);
+    height: 40px; padding: 0 var(--sp-2) 0 var(--sp-3); flex-shrink: 0;
+    background: var(--c-bg2); border-bottom: 1px solid var(--c-br1);
   }
-
-  .queue-title {
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 1.2px;
-    color: var(--c-tx5);
-    text-transform: uppercase;
-  }
-
   .queue-count {
-    font-size: 10px;
-    color: var(--c-tx6);
-    background: var(--c-bg5);
-    border-radius: 8px;
-    padding: 1px 5px;
+    font-size: var(--fs-cap); font-weight: 700; color: var(--c-tx2); font-variant-numeric: tabular-nums;
+    background: var(--c-bg5); border: 1px solid var(--c-br2); border-radius: 10px; padding: 1px 7px;
   }
-  .queue-dur {
-    font-size: 10px;
-    color: var(--c-tx6);
-    font-variant-numeric: tabular-nums;
+  .queue-sub {
+    display: flex; align-items: baseline; gap: var(--sp-3); flex-shrink: 0;
+    padding: 6px var(--sp-3); border-bottom: 1px solid var(--c-br1); background: var(--c-bg2);
   }
+  .queue-dur { font-size: var(--fs-h); font-weight: 700; color: var(--c-tx1); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .queue-end { font-size: var(--fs-body); color: var(--c-tx3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .am-status, .radio-added {
+    font-size: var(--fs-sm); flex-shrink: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .am-status { color: var(--c-accent-tx); }
+  .radio-added { color: var(--c-green-tx); animation: fadeIn .3s ease; }
+  @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
+  .header-actions { display: flex; align-items: center; gap: 2px; margin-left: auto; }
 
-  .header-actions {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    margin-left: auto;
-  }
-
-  .hdr-btn {
-    background: none;
-    border: none;
-    color: var(--c-tx5);
-    font-size: 11px;
-    cursor: pointer;
-    padding: 3px 6px;
-    border-radius: 3px;
-    transition: color .12s, background .12s;
-    line-height: 1;
-  }
-  .hdr-btn:hover  { color: var(--c-tx2); background: var(--c-bg5); }
-  .hdr-btn.active { color: var(--c-accent); }
-  .menu-btn { letter-spacing: 2px; }
-
-  /* ── Dropdown menu ─────────────────────────────────────────────────────── */
+  /* Menue: Aussehen vom Kontextmenue, aber am Knopf verankert */
   .menu-wrap { position: relative; }
+  .dropdown { position: fixed; z-index: 500; min-width: 250px; overflow-y: auto; }
+  .dropdown .dd-active { color: var(--c-accent-tx); }
+  .dd-check { width: 14px; font-size: 14px; }
+  .dd-head { display: block; padding: var(--sp-1) var(--sp-3) 2px; font-size: var(--fs-cap); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--c-tx4); }
+  .dd-empty { display: block; padding: var(--sp-2) var(--sp-3); font-size: var(--fs-sm); color: var(--c-tx5); }
+  .dd-pl-row { display: flex; align-items: center; }
+  .dd-pl-row .dd-pl-name { flex: 1; padding-left: var(--sp-5); }
+  .dd-pl-row .dd-pl-del { width: var(--btn-h); justify-content: center; padding: 0; }
 
-  .dropdown {
-    position: absolute;
-    right: 0;
-    top: 100%;
-    background: var(--c-bg);
-    border: 1px solid var(--c-br2);
-    border-radius: 4px;
-    z-index: 100;
-    min-width: 200px;
-    padding: 4px 0;
-    box-shadow: 0 8px 24px rgba(0,0,0,.6);
-  }
-
-  .dropdown button {
-    display: flex;
-    align-items: center;
-    width: 100%;
-    padding: 6px 14px;
-    background: none;
-    border: none;
-    color: var(--c-tx3);
-    font-size: 12px;
-    text-align: left;
-    cursor: pointer;
-    transition: background .1s, color .1s;
-    gap: 8px;
-  }
-  .dropdown button:hover  { background: var(--c-br1); color: var(--c-tx2); }
-  .dropdown .dd-danger { color: var(--c-red); }
-  .dropdown .dd-danger:hover { color: var(--c-red) !important; background: var(--c-red-bg); }
-
-  .dd-sep { height: 1px; background: var(--c-br1); margin: 3px 0; }
-  .dropdown .dd-active { color: var(--c-accent) !important; }
-  .dropdown .dd-active:hover { color: var(--c-accent2) !important; }
-  .dd-empty { display: block; padding: 6px 14px; font-size: 11px; color: var(--c-tx7); }
-
-  .dd-pl-row {
-    display: flex;
-    align-items: center;
-    gap: 0;
-  }
-  .dd-pl-name {
-    flex: 1;
-    padding: 5px 14px 5px 24px !important;
-    font-size: 11px !important;
-    color: var(--c-tx5) !important;
-  }
-  .dd-pl-del {
-    width: 28px !important;
-    padding: 5px 6px !important;
-    font-size: 10px !important;
-    color: var(--c-tx7) !important;
-    flex-shrink: 0 !important;
-  }
-  .dd-pl-del:hover { color: var(--c-red) !important; }
-
-  /* ── Drop hint ─────────────────────────────────────────────────────────── */
   .drop-banner {
-    position: absolute;
-    bottom: 0; left: 0; right: 0;
-    height: 28px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 10px;
-    letter-spacing: .08em;
-    color: var(--c-accent);
-    background: color-mix(in srgb, var(--c-accent) 8%, transparent);
-    border-top: 1px solid var(--c-accent);
-    z-index: 10;
+    position: absolute; bottom: 0; left: 0; right: 0; z-index: 10; height: 36px;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    font-size: var(--fs-body); font-weight: 600; color: var(--c-accent-tx);
+    background: var(--c-act-bg); border-top: 2px solid var(--c-accent);
     pointer-events: none;
   }
 
-  /* ── Track list ─────────────────────────────────────────────────────────── */
-  .queue-list {
-    flex: 1;
-    overflow-y: auto;
-  }
+  /* ── Liste ───────────────────────────────────────────────────────────── */
+  .queue-list { flex: 1; overflow-y: auto; }
+  .empty { padding: 40px var(--sp-4); text-align: center; color: var(--c-tx4); font-size: var(--fs-body); }
 
-  .empty {
-    padding: 32px 16px;
-    text-align: center;
-    color: var(--c-tx7);
-    font-size: 11px;
-  }
-
-  /* Compact rows — text height only */
   .row {
-    display: flex;
-    align-items: center;
-    height: 24px;
-    border-bottom: 1px solid var(--c-bg2);
-    transition: background 0.07s;
-    cursor: default;
-    position: relative;
+    display: flex; align-items: center; gap: 6px;
+    min-height: var(--q-row-h); padding: 0 var(--sp-1) 0 2px;
+    border-bottom: 1px solid var(--c-br1); position: relative; cursor: default;
+    font-size: var(--q-fs);
   }
-  /* Zebra — nur auf neutrale Zeilen (nicht active/sel) */
-  .row:nth-child(even):not(.active):not(.q-sel) { background: var(--c-bg4); }
-  .row:nth-child(odd):not(.active):not(.q-sel)  { background: var(--c-bg); }
-  .row:hover  { background: var(--c-hover); }
-  .row:hover .remove  { opacity: 1; }
-  .row:hover .drag-handle { opacity: 0.5; }
+  .row:hover { background: var(--c-hover); }
+  .row:hover .remove, .row:hover .drag-handle, .row.q-sel .remove { opacity: 1; }
 
-  .row.active  { background: var(--c-act-bg); }
-  .row.played  { opacity: 0.55; }
-  .row.q-sel   { background: var(--c-sel); }
-  .row.q-sel .stripe { background: var(--c-blue-br); }
+  /* Gespielt: gedaempfte, aber lesbare Schrift statt halber Deckkraft */
+  .row.played .title, .row.played .idx { color: var(--c-tx5); }
 
-  /* Drop indicator: orange line above the row */
-  .row.drop-before  { box-shadow: inset 0 3px 0 0 var(--c-accent); background: color-mix(in srgb, var(--c-accent) 6%, var(--c-bg)) !important; }
-  .row-drop-end     { height: 6px; }
+  /* Laufend: Flaeche, Kante, groesser — aus zwei Metern erkennbar */
+  .row.active {
+    min-height: calc(var(--q-row-h) + 12px);
+    background: var(--c-act-bg); box-shadow: inset 4px 0 0 var(--c-accent);
+  }
+  .row.active .title { color: var(--c-tx1); font-weight: 700; font-size: calc(var(--q-fs) + 2px); }
+  .row.active .idx { color: var(--c-accent-tx); }
+  /* Naechster: gedaempft orange Kante und kraeftigere Schrift */
+  .row.next { box-shadow: inset 4px 0 0 color-mix(in srgb, var(--c-accent) 50%, transparent); }
+  .row.next .title { color: var(--c-tx1); font-weight: 600; }
+
+  .row.q-sel { background: var(--c-sel); box-shadow: inset 4px 0 0 var(--c-blue); }
+  .row.drop-before { box-shadow: inset 0 3px 0 0 var(--c-accent); }
+  .row-drop-end { height: 8px; }
   .row-drop-end.drop-before { box-shadow: inset 0 3px 0 0 var(--c-accent); }
 
-  /* Colored left stripe */
-  .stripe {
-    width: 3px;
-    height: 100%;
-    background: var(--c-br2);
-    flex-shrink: 0;
-    transition: background 0.12s;
-  }
-  .row.active .stripe { background: var(--c-accent); }
-  .row.played .stripe { background: var(--c-red-bg); }
-  .row:hover  .stripe { background: var(--c-br2); }
-
   .drag-handle {
-    width: 16px;
-    font-size: 9px;
-    color: var(--c-tx7);
-    cursor: grab;
-    flex-shrink: 0;
-    text-align: center;
-    opacity: 0;
-    transition: opacity 0.1s;
-    user-select: none;
+    width: 16px; flex-shrink: 0; text-align: center; font-size: 14px; color: var(--c-tx5);
+    cursor: grab; opacity: 0; transition: opacity .1s;
   }
   .drag-handle:active { cursor: grabbing; }
 
   .idx {
-    width: 28px;
-    font-size: 10px;
-    color: var(--c-tx5);
-    text-align: center;
-    flex-shrink: 0;
-    cursor: pointer;
-    transition: color 0.1s;
+    width: 26px; flex-shrink: 0; text-align: right; cursor: pointer;
+    font-size: var(--fs-cap); color: var(--c-tx4); font-variant-numeric: tabular-nums;
   }
-  .row.active .idx { color: var(--c-accent); }
-  .idx:hover { color: var(--c-tx4); }
-  .play-dot  { font-size: 8px; }
+  .idx:hover { color: var(--c-accent-tx); }
 
   .title {
-    flex: 1;
-    font-size: 12px;
-    color: var(--c-tx3);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    padding: 0 4px;
-  }
-  .row.active .title { color: var(--c-act-tx); font-weight: 600; }
-  .row.played .title { color: var(--c-tx5); }
-
-  .pc {
-    font-size: 9px;
-    color: var(--c-accent);
-    flex-shrink: 0;
-    padding: 0 4px;
-    opacity: 0.7;
+    flex: 1; min-width: 0; padding: 0 var(--sp-1);
+    color: var(--c-tx2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
 
-  .eta {
-    font-size: 9px;
-    color: var(--c-tx7);
-    font-variant-numeric: tabular-nums;
-    flex-shrink: 0;
-    white-space: nowrap;
-    padding-right: 4px;
-  }
-  .played-at { color: var(--c-green); }
+  .pc { flex-shrink: 0; font-size: var(--fs-cap); font-weight: 600; color: var(--c-accent-tx); font-variant-numeric: tabular-nums; }
+  .key { flex-shrink: 0; font-size: var(--fs-sm); }
+  .bpm { flex-shrink: 0; min-width: 28px; text-align: right; font-size: var(--fs-sm); color: var(--c-tx3); font-variant-numeric: tabular-nums; }
   .dur {
-    font-size: 10px;
-    color: var(--c-tx5);
-    font-variant-numeric: tabular-nums;
-    flex-shrink: 0;
-    padding: 0 2px 0 4px;
-    min-width: 32px;
-    text-align: right;
+    flex-shrink: 0; min-width: 38px; text-align: right;
+    font-size: var(--fs-sm); color: var(--c-tx3); font-variant-numeric: tabular-nums;
   }
+  .row.active .dur { color: var(--c-tx1); font-weight: 600; }
+  .eta { flex-shrink: 0; min-width: 44px; text-align: right; font-size: var(--fs-cap); color: var(--c-tx4); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .played-at { color: var(--c-green-tx); }
+  .remove { --h: 24px; opacity: 0; transition: opacity .1s; }
+  .remove:hover { color: var(--c-red-tx); background: var(--c-red-bg); }
 
-  .remove {
-    background: none;
-    border: none;
-    color: var(--c-tx7);
-    font-size: 9px;
-    cursor: pointer;
-    width: 20px;
-    height: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    opacity: 0.4;
-    transition: color 0.1s, opacity 0.1s;
-  }
-  .remove:hover { color: var(--c-red); opacity: 1; }
-
-  /* ── Row context menu ──────────────────────────────────────────────────── */
-  .q-ctx {
-    position: fixed;
-    z-index: 500;
-    background: var(--c-bg);
-    border: 1px solid var(--c-br2);
-    border-radius: 4px;
-    padding: 4px 0;
-    min-width: 160px;
-    box-shadow: 0 8px 24px rgba(0,0,0,.7);
-  }
-  .q-ctx button {
-    display: block;
-    width: 100%;
-    padding: 6px 14px;
-    background: none;
-    border: none;
-    color: var(--c-tx3);
-    font-size: 12px;
-    text-align: left;
-    cursor: pointer;
-    transition: background .08s, color .08s;
-  }
-  .q-ctx button:hover { background: var(--c-br1); color: var(--c-tx2); }
-  .q-ctx-sep { height: 1px; background: var(--c-br1); margin: 3px 0; }
-  .q-ctx-danger { color: var(--c-red) !important; }
-  .q-ctx-danger:hover { color: var(--c-red) !important; background: var(--c-red-bg) !important; }
-  .ctx-mix { color: var(--c-accent) !important; }
-  .ctx-mix:hover { color: var(--c-accent2) !important; background: var(--c-act-bg) !important; }
-
-  /* Fester Platz — immer gerendert, transparent wenn kein Qualitätsstatus */
-  .q-indicator {
-    width: 5px; height: 5px; border-radius: 50%;
-    flex-shrink: 0; margin-right: 2px;
-    background: transparent;
-    position: relative;
-  }
+  /* Qualitaetspunkt mit Erklaerung beim Draufzeigen */
+  .q-indicator { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: transparent; position: relative; }
   .q-tip {
-    display: none;
-    position: absolute;
-    left: 10px; top: 50%; transform: translateY(-50%);
-    background: var(--c-bg5); border: 1px solid var(--c-br3);
-    color: var(--c-tx3); font-size: 10px; font-weight: 400;
-    white-space: nowrap; padding: 3px 8px; border-radius: 3px;
-    pointer-events: none; z-index: 300;
-    box-shadow: 0 4px 12px rgba(0,0,0,.7);
+    display: none; position: absolute; left: 12px; top: 50%; transform: translateY(-50%); z-index: 300;
+    background: var(--c-bg5); border: 1px solid var(--c-br2); border-radius: var(--r-s);
+    color: var(--c-tx2); font-size: var(--fs-sm); white-space: nowrap; padding: 4px 8px;
+    pointer-events: none; box-shadow: 0 6px 18px rgba(0,0,0,.4);
   }
   .q-indicator:hover .q-tip { display: block; }
-  .q-bad   { background: var(--c-red); }
-  .q-quiet { background: var(--c-warn-tx); }
-  .q-loud  { background: var(--c-warn-tx); }
-  .q-good  { background: var(--c-green); }
-
-  .am-status {
-    font-size: 10px;
-    color: var(--c-accent);
-    flex-shrink: 0;
-    max-width: 140px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .radio-btn {
-    font-size: 10px; padding: 2px 7px; border-radius: 3px; border: 1px solid var(--c-br2);
-    background: none; color: var(--c-tx6); cursor: pointer; flex-shrink: 0;
-    transition: color .15s, border-color .15s, background .15s;
-  }
-  .radio-btn:hover { color: var(--c-accent); border-color: var(--c-accent); }
-  .radio-btn.on { background: var(--c-accent); color: #fff; border-color: var(--c-accent); }
-  .radio-added {
-    font-size: 10px; color: var(--c-green); flex-shrink: 0;
-    max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    animation: fadeIn .3s ease;
-  }
-  @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
-  /* ── Custom dialogs (same design as Library.svelte) ────────────────────── */
-  .meta-overlay { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:9000; display:flex; align-items:center; justify-content:center; }
-  .meta-dialog  { background:var(--c-bg5); border:1px solid var(--c-br3); border-radius:6px; padding:20px; min-width:300px; max-width:400px; }
-  .meta-title   { font-size:13px; font-weight:700; color:var(--c-tx2); margin-bottom:16px; }
-  .meta-hint    { font-size:11px; color:var(--c-tx5); margin-bottom:16px; }
-  .meta-label   { display:flex; flex-direction:column; gap:5px; font-size:11px; color:var(--c-tx4); margin-bottom:14px; }
-  .meta-input   { background:var(--c-bg2); border:1px solid var(--c-br3); border-radius:4px; color:var(--c-tx2); padding:7px 10px; font-size:12px; outline:none; }
-  .meta-input:focus { border-color:var(--c-accent); }
-  .meta-check   { display:flex; align-items:center; gap:7px; font-size:11px; color:var(--c-tx4); margin-bottom:10px; cursor:pointer; user-select:none; }
-  .meta-check input[type=checkbox] { accent-color:var(--c-accent); width:13px; height:13px; cursor:pointer; }
-  .meta-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:4px; }
-  .meta-cancel  { background:none; border:1px solid var(--c-br3); border-radius:4px; color:var(--c-tx4); padding:6px 14px; font-size:11px; cursor:pointer; }
-  .meta-cancel:hover { border-color:var(--c-tx5); color:var(--c-tx3); }
-  .meta-save    { background:var(--c-warn-bg); border:1px solid var(--c-warn-br); border-radius:4px; color:var(--c-warn-tx); padding:6px 14px; font-size:11px; cursor:pointer; }
-  .meta-save:hover { background:var(--c-warn-br); }
-  .key { font-size: 9px; color: var(--c-tx5); min-width: 26px; text-align: right; flex-shrink: 0; }
-  .key-same, .key-good { color: var(--c-green-tx); }
-  .key-clash { color: var(--c-warn-tx); }
-  .key-est { font-style: italic; opacity: .75; }
+  .q-bad   { background: var(--c-red-tx); }
+  .q-quiet, .q-loud { background: var(--c-warn-tx); }
+  .q-good  { background: var(--c-green-tx); }
 </style>

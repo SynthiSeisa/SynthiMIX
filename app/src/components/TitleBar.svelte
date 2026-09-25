@@ -1,6 +1,7 @@
 <script>
-  import { settingsOpen, send, backendLogs, notes, wishes } from '../stores/ws.js'
+  import { settingsOpen, openSettings, send, backendLogs, notes, wishes, toolUpdates } from '../stores/ws.js'
   import WishesDialog from './WishesDialog.svelte'
+  import { theme } from '../lib/prefs.js'
   const win = window.electron ?? {}
 
   // ── Musikwuensche ─────────────────────────────────────────────────────────
@@ -9,14 +10,21 @@
   // nicht unbemerkt liegenbleiben.
   const offeneWuensche = $derived($wishes.length)
 
-  // ── Theme toggle ──────────────────────────────────────────────────────────
-  let isDark = $state((localStorage.getItem('synthimix-theme') || 'dark') === 'dark')
-  function toggleTheme() {
-    isDark = !isDark
-    const t = isDark ? 'dark' : 'light'
-    localStorage.setItem('synthimix-theme', t)
-    document.documentElement.setAttribute('data-theme', t)
-  }
+  // ── Update-Hinweise ───────────────────────────────────────────────────────
+  // Nur ein Punkt am Zahnrad — beim Auflegen soll kein Fenster aufgehen.
+  // Der Klick fuehrt direkt auf den Tab, in dem der Hinweis steht.
+  const updTab = $derived(
+    $toolUpdates.ytdlp?.available || $toolUpdates.ytdlp_updated ? 'system'
+    : $toolUpdates.spotdl?.available ? 'download' : null)
+  const updTitle = $derived(
+    $toolUpdates.ytdlp?.available ? `Neue yt-dlp-Version ${$toolUpdates.ytdlp.latest}`
+    : $toolUpdates.spotdl?.available ? `Neue spotdl-Version ${$toolUpdates.spotdl.latest}`
+    : $toolUpdates.ytdlp_updated ? `yt-dlp wurde auf ${$toolUpdates.ytdlp_updated.to} aktualisiert`
+    : '')
+
+  // ── Theme ────────────────────────────────────────────────────────────────
+  const isDark = $derived($theme === 'dark')
+  function toggleTheme() { theme.set(isDark ? 'light' : 'dark') }
 
   let helpOpen = $state(false)
   let logOpen  = $state(false)
@@ -130,62 +138,67 @@
   <div class="tb-actions" style="-webkit-app-region:no-drag">
 
     {#if updateReady && updateDismissed}
-      <button class="update-btn ready" onclick={() => win.installUpdate?.()} title="Update installieren und neu starten">
+      <button class="btn btn-primary btn-sm" onclick={() => win.installUpdate?.()} title="Update installieren und neu starten">
         &#8593; v{updateVersion} installieren
       </button>
     {:else if updateProgress !== null && updateDismissed}
-      <span class="update-btn downloading">
-        &#8595; {updateProgress}%
-      </span>
+      <span class="upd-chip">&#8595; {updateProgress}%</span>
     {/if}
 
-    <div class="log-wrap">
-      <button class="tb-btn tb-log" onclick={() => { logOpen = !logOpen; helpOpen = false; notesOpen = false }} title="Backend-Log">&#11035;</button>
+    <div class="pop-wrap">
+      <button class="btn btn-icon btn-sm" class:is-active={logOpen}
+              onclick={() => { logOpen = !logOpen; helpOpen = false; notesOpen = false }}
+              title="Backend-Log" aria-label="Backend-Log"><i class="ti ti-terminal-2"></i></button>
       {#if logOpen}
-        <div class="log-panel">
-          <div class="log-hdr">
-            <span>BACKEND LOG</span>
-            <input class="log-filter" bind:value={logFilter} placeholder="Filter&#8230;" />
-            <label class="log-auto">
+        <div class="pop log-panel">
+          <div class="pop-hdr">
+            <span class="eyebrow">Backend-Log</span>
+            <input class="pop-input" bind:value={logFilter} placeholder="Filter&#8230;" aria-label="Log filtern" />
+            <label class="pop-check">
               <input type="checkbox" bind:checked={autoRefresh} />
               live
             </label>
-            <button onclick={() => send({ type: 'get_logs' })}>&#8635;</button>
-            <button onclick={() => logOpen = false}>&#10005;</button>
+            <button class="btn btn-icon btn-sm" onclick={() => send({ type: 'get_logs' })} title="Neu laden" aria-label="Neu laden"><i class="ti ti-refresh"></i></button>
+            <button class="btn btn-icon btn-sm" onclick={() => logOpen = false} title="Schließen" aria-label="Schließen"><i class="ti ti-x"></i></button>
           </div>
           <div class="log-body" bind:this={logEl}>
             {#each filteredLogs as line}
               <div class="log-line {lineClass(line)}">{line}</div>
             {:else}
-              <div class="log-empty">Keine Logs</div>
+              <div class="pop-empty">Keine Logs</div>
             {/each}
           </div>
         </div>
       {/if}
     </div>
-    <div class="notes-wrap">
-      <button class="tb-btn" onclick={() => { notesOpen = !notesOpen; helpOpen = false; logOpen = false }} title="Notizblock">✎</button>
+    <div class="pop-wrap">
+      <button class="btn btn-icon btn-sm" class:is-active={notesOpen}
+              onclick={() => { notesOpen = !notesOpen; helpOpen = false; logOpen = false }}
+              title="Notizblock" aria-label="Notizblock"><i class="ti ti-notes"></i></button>
       {#if notesOpen}
-        <div class="notes-panel">
-          <div class="notes-hdr">
-            <span>NOTIZBLOCK</span>
-            <span class="notes-status">{notesSaved ? 'gespeichert' : 'speichert&#8230;'}</span>
-            <button onclick={() => notesOpen = false}>&#10005;</button>
+        <div class="pop notes-panel">
+          <div class="pop-hdr">
+            <span class="eyebrow">Notizblock</span>
+            <span class="pop-status">{notesSaved ? 'gespeichert' : 'speichert&#8230;'}</span>
+            <button class="btn btn-icon btn-sm" onclick={() => notesOpen = false} title="Schließen" aria-label="Schließen"><i class="ti ti-x"></i></button>
           </div>
           <textarea class="notes-body" placeholder="Bugs, Ideen, Probleme w&#228;hrend des Sets notieren&#8230;"
-                    value={$notes} oninput={onNotesInput}></textarea>
+                    value={$notes} oninput={onNotesInput} aria-label="Notizen"></textarea>
         </div>
       {/if}
     </div>
-    <div class="help-wrap">
-      <button class="tb-btn tb-help" onclick={() => { helpOpen = !helpOpen; notesOpen = false }} title="Tastenkürzel">?</button>
+    <div class="pop-wrap">
+      <button class="btn btn-icon btn-sm" class:is-active={helpOpen}
+              onclick={() => { helpOpen = !helpOpen; notesOpen = false }}
+              title="Tastenkürzel" aria-label="Tastenkürzel"><i class="ti ti-help"></i></button>
       {#if helpOpen}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="help-backdrop" onclick={() => helpOpen = false}></div>
-        <div class="help-panel">
-          <div class="help-hdr">
-            <span>TASTENKÜRZEL</span>
-            <button onclick={() => helpOpen = false}>&#10005;</button>
+        <div class="pop help-panel">
+          <div class="pop-hdr">
+            <span class="eyebrow">Tastenkürzel</span>
+            <span class="pop-status"></span>
+            <button class="btn btn-icon btn-sm" onclick={() => helpOpen = false} title="Schließen" aria-label="Schließen"><i class="ti ti-x"></i></button>
           </div>
           {#each shortcuts as [key, desc]}
             <div class="help-row">
@@ -196,15 +209,26 @@
         </div>
       {/if}
     </div>
-    <button class="ctrl theme-btn" onclick={toggleTheme} title={isDark ? 'Helles Theme' : 'Dunkles Theme'}>{isDark ? '☀' : '☾'}</button>
-    <button class="tb-btn tb-wish" onclick={() => wishesOpen = !wishesOpen}
-            title="Musikw&#252;nsche der G&#228;ste">&#9834;{#if offeneWuensche}<span class="wish-badge">{offeneWuensche}</span>{/if}</button>
-    <button class="tb-btn" onclick={() => settingsOpen.set(true)} title="Einstellungen">&#9881;</button>
+
+    <span class="tb-sep" aria-hidden="true"></span>
+
+    <button class="btn btn-icon btn-sm" onclick={toggleTheme}
+            title={isDark ? 'Helles Theme' : 'Dunkles Theme'} aria-label="Theme umschalten">
+      <i class="ti {isDark ? 'ti-sun' : 'ti-moon'}"></i>
+    </button>
+    <button class="btn btn-icon btn-sm has-badge" onclick={() => wishesOpen = !wishesOpen}
+            title="Musikw&#252;nsche der G&#228;ste" aria-label="Musikwünsche">
+      <i class="ti ti-music"></i>{#if offeneWuensche}<span class="badge">{offeneWuensche}</span>{/if}
+    </button>
+    <button class="btn btn-icon btn-sm has-badge" onclick={() => updTab ? openSettings(updTab) : settingsOpen.set(true)}
+            title={updTitle ? 'Einstellungen · ' + updTitle : 'Einstellungen'} aria-label="Einstellungen">
+      <i class="ti ti-settings"></i>{#if updTab}<span class="dot"></span>{/if}
+    </button>
   </div>
   <div class="controls" role="toolbar">
-    <button onclick={() => win.minimize?.()} aria-label="Minimieren">&#9472;</button>
-    <button onclick={() => win.maximize?.()} aria-label="Maximieren">&#9633;</button>
-    <button class="close" onclick={() => win.close?.()} aria-label="Schließen">&#10005;</button>
+    <button onclick={() => win.minimize?.()} aria-label="Minimieren"><i class="ti ti-minus"></i></button>
+    <button onclick={() => win.maximize?.()} aria-label="Maximieren"><i class="ti ti-maximize"></i></button>
+    <button class="close" onclick={() => win.close?.()} aria-label="Schließen"><i class="ti ti-x"></i></button>
   </div>
 </div>
 
@@ -228,13 +252,13 @@
       </div>
       <div class="upd-actions">
         {#if updateReady}
-          <button class="upd-later" onclick={() => updateDismissed = true}>Später</button>
-          <button class="upd-install" onclick={() => win.installUpdate?.()}>Jetzt installieren &amp; neu starten</button>
+          <button class="btn" onclick={() => updateDismissed = true}>Später</button>
+          <button class="btn btn-primary" onclick={() => win.installUpdate?.()}>Jetzt installieren &amp; neu starten</button>
         {:else if updateDownloading}
-          <button class="upd-later" onclick={() => updateDismissed = true}>Im Hintergrund</button>
+          <button class="btn" onclick={() => updateDismissed = true}>Im Hintergrund</button>
         {:else}
-          <button class="upd-later" onclick={() => updateDismissed = true}>Später</button>
-          <button class="upd-install" onclick={() => { updateDownloading = true; win.downloadUpdate?.() }}>Herunterladen</button>
+          <button class="btn" onclick={() => updateDismissed = true}>Später</button>
+          <button class="btn btn-primary" onclick={() => { updateDownloading = true; win.downloadUpdate?.() }}>Herunterladen</button>
         {/if}
       </div>
     </div>
@@ -247,205 +271,135 @@
 
 <style>
   .titlebar {
-    display: flex;
-    align-items: center;
-    height: 32px;
-    padding: 0 12px 0 16px;
+    display: flex; align-items: center; gap: var(--sp-2);
+    height: 36px; padding: 0 0 0 var(--sp-4);
     background: var(--c-bg2);
+    border-bottom: 1px solid var(--c-br1);
     -webkit-app-region: drag;
     flex-shrink: 0;
-    border-bottom: 1px solid var(--c-br1);
   }
 
-  .brand { display: flex; align-items: center; gap: 7px; flex-shrink: 0; }
+  .brand { display: flex; align-items: center; gap: var(--sp-2); flex-shrink: 0; }
   .logo-icon { width: 22px; height: 22px; flex-shrink: 0; }
-  .app-name { font-size: 12px; font-weight: 600; letter-spacing: 0.08em; }
-  .nm-synthi { color: var(--c-accent); }
-  .nm-mix    { color: var(--c-blue); }
-  .version   { font-size: 9px; color: var(--c-tx7); margin-left: 2px; align-self: flex-end; margin-bottom: 3px; }
+  .app-name { font-size: var(--fs-body); font-weight: 700; letter-spacing: .06em; }
+  .nm-synthi { color: var(--c-accent-tx); }
+  .nm-mix    { color: var(--c-blue-tx); }
+  .version   { font-size: var(--fs-cap); color: var(--c-tx5); font-variant-numeric: tabular-nums; }
 
-  .update-btn {
-    font-size: 10px; font-weight: 600; border-radius: 3px;
-    padding: 3px 8px; cursor: default; white-space: nowrap;
-    border: 1px solid transparent; letter-spacing: 0.05em;
-  }
-  .update-btn.available    { color: var(--c-blue-tx); border-color: var(--c-blue-br); background: var(--c-blue-bg); }
-  .update-btn.downloading  { color: var(--c-green-tx); border-color: var(--c-green-br); background: var(--c-green-bg); }
-  .update-btn.ready        { color: #fff; border-color: var(--c-green-br); background: var(--c-green); cursor: pointer; }
-  .update-btn.ready:hover  { background: var(--c-green-br); }
+  .tb-actions { display: flex; align-items: center; gap: 2px; margin-left: auto; -webkit-app-region: no-drag; }
+  .tb-sep { width: 1px; height: 18px; background: var(--c-br2); margin: 0 var(--sp-1); }
 
-  .tb-actions { display:flex; align-items:center; gap:4px; margin-left:auto; -webkit-app-region:no-drag; }
-  .tb-wish { position:relative; }
-  .wish-badge {
-    position:absolute; top:1px; right:0;
-    background:var(--c-accent); color:#fff; font-size:8px; line-height:1;
-    min-width:12px; padding:2px 3px; border-radius:6px; text-align:center;
+  /* Zaehler und Hinweis-Punkt an Icon-Knoepfen */
+  .has-badge { position: relative; }
+  .badge {
+    position: absolute; top: 0; right: -2px;
+    min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px;
+    background: var(--c-accent); color: var(--c-on-accent);
+    font: 700 var(--fs-cap)/16px 'Segoe UI', system-ui, sans-serif; text-align: center;
+    box-shadow: 0 0 0 2px var(--c-bg2);
   }
-  .tb-btn { background:none; border:none; color:var(--c-tx6); font-size:14px; width:28px; height:28px; cursor:pointer; border-radius:3px; display:flex; align-items:center; justify-content:center; transition:color .1s, background .1s; }
-  .tb-btn:hover { color:var(--c-tx2); background:var(--c-br2); }
-  .tb-help { font-size:11px; font-weight:700; border:1px solid var(--c-br2); border-radius:50%; width:18px; height:18px; }
-  .theme-btn { font-size: 13px; }
-  .ctrl { background:none; border:none; color:var(--c-tx6); font-size:14px; width:28px; height:28px; cursor:pointer; border-radius:3px; display:flex; align-items:center; justify-content:center; transition:color .1s, background .1s; }
-  .ctrl:hover { color:var(--c-tx2); background:var(--c-br2); }
+  .dot {
+    position: absolute; top: 3px; right: 3px; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--c-accent); box-shadow: 0 0 0 2px var(--c-bg2);
+  }
+  .upd-chip {
+    font-size: var(--fs-sm); font-weight: 600; padding: 3px 8px; border-radius: var(--r-s);
+    color: var(--c-green-tx); border: 1px solid var(--c-green-br); background: var(--c-green-bg);
+    font-variant-numeric: tabular-nums;
+  }
 
-  .tb-log { font-size: 8px; }
-
-  .log-wrap { position: relative; }
-  .log-panel {
-    position: absolute; top: calc(100% + 6px); right: 0;
-    background: var(--c-bg2); border: 1px solid var(--c-br3);
-    border-radius: 5px; z-index: 1000; width: 560px;
-    box-shadow: 0 8px 28px rgba(0,0,0,.9);
-    display: flex; flex-direction: column; max-height: 480px;
-  }
-  .log-hdr {
-    display: flex; align-items: center; gap: 6px;
-    padding: 6px 10px; border-bottom: 1px solid var(--c-br1);
-    flex-shrink: 0;
-  }
-  .log-hdr span { font-size: 9px; font-weight: 700; letter-spacing: .15em; color: var(--c-tx6); flex-shrink: 0; }
-  .log-filter {
-    flex: 1; background: var(--c-bg3); border: 1px solid var(--c-br2);
-    border-radius: 3px; color: var(--c-tx3); font-size: 10px;
-    padding: 2px 6px; outline: none; min-width: 0;
-  }
-  .log-auto { display: flex; align-items: center; gap: 3px; font-size: 10px; color: var(--c-tx6); flex-shrink: 0; cursor: pointer; }
-  .log-hdr button {
-    background: none; border: 1px solid var(--c-br2); border-radius: 3px;
-    color: var(--c-tx6); font-size: 11px; cursor: pointer;
-    padding: 1px 6px; transition: color .1s;
-  }
-  .log-hdr button:hover { color: var(--c-tx3); }
-  .log-body {
-    overflow-y: auto; flex: 1; padding: 4px 0;
-    font-family: 'Consolas', 'Courier New', monospace; font-size: 10px;
-  }
-  .log-line {
-    padding: 1px 10px; white-space: pre-wrap; word-break: break-all;
-    line-height: 1.5;
-  }
-  .log-info    { color: var(--c-tx6); }
-  .log-analyze { color: var(--c-green-tx); }
-  .log-ffmpeg  { color: var(--c-tx5); }
-  .log-err     { color: var(--c-red); background: var(--c-red-bg); }
-  .log-empty   { padding: 20px; text-align: center; color: var(--c-tx7); font-size: 11px; }
-
-  .notes-wrap { position: relative; }
-  .notes-panel {
-    position: absolute; top: calc(100% + 6px); right: 0;
-    background: var(--c-bg2); border: 1px solid var(--c-br3);
-    border-radius: 5px; z-index: 1000; width: 360px;
-    box-shadow: 0 8px 28px rgba(0,0,0,.9);
+  /* ── Aufklapp-Panels (Log, Notizen, Tastenkuerzel) ───────────────────── */
+  .pop-wrap { position: relative; }
+  .pop {
+    position: absolute; top: calc(100% + 6px); right: 0; z-index: 1000;
+    background: var(--c-bg5); border: 1px solid var(--c-br2); border-radius: var(--r-l);
+    box-shadow: 0 12px 32px rgba(0,0,0,.45);
     display: flex; flex-direction: column; overflow: hidden;
   }
-  .notes-hdr {
-    display: flex; align-items: center; gap: 6px;
-    padding: 6px 10px; border-bottom: 1px solid var(--c-br1);
-    flex-shrink: 0;
+  .pop-hdr {
+    display: flex; align-items: center; gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3);
+    border-bottom: 1px solid var(--c-br1); flex-shrink: 0;
   }
-  .notes-hdr span:first-child { font-size: 9px; font-weight: 700; letter-spacing: .15em; color: var(--c-tx6); flex-shrink: 0; }
-  .notes-status { flex: 1; font-size: 9px; color: var(--c-tx7); text-align: right; }
-  .notes-hdr button {
-    background: none; border: 1px solid var(--c-br2); border-radius: 3px;
-    color: var(--c-tx6); font-size: 11px; cursor: pointer;
-    padding: 1px 6px; transition: color .1s;
+  .pop-hdr .eyebrow { flex-shrink: 0; }
+  .pop-status { flex: 1; font-size: var(--fs-sm); color: var(--c-tx5); text-align: right; }
+  .pop-input {
+    flex: 1; min-width: 0; height: var(--btn-h-sm); padding: 0 var(--sp-2);
+    background: var(--c-bg); border: 1px solid var(--c-br2); border-radius: var(--r-s);
+    color: var(--c-tx2); font-size: var(--fs-sm);
   }
-  .notes-hdr button:hover { color: var(--c-tx3); }
+  .pop-input:focus { border-color: var(--c-accent); }
+  .pop-check { display: flex; align-items: center; gap: 4px; font-size: var(--fs-sm); color: var(--c-tx4); flex-shrink: 0; cursor: pointer; }
+  .pop-empty { padding: var(--sp-5); text-align: center; color: var(--c-tx5); font-size: var(--fs-sm); }
+
+  .log-panel { width: 600px; max-height: 480px; }
+  .log-body {
+    overflow-y: auto; flex: 1; padding: var(--sp-1) 0;
+    font-family: 'Consolas', 'Cascadia Mono', 'Courier New', monospace; font-size: var(--fs-cap);
+    user-select: text;
+  }
+  .log-line { padding: 1px var(--sp-3); white-space: pre-wrap; word-break: break-all; line-height: 1.5; }
+  .log-info    { color: var(--c-tx4); }
+  .log-analyze { color: var(--c-green-tx); }
+  .log-ffmpeg  { color: var(--c-tx5); }
+  .log-err     { color: var(--c-red-tx); background: var(--c-red-bg); }
+
+  .notes-panel { width: 380px; }
   .notes-body {
     width: 100%; height: 260px; resize: vertical;
-    background: var(--c-bg); border: none; outline: none;
-    color: var(--c-tx2); font-size: 12px; line-height: 1.5;
-    padding: 10px; box-sizing: border-box;
+    background: var(--c-bg); border: none;
+    color: var(--c-tx2); font-size: var(--fs-body); line-height: 1.5;
+    padding: var(--sp-3);
     font-family: 'Segoe UI', system-ui, sans-serif;
+    user-select: text;
   }
-  .notes-body::placeholder { color: var(--c-tx7); }
+  .notes-body::placeholder { color: var(--c-tx6); }
 
-  .help-wrap { position: relative; }
   .help-backdrop { position: fixed; inset: 0; z-index: 900; }
-  .help-panel {
-    position: absolute; top: calc(100% + 6px); right: 0;
-    background: var(--c-bg3); border: 1px solid var(--c-br3);
-    border-radius: 5px; z-index: 1000; min-width: 260px;
-    box-shadow: 0 8px 28px rgba(0,0,0,.8);
-    overflow: hidden;
-  }
-  .help-hdr {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 8px 12px 6px;
-    border-bottom: 1px solid var(--c-br1);
-  }
-  .help-hdr span { font-size: 9px; font-weight: 700; letter-spacing: .15em; color: var(--c-tx6); }
-  .help-hdr button {
-    background: none; border: none; color: var(--c-tx6); font-size: 11px;
-    cursor: pointer; padding: 2px 4px; border-radius: 2px; transition: color .1s;
-  }
-  .help-hdr button:hover { color: var(--c-red-tx); }
+  .help-panel { min-width: 300px; }
   .help-row {
-    display: flex; align-items: center; gap: 12px;
-    padding: 5px 12px; border-bottom: 1px solid var(--c-br1);
+    display: flex; align-items: center; gap: var(--sp-3);
+    padding: 6px var(--sp-3); border-bottom: 1px solid var(--c-br1);
   }
   .help-row:last-child { border-bottom: none; }
   kbd {
-    font-family: inherit; font-size: 10px; font-weight: 600;
-    color: var(--c-tx3); background: var(--c-bg5); border: 1px solid var(--c-br3);
-    border-radius: 3px; padding: 2px 6px; white-space: nowrap;
-    min-width: 90px; text-align: center; flex-shrink: 0;
+    font-family: inherit; font-size: var(--fs-sm); font-weight: 600;
+    color: var(--c-tx2); background: var(--c-bg); border: 1px solid var(--c-br3);
+    border-radius: var(--r-s); padding: 2px 6px; white-space: nowrap;
+    min-width: 96px; text-align: center; flex-shrink: 0;
   }
-  .help-row span { font-size: 11px; color: var(--c-tx5); }
+  .help-row span { font-size: var(--fs-sm); color: var(--c-tx3); }
 
-  .controls { display: flex; -webkit-app-region: no-drag; }
+  /* ── Fensterknoepfe: wie unter Windows ueblich, randlos und voll hoch ── */
+  .controls { display: flex; align-self: stretch; -webkit-app-region: no-drag; margin-left: var(--sp-2); }
   .controls button {
-    background: none; border: none; color: var(--c-tx7);
-    width: 36px; height: 32px; font-size: 12px; cursor: pointer;
+    background: none; border: none; color: var(--c-tx4);
+    width: 44px; font-size: 14px; cursor: pointer;
     display: flex; align-items: center; justify-content: center;
-    transition: background 0.1s, color 0.1s;
+    transition: background .1s, color .1s;
   }
-  .controls button:hover { background: var(--c-br2); color: var(--c-tx3); }
-  .controls button.close:hover { background: var(--c-red); color: #fff; }
+  .controls button:hover { background: var(--c-hover); color: var(--c-tx1); }
+  .controls button.close:hover { background: #c42b1c; color: #fff; }
 
-  /* ── Update-Popup ────────────────────────────────────────────────────────── */
+  /* ── Update-Popup ────────────────────────────────────────────────────── */
   .upd-overlay {
     position: fixed; inset: 0; z-index: 9000;
     background: rgba(0,0,0,.55); backdrop-filter: blur(2px);
     display: flex; align-items: center; justify-content: center;
   }
   .upd-dialog {
-    background: var(--c-bg3); border: 1px solid var(--c-br3); border-radius: 8px;
-    padding: 24px 28px; max-width: 420px; width: 90%;
-    box-shadow: 0 20px 60px rgba(0,0,0,.9);
-    display: flex; flex-direction: column; gap: 16px;
+    background: var(--c-bg5); border: 1px solid var(--c-br2); border-radius: var(--r-l);
+    padding: var(--sp-5); max-width: 440px; width: 90%;
+    box-shadow: 0 20px 60px rgba(0,0,0,.6);
+    display: flex; flex-direction: column; gap: var(--sp-4);
   }
   .upd-icon { font-size: 32px; color: var(--c-green-tx); text-align: center; line-height: 1; }
   .upd-body { text-align: center; }
-  .upd-title {
-    font-size: 14px; font-weight: 700; letter-spacing: .08em;
-    color: var(--c-tx1); margin-bottom: 8px;
-  }
-  .upd-sub { font-size: 11px; color: var(--c-tx5); line-height: 1.6; }
-  .upd-sub strong { color: var(--c-tx3); }
-  .upd-actions { display: flex; gap: 10px; justify-content: center; }
-  .upd-later {
-    padding: 7px 18px; background: var(--c-bg); border: 1px solid var(--c-br2);
-    border-radius: 4px; color: var(--c-tx5); font-size: 11px; cursor: pointer;
-    transition: border-color .1s, color .1s;
-  }
-  .upd-later:hover { border-color: var(--c-tx5); color: var(--c-tx3); }
-  .upd-install {
-    padding: 7px 20px; background: var(--c-green-bg); border: 1px solid var(--c-green-br);
-    border-radius: 4px; color: var(--c-green-tx); font-size: 11px; font-weight: 600;
-    cursor: pointer; transition: background .1s, border-color .1s, color .1s;
-  }
-  .upd-install:hover { background: var(--c-green-bg); border-color: var(--c-green); color: var(--c-green-tx); }
-
-  .upd-bar {
-    height: 4px; background: var(--c-bg5); border-radius: 2px; overflow: hidden;
-    margin-top: 10px;
-  }
-  .upd-bar-fill {
-    height: 100%; background: var(--c-blue-br); border-radius: 2px;
-    transition: width .3s ease;
-  }
-  .upd-pct {
-    font-size: 10px; color: var(--c-tx5); text-align: center; margin-top: 4px;
-  }
+  .upd-title { font-size: var(--fs-h); font-weight: 700; color: var(--c-tx1); margin-bottom: var(--sp-2); }
+  .upd-sub { font-size: var(--fs-body); color: var(--c-tx3); line-height: 1.55; }
+  .upd-sub strong { color: var(--c-tx1); }
+  .upd-actions { display: flex; gap: var(--sp-2); justify-content: center; flex-wrap: wrap; }
+  .upd-bar { height: 6px; background: var(--c-bg2); border-radius: 3px; overflow: hidden; margin-top: var(--sp-3); }
+  .upd-bar-fill { height: 100%; background: var(--c-accent); border-radius: 3px; transition: width .3s ease; }
+  .upd-pct { font-size: var(--fs-sm); color: var(--c-tx4); text-align: center; margin-top: var(--sp-1); font-variant-numeric: tabular-nums; }
 </style>

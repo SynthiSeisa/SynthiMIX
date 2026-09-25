@@ -50,13 +50,20 @@ export const wishes              = writable([])   // Musikwuensche der Gaeste
 export const ytdlpAutoupdate     = writable(true)
 export const watchedFolders      = writable([])   // [{path, exists, tracks, inside}]
 export const watchedFolderImpact = writable(null) // {folder, tracks} — Antwort auf dry_run
+export const excludedFolders     = writable([])   // aus der Bibliothek ausgeschlossene Ordner
+// Ergebnis der taeglichen Pruefung: { ytdlp: {latest, available}, spotdl: {current, latest, available},
+// ytdlp_updated: {from, to, at} } — daraus kommen Punkt am Zahnrad und Hinweise
+export const toolUpdates         = writable({})
 export const playlistChoice      = writable(null)   // null | {pending:true} | {url, format, track_title, playlist_title, count}
+// Musikvideo-Links: Warteliste der Rueckfragen und laufende Pruefungen
+export const videoChoices        = writable([])     // [{url, format, video:{title,uploader,duration}, song:{url,title,uploader,duration}}]
+export const videoCheckPending   = writable(0)
 export const spotdlInstalling    = writable(false)
 export const spotdlInstallText   = writable(null)   // Fortschrittstext während des Downloads
 export const spotdlInstallError  = writable(null)
 export const updateProgress = writable(null)
 export const loudnormOnDl = writable(false)
-export const loudnormTarget = writable(-14)
+export const loudnormTarget = writable(-10)
 export const loudnormTp = writable(-1.5)
 export const scanRecursive      = writable(true)
 export const autoRemovePlayed   = writable(false)
@@ -82,6 +89,12 @@ const APP_SETTINGS_DEFAULTS = {
   cfCurve:            'cosine',
   introSkipSec:       0,
   beatAlignCf:        true,
+  keyNotation:        'musical',   // Tonart als 'musical' (F♯m) oder 'camelot' (11A)
+  // Was die Warteschlange je Zeile zeigt (Titel und Dauer immer)
+  qShowKey:           false,
+  qShowBpm:           false,
+  qShowEta:           true,
+  qShowPlays:         false,
 }
 
 function _loadAppSettings() {
@@ -230,7 +243,10 @@ function connect() {
       case 'history': dlHistory.set(msg.items ?? []); break
       case 'normalize_progress': normalizeProgress.set(msg); break
       case 'normalize_done': normalizeProgress.set(null); break
-      case 'tools_info': toolsInfo.set(msg); break
+      // Zusammenfuehren statt ersetzen: das taegliche yt-dlp-Update und die
+      // fpcalc-Installation schicken nur ihr eigenes Feld — die anderen
+      // Versionen standen danach als "fehlt" in den Einstellungen.
+      case 'tools_info': { const { type, ...info } = msg; toolsInfo.update(t => ({ ...t, ...info })); break }
       case 'update_progress':
         updateProgress.set(msg)
         if (msg.pct === 100 || msg.pct === -1)
@@ -266,10 +282,15 @@ function connect() {
       case 'fpcalc_install_error':    fpcalcInstalling.set(false); fpcalcInstallError.set(msg.text ?? 'Fehler'); break
       case 'wishes':                  wishes.set(msg.items || []); break
       case 'watched_folders':         watchedFolders.set(msg.items || []); break
+      case 'excluded_folders':        excludedFolders.set(msg.items || []); break
+      case 'tool_updates':            toolUpdates.set(msg.items || {}); break
       case 'watched_folder_impact':   watchedFolderImpact.set({ folder: msg.folder, tracks: msg.tracks }); break
       case 'playlist_choice_pending': playlistChoice.set({ pending: true }); break
       case 'playlist_choice_cancel':  playlistChoice.set(null); break
       case 'playlist_choice':         playlistChoice.set({ ...msg, pending: false }); break
+      case 'video_check_pending':     videoCheckPending.update(n => n + 1); break
+      case 'video_check_done':        videoCheckPending.update(n => Math.max(0, n - 1)); break
+      case 'video_choice':            videoChoices.update(l => [...l, msg]); break
       case 'spotdl_install_progress': spotdlInstalling.set(true);  spotdlInstallError.set(null); spotdlInstallText.set(msg.text ?? null); break
       case 'spotdl_install_done':     spotdlInstalling.set(false); spotdlInstallText.set(null); if (msg.version) toolsInfo.update(t => ({ ...t, spotdl_version: msg.version })); break
       case 'spotdl_install_error':    spotdlInstalling.set(false); spotdlInstallText.set(null); spotdlInstallError.set(msg.text ?? 'Fehler'); break

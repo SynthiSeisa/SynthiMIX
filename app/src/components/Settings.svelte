@@ -1,5 +1,7 @@
 <script>
   import { untrack } from 'svelte'
+  import { theme, density } from '../lib/prefs.js'
+  import KeyChip from './KeyChip.svelte'
   import { settings, settingsOpen, settingsTab, appSettings, send, toolsInfo, updateProgress,
            loudnormOnDl, loudnormTarget, loudnormTp, autoMixEnabled, playMode,
            playlistFolderEnabled, dlFilenameFormat, downloadDir, remoteStatus,
@@ -8,7 +10,7 @@
            lastfmApiKey, acoustidApiKey,
            fpcalcInstalling, fpcalcInstallError,
            spotdlInstalling, spotdlInstallError, spotdlInstallText,
-           watchedFolders, watchedFolderImpact, ytdlpAutoupdate } from '../stores/ws.js'
+           watchedFolders, watchedFolderImpact, ytdlpAutoupdate, excludedFolders, toolUpdates } from '../stores/ws.js'
 
   let tab = $state('playback')
 
@@ -40,20 +42,39 @@
   // Wird die Seite aus einer Fehlermeldung heraus geoeffnet, springt sie
   // direkt auf den passenden Tab statt den Nutzer suchen zu lassen.
   $effect(() => {
-    if ($settingsTab) { tab = $settingsTab; settingsTab.set(null) }
+    if ($settingsTab) {
+      tab = $settingsTab; settingsTab.set(null)
+      // Kommt man ueber den Update-Punkt am Zahnrad, gleich zum Hinweis scrollen
+      setTimeout(() => document.querySelector('.upd-note, [data-upd]')
+        ?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 60)
+    }
   })
 
   const TABS = [
-    { id: 'playback', label: 'Wiedergabe', icon: '▶' },
-    { id: 'fade',     label: 'Blend',      icon: '⇌' },
-    { id: 'download', label: 'Download',   icon: '↓' },
-    { id: 'services', label: 'Dienste',    icon: '⊹' },
-    { id: 'system',   label: 'System',     icon: '⚙' },
-    { id: 'remote',   label: 'Remote',     icon: '⊕' },
-    { id: 'info',     label: 'Info',       icon: 'ℹ' },
+    { id: 'playback', label: 'Wiedergabe', icon: 'ti-player-play' },
+    { id: 'fade',     label: 'Blend',      icon: 'ti-adjustments-horizontal' },
+    { id: 'download', label: 'Download',   icon: 'ti-download' },
+    { id: 'services', label: 'Dienste',    icon: 'ti-plug' },
+    { id: 'look',     label: 'Darstellung', icon: 'ti-palette' },
+    { id: 'system',   label: 'System',     icon: 'ti-settings' },
+    { id: 'remote',   label: 'Remote',     icon: 'ti-device-mobile' },
+    { id: 'info',     label: 'Info',       icon: 'ti-info-circle' },
   ]
 
   function close() { settingsOpen.set(false) }
+
+  // Tabs mit offenem Update-Hinweis bekommen einen Punkt
+  const tabNotice = $derived({
+    system:   !!($toolUpdates.ytdlp?.available || $toolUpdates.ytdlp_updated),
+    download: !!$toolUpdates.spotdl?.available,
+  })
+  let toolCheckRunning = $state(false)
+  function checkToolUpdates() {
+    toolCheckRunning = true
+    send({ type: 'check_tool_updates' })
+    setTimeout(() => toolCheckRunning = false, 8000)
+  }
+  $effect(() => { void $toolUpdates; toolCheckRunning = false })
 
   // ── Queue-Ende: virtuelles Radio aus zwei stores ──────────────────────────
   const queueEnd = $derived(
@@ -171,13 +192,22 @@
   // Der Wunsch-QR ist der, den man ausdruckt. Er bleibt gueltig, solange der
   // Rechner dieselbe Adresse behaelt — dafuer im Router eine feste IP
   // vergeben, sonst zeigt der Zettel beim naechsten Mal ins Leere.
-  const wishUrl = $derived($remoteStatus?.url ? $remoteStatus.url + '/wunsch' : '')
+  // Eigene Adresse vom Backend: die Fernbedienungs-URL traegt jetzt den
+  // geheimen Schluessel, daran darf "/wunsch" nicht angehaengt werden.
+  const wishUrl = $derived($remoteStatus?.wish_url ?? '')
+  function newRemoteKey() {
+    if (confirm('Neuen Link für die Fernbedienung erzeugen?\n' +
+                'Der alte Link und der alte QR-Code funktionieren danach nicht mehr — am Handy einmal neu scannen.'))
+      send({ type: 'remote_new_key' })
+  }
 
   function malen(canvas, url) {
     if (!canvas || !url) return
+    // Dunkel auf hell: invertierte Codes (hell auf dunkel) lesen nicht alle
+    // Kamera-Apps, und der Wunsch-QR wird ausgedruckt.
     QRCode.toCanvas(canvas, url, {
       width: 160, margin: 2,
-      color: { dark: '#e07800', light: '#070c18' }
+      color: { dark: '#000000', light: '#ffffff' }
     })
   }
   $effect(() => { malen(qrCanvas, $remoteStatus?.url) })
@@ -201,10 +231,10 @@
           <line x1="20" y1="29" x2="20" y2="35" stroke="#3b82f6" stroke-width="2" stroke-linecap="round"/>
           <polyline points="16,32 20,36 24,32" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
-        <span class="hdr-appname"><span style="color:#e07800">Synthi</span><span style="color:#3b82f6">MIX</span></span>
+        <span class="hdr-appname"><span class="nm-synthi">Synthi</span><span class="nm-mix">MIX</span></span>
         <span class="hdr-title">Einstellungen</span>
       </div>
-      <button class="close-btn" onclick={close}>✕</button>
+      <button class="btn btn-icon close-btn" onclick={close} title="Schließen" aria-label="Einstellungen schließen"><i class="ti ti-x"></i></button>
     </div>
 
     <div class="layout">
@@ -212,9 +242,10 @@
       <!-- Left tab nav -->
       <nav class="tab-nav">
         {#each TABS as t}
-          <button class="tab-btn {tab === t.id ? 'active' : ''}" onclick={() => tab = t.id}>
-            <span class="tab-icon">{t.icon}</span>
+          <button class="tab-btn {tab === t.id ? 'active' : ''}" onclick={() => tab = t.id} aria-current={tab === t.id ? 'page' : undefined}>
+            <i class="ti {t.icon} tab-icon" aria-hidden="true"></i>
             <span class="tab-label">{t.label}</span>
+            {#if tabNotice[t.id]}<span class="tab-dot"></span>{/if}
           </button>
         {/each}
       </nav>
@@ -252,6 +283,7 @@
                 <span class="val">{$appSettings.targetLUFS} LUFS</span>
               </div>
             {/if}
+            <div class="hint">Der Player zeigt den Stand neben BPM, z. B. „≋ −8.1 → {$appSettings.targetLUFS} LUFS“. Auf der Fernbedienung lässt sich die Angleichung weiter schalten.</div>
           </div>
 
           <div class="group">
@@ -271,9 +303,9 @@
           <div class="group">
             <div class="group-title">Queue-Ende</div>
             <div class="hint">Was passiert wenn die Warteschlange leer ist.</div>
-            <div class="radio-group">
+            <div class="btn-group radio-group">
               {#each [['stop','Stopp'],['automix','Auto-Mix'],['repeat','Wiederholen']] as [val, label]}
-                <button class="radio-opt {queueEnd === val ? 'active' : ''}"
+                <button class="btn btn-sm" class:is-active={queueEnd === val}
                         onclick={() => setQueueEnd(val)}>
                   {label}
                 </button>
@@ -303,9 +335,9 @@
           <div class="group">
             <div class="group-title">Überblend-Kurve</div>
             <div class="hint">Bestimmt den Lautstärkeverlauf während des Übergangs.</div>
-            <div class="radio-group">
+            <div class="btn-group radio-group">
               {#each [['cosine','Kosinus'],['linear','Linear'],['scurve','S-Kurve']] as [val, label]}
-                <button class="radio-opt {$appSettings.cfCurve === val ? 'active' : ''}"
+                <button class="btn btn-sm" class:is-active={$appSettings.cfCurve === val}
                         onclick={() => appSettings.update(s => ({...s, cfCurve: val}))}>
                   {label}
                 </button>
@@ -466,7 +498,7 @@
                 style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
                 {$downloadDir ? $downloadDir.split(/[\\/]/).pop() || $downloadDir : 'Downloads/'}
               </span>
-              <button class="action-btn" onclick={pickDownloadFolder}>Ordner wählen</button>
+              <button class="btn btn-sm" onclick={pickDownloadFolder}>Ordner wählen</button>
             </div>
           </div>
 
@@ -474,13 +506,21 @@
             <div class="group-title">Spotify-Download (via spotdl)</div>
             <div class="row">
               <span class="lbl">spotdl</span>
-              {#if $toolsInfo.spotdl_version}
-                <span class="val" style="color:var(--c-green)">✓ v{$toolsInfo.spotdl_version}</span>
+              {#if $toolsInfo.spotdl_version && $spotdlInstalling}
+                <span class="val st-busy">{$spotdlInstallText ?? 'Wird aktualisiert…'}</span>
+              {:else if $toolsInfo.spotdl_version}
+                <span class="val st-ok">✓ v{$toolsInfo.spotdl_version}</span>
+                {#if $toolUpdates.spotdl?.available}
+                  <button class="btn btn-sm btn-primary" data-upd onclick={() => send({ type: 'install_spotdl' })}
+                          title="Lädt die neue Version (~46 MB) und ersetzt die alte erst, wenn der Download vollständig ist">
+                    Auf {$toolUpdates.spotdl.latest} aktualisieren
+                  </button>
+                {/if}
               {:else if $spotdlInstalling}
-                <span class="val" style="color:var(--c-tx4)">{$spotdlInstallText ?? 'Wird installiert…'}</span>
+                <span class="val st-busy">{$spotdlInstallText ?? 'Wird installiert…'}</span>
               {:else}
-                <span class="val" style="color:var(--c-tx5)">nicht gefunden</span>
-                <button class="install-btn" onclick={() => send({ type: 'install_spotdl' })}>
+                <span class="val st-muted">nicht gefunden</span>
+                <button class="btn btn-sm btn-primary" onclick={() => send({ type: 'install_spotdl' })}>
                   Installieren
                 </button>
               {/if}
@@ -488,7 +528,7 @@
             {#if $spotdlInstallError}
               <div class="row">
                 <span class="lbl"></span>
-                <span class="val" style="color:var(--c-red);font-size:11px">{$spotdlInstallError}</span>
+                <span class="val st-err">{$spotdlInstallError}</span>
               </div>
             {/if}
             <div class="hint" style="margin-top:6px">
@@ -499,17 +539,17 @@
             </div>
             <div class="row" style="margin-top:8px">
               <span class="lbl">Client-ID</span>
-              <input class="text-input" type="text" placeholder="optional"
+              <input class="field field-sm" type="text" placeholder="optional"
                      bind:value={spotifyCidEdit} />
             </div>
             <div class="row">
               <span class="lbl">Client-Secret</span>
-              <input class="text-input" type="password" placeholder="optional"
+              <input class="field field-sm" type="password" placeholder="optional"
                      bind:value={spotifyCsecEdit} />
             </div>
             <div class="row">
               <span class="lbl"></span>
-              <button class="action-btn" onclick={saveSpotifyCreds}>Speichern</button>
+              <button class="btn btn-sm" onclick={saveSpotifyCreds}>Speichern</button>
             </div>
           </div>
 
@@ -524,7 +564,7 @@
             </div>
             <div class="row" style="margin-top:8px">
               <span class="lbl">API-Key</span>
-              <input class="text-input" type="text" placeholder="32-stelliger Hex-Key"
+              <input class="field field-sm" type="text" placeholder="32-stelliger Hex-Key"
                      bind:value={lastfmKeyEdit} />
             </div>
           </div>
@@ -538,12 +578,12 @@
             <div class="row" style="margin-top:8px">
               <span class="lbl">fpcalc</span>
               {#if $toolsInfo.fpcalc_found}
-                <span class="val" style="color:var(--c-green)">✓ gefunden</span>
+                <span class="val st-ok">✓ gefunden</span>
               {:else if $fpcalcInstalling}
-                <span class="val" style="color:var(--c-tx4)">Wird installiert…</span>
+                <span class="val st-busy">Wird installiert…</span>
               {:else}
-                <span class="val" style="color:var(--c-tx5)">nicht gefunden</span>
-                <button class="install-btn" onclick={() => send({ type: 'download_fpcalc' })}>
+                <span class="val st-muted">nicht gefunden</span>
+                <button class="btn btn-sm btn-primary" onclick={() => send({ type: 'download_fpcalc' })}>
                   Installieren
                 </button>
               {/if}
@@ -551,19 +591,76 @@
             {#if $fpcalcInstallError}
               <div class="row">
                 <span class="lbl"></span>
-                <span class="val" style="color:var(--c-red);font-size:11px">{$fpcalcInstallError}</span>
+                <span class="val st-err">{$fpcalcInstallError}</span>
               </div>
             {/if}
             <div class="row">
               <span class="lbl">API-Key</span>
-              <input class="text-input" type="text" placeholder="AcoustID API-Key"
+              <input class="field field-sm" type="text" placeholder="AcoustID API-Key"
                      bind:value={acoustidKeyEdit} />
             </div>
           </div>
 
           <div class="row" style="padding:0 4px">
             <span class="lbl"></span>
-            <button class="action-btn" onclick={saveServices}>Speichern</button>
+            <button class="btn btn-sm" onclick={saveServices}>Speichern</button>
+          </div>
+
+        <!-- ── DARSTELLUNG ─────────────────────────────────────────────── -->
+        {:else if tab === 'look'}
+
+          <div class="group">
+            <div class="group-title">Theme</div>
+            <div class="row">
+              <span class="lbl">Farben</span>
+              <div class="btn-group">
+                <button class="btn btn-sm" class:is-active={$theme === 'dark'} onclick={() => theme.set('dark')}><i class="ti ti-moon"></i> Dunkel</button>
+                <button class="btn btn-sm" class:is-active={$theme === 'light'} onclick={() => theme.set('light')}><i class="ti ti-sun"></i> Hell</button>
+              </div>
+            </div>
+            <div class="hint">Hell ist für draußen bei Sonne gedacht. Umschalten geht auch oben in der Titelleiste (Sonne/Mond).</div>
+          </div>
+
+          <div class="group">
+            <div class="group-title">Dichte</div>
+            <div class="row">
+              <span class="lbl">Bibliothek und Queue</span>
+              <div class="btn-group">
+                <button class="btn btn-sm" class:is-active={$density === 'compact'} onclick={() => density.set('compact')}><i class="ti ti-baseline-density-small"></i> Kompakt</button>
+                <button class="btn btn-sm" class:is-active={$density === 'comfortable'} onclick={() => density.set('comfortable')}><i class="ti ti-baseline-density-large"></i> Komfortabel</button>
+              </div>
+            </div>
+            <div class="hint">
+              {#if $density === 'compact'}Kompakt: niedrige Zeilen, viele Titel auf einmal — gut zum Aufräumen zuhause.
+              {:else}Komfortabel: größere Zeilen, Schrift und Klickziele — gut aus Abstand und live am Laptop.{/if}
+            </div>
+          </div>
+
+          <div class="group">
+            <div class="group-title">Tonart</div>
+            <div class="row">
+              <span class="lbl">Schreibweise</span>
+              <div class="btn-group">
+                <button class="btn btn-sm" class:is-active={($appSettings.keyNotation ?? 'musical') === 'musical'}
+                        onclick={() => appSettings.update(s => ({ ...s, keyNotation: 'musical' }))}>Noten</button>
+                <button class="btn btn-sm" class:is-active={$appSettings.keyNotation === 'camelot'}
+                        onclick={() => appSettings.update(s => ({ ...s, keyNotation: 'camelot' }))}>Camelot</button>
+              </div>
+            </div>
+            <div class="row key-preview">
+              <span class="lbl">Vorschau</span>
+              <span class="key-samples">
+                <KeyChip key="Am" src="tag" />
+                <KeyChip key="C" src="tag" />
+                <KeyChip key="F♯m" src="tag" />
+                <KeyChip key="D♯" src="analyse" />
+              </span>
+            </div>
+            <div class="hint">
+              Noten wie in rekordbox („F♯m“), Camelot wie in Mixed In Key („11A“). Die Farbe
+              gehört zur Camelot-Nummer, passende Tonarten stehen damit farblich nah beieinander.
+              Kursiv mit „~“: selbst geschätzt, nicht aus dem Tag.
+            </div>
           </div>
 
         <!-- ── SYSTEM ──────────────────────────────────────────────────── -->
@@ -575,14 +672,14 @@
               <span class="lbl">Auto-Scan</span>
               <div class="btn-group">
                 {#each AUTO_SCAN_OPTIONS as opt}
-                  <button class="seg-btn {$autoScanIntervalMin === opt.value ? 'active' : ''}"
+                  <button class="btn btn-sm" class:is-active={$autoScanIntervalMin === opt.value}
                           onclick={() => setAutoScanInterval(opt.value)}>
                     {opt.label}
                   </button>
                 {/each}
               </div>
             </div>
-            <p class="hint-text">Bibliotheksordner automatisch neu scannen</p>
+            <p class="hint">Bibliotheksordner automatisch neu scannen</p>
             <div class="row" style="margin-top: 8px">
               <span class="lbl">Unterordner</span>
               <label class="toggle-wrap">
@@ -594,7 +691,7 @@
 
             <div class="wf-head">Beobachtete Ordner</div>
             {#if !$watchedFolders.length}
-              <p class="hint-text">Noch keine. Ordner über „Scannen" in der Bibliothek oder hier hinzufügen.</p>
+              <p class="hint">Noch keine. Ordner über „Scannen" in der Bibliothek oder hier hinzufügen.</p>
             {/if}
             {#each $watchedFolders as wf (wf.path)}
               <div class="wf-row">
@@ -614,18 +711,29 @@
                   {/if}
                 </div>
                 {#if pendingRemove?.folder === wf.path}
-                  <button class="action-btn danger" disabled={pendingRemove.tracks === null}
+                  <button class="btn btn-sm btn-danger" disabled={pendingRemove.tracks === null}
                           onclick={confirmRemoveFolder}>Entfernen</button>
-                  <button class="action-btn" onclick={() => pendingRemove = null}>Abbrechen</button>
+                  <button class="btn btn-sm" onclick={() => pendingRemove = null}>Abbrechen</button>
                 {:else}
-                  <button class="action-btn" onclick={() => askRemoveFolder(wf.path)}>Entfernen</button>
+                  <button class="btn btn-sm" onclick={() => askRemoveFolder(wf.path)}>Entfernen</button>
                 {/if}
               </div>
             {/each}
             <div class="row" style="margin-top: 6px">
               <span class="lbl"></span>
-              <button class="action-btn" onclick={addWatchedFolder}>+ Ordner hinzufügen</button>
+              <button class="btn btn-sm" onclick={addWatchedFolder}><i class="ti ti-folder-plus"></i> Ordner hinzufügen</button>
             </div>
+
+            {#if $excludedFolders.length}
+              <div class="wf-head">Ausgeschlossene Ordner</div>
+              <p class="hint">Titel aus diesen Ordnern holt die Bibliothek nicht mehr herein.</p>
+              {#each $excludedFolders as ex (ex)}
+                <div class="wf-row">
+                  <div class="wf-info"><span class="wf-path" title={ex}>{ex}</span></div>
+                  <button class="btn btn-sm" onclick={() => send({ type: 'include_folder', folder: ex })}>Wieder aufnehmen</button>
+                </div>
+              {/each}
+            {/if}
           </div>
 
           <div class="group">
@@ -633,8 +741,8 @@
             <div class="row">
               <span class="lbl">Einstellungen</span>
               <div class="row-btns">
-                <button class="action-btn" onclick={exportSettings} title="Als JSON-Datei herunterladen">↓ Exportieren</button>
-                <button class="action-btn" onclick={importSettings} title="JSON-Datei einlesen">↑ Importieren</button>
+                <button class="btn btn-sm" onclick={exportSettings} title="Als JSON-Datei herunterladen"><i class="ti ti-download"></i> Exportieren</button>
+                <button class="btn btn-sm" onclick={importSettings} title="JSON-Datei einlesen"><i class="ti ti-folder"></i> Importieren</button>
               </div>
             </div>
           </div>
@@ -645,12 +753,23 @@
             <div class="tool-row">
               <span class="tool-name">yt-dlp</span>
               <span class="tool-ver">{$toolsInfo.ytdlp_version ?? '—'}</span>
-              <button class="action-btn"
+              <button class="btn btn-sm"
                 onclick={() => send({ type: 'update_ytdlp' })}
                 disabled={!!$updateProgress}>
-                ↑ Update
+                <i class="ti ti-refresh"></i> Aktualisieren
               </button>
             </div>
+            {#if $toolUpdates.ytdlp?.available}
+              <div class="notice upd-note">
+                Neue Version {$toolUpdates.ytdlp.latest} verfügbar{$ytdlpAutoupdate ? ' — wird installiert, sobald kein Download läuft' : ''}.
+                Ältere Versionen scheitern bei YouTube früher oder später mit „403 Forbidden".
+              </div>
+            {:else if $toolUpdates.ytdlp_updated}
+              <div class="notice ok upd-note">
+                Automatisch aktualisiert: {$toolUpdates.ytdlp_updated.from} → {$toolUpdates.ytdlp_updated.to}
+                <button class="btn btn-sm" onclick={() => send({ type: 'dismiss_ytdlp_updated' })}>OK</button>
+              </div>
+            {/if}
             <div class="row">
               <span class="lbl">Automatisch aktuell halten</span>
               <button class="tog {$ytdlpAutoupdate ? 'on' : ''}"
@@ -659,7 +778,14 @@
             <div class="hint" style="margin-bottom:10px">
               Prüft einmal täglich auf eine neue yt-dlp-Version. YouTube ändert
               regelmäßig etwas, wodurch ältere Versionen Downloads mit „403 Forbidden"
-              abbrechen — ohne dass man der App ansieht, woran es liegt.
+              abbrechen — ohne dass man der App ansieht, woran es liegt. Ohne Automatik
+              gibt es stattdessen einen Hinweis (Punkt am Zahnrad).
+            </div>
+            <div class="row">
+              <span class="lbl">Auf Updates prüfen</span>
+              <button class="btn btn-sm" onclick={checkToolUpdates} disabled={toolCheckRunning}>
+                {toolCheckRunning ? 'Prüfe…' : 'Jetzt prüfen'}
+              </button>
             </div>
             <div class="tool-row">
               <span class="tool-name">ffmpeg</span>
@@ -691,13 +817,14 @@
                 <span class="url-label">URL:</span>
                 <span class="url-val" ondblclick={() => window.electron?.openPath($remoteStatus?.url)}
                       title="Doppelklick: im Browser öffnen">{$remoteStatus.url}</span>
-                <button class="copy-url-btn {urlCopied ? 'copied' : ''}" onclick={copyRemoteUrl} title="In Zwischenablage kopieren">
-                  {urlCopied ? '✓' : '⎘'}
+                <button class="btn btn-icon btn-sm" class:is-active={urlCopied} onclick={copyRemoteUrl}
+                        title="In Zwischenablage kopieren" aria-label="Adresse kopieren">
+                  <i class="ti {urlCopied ? 'ti-check' : 'ti-copy'}"></i>
                 </button>
               </div>
               <div class="remote-url-actions">
                 <span class="remote-hint">Im Handy-Browser öffnen (gleiches WLAN)</span>
-                <button class="action-btn" onclick={() => window.electron?.openPath($remoteStatus?.url)} title="Im Standard-Browser öffnen">Im Browser öffnen ↗</button>
+                <button class="btn btn-sm" onclick={() => window.electron?.openPath($remoteStatus?.url)} title="Im Standard-Browser öffnen"><i class="ti ti-external-link"></i> Im Browser öffnen</button>
               </div>
               <div class="qr-row">
                 <div class="qr-wrap">
@@ -710,26 +837,32 @@
                 </div>
               </div>
               <div class="hint" style="text-align:center;margin-bottom:8px">
-                Der rechte Code führt auf die Wunsch-Seite — dort können Gäste nur
-                Titel wünschen, nicht die Wiedergabe steuern. Zum Ausdrucken sollte
-                der Rechner im Router eine feste IP bekommen.
+                Der linke Code enthält einen geheimen Schlüssel — nur damit kommt man
+                auf die Fernbedienung. Wer den Wunsch-Link kürzt, landet wieder bei den
+                Wünschen. Der rechte Code führt auf die Wunsch-Seite. Zum Ausdrucken
+                sollte der Rechner im Router eine feste IP bekommen.
               </div>
-              <button class="action-btn danger" onclick={() => send({ type: 'remote_stop' })}>Server stoppen</button>
+              <div class="remote-url-actions">
+                <button class="btn btn-sm btn-danger" onclick={() => send({ type: 'remote_stop' })}>Server stoppen</button>
+                <button class="btn btn-sm" onclick={newRemoteKey}
+                        title="Falls der Fernbedienungs-Link in falsche Hände geraten ist">Neuen Fernbedienungs-Link</button>
+              </div>
             {:else}
               <div class="remote-status off">
                 <span class="remote-dot off"></span>
                 {$remoteStatus?.error ? 'Fehler: ' + $remoteStatus.error : 'Gestoppt'}
               </div>
-              <button class="action-btn" onclick={() => send({ type: 'remote_start' })}>Server starten</button>
+              <button class="btn btn-primary" onclick={() => send({ type: 'remote_start' })}>Server starten</button>
             {/if}
           </div>
 
           <div class="group">
             <div class="group-title">Funktionen</div>
-            <div class="info-row">📱 Aktueller Track + Steuerung (Play/Pause/Skip)</div>
-            <div class="info-row">🔊 Lautstärke regulieren</div>
-            <div class="info-row">📋 Warteschlange anzeigen, Reihenfolge ändern, Tracks entfernen</div>
-            <div class="info-row">🔍 Bibliothek durchsuchen und Tracks hinzufügen</div>
+            <div class="info-row"><i class="ti ti-player-play"></i> Laufender Titel, Play/Pause, Weiter, Spulen</div>
+            <div class="info-row"><i class="ti ti-volume"></i> Lautstärke und Normalisierung</div>
+            <div class="info-row"><i class="ti ti-list"></i> Warteschlange: umsortieren, als nächstes, jetzt mischen, entfernen</div>
+            <div class="info-row"><i class="ti ti-music"></i> Musikwünsche der Gäste annehmen oder ablehnen</div>
+            <div class="info-row"><i class="ti ti-search"></i> Bibliothek und YouTube durchsuchen, Titel einreihen</div>
           </div>
 
         <!-- ── INFO ───────────────────────────────────────────────────── -->
@@ -771,257 +904,158 @@
 <style>
   .overlay {
     position: fixed; inset: 0; z-index: 1000;
-    background: rgba(0,0,0,.72); backdrop-filter: blur(3px);
+    background: rgba(0,0,0,.6); backdrop-filter: blur(3px);
     display: flex; align-items: center; justify-content: center;
   }
-
   .panel {
-    background: var(--c-bg3); border: 1px solid var(--c-br2); border-radius: 8px;
-    width: 660px; height: min(84vh, 560px);
-    display: flex; flex-direction: column;
-    box-shadow: 0 20px 60px rgba(0,0,0,.85);
-    overflow: hidden;
+    width: min(780px, calc(100vw - 32px)); height: min(88vh, 680px);
+    background: var(--c-bg5); border: 1px solid var(--c-br2); border-radius: var(--r-l);
+    box-shadow: 0 24px 64px rgba(0,0,0,.55);
+    display: flex; flex-direction: column; overflow: hidden;
   }
 
-  /* ── Header ────────────────────────────────────────────────────────────── */
+  /* Kopf */
   .hdr {
-    display: flex; align-items: center; padding: 13px 20px;
-    border-bottom: 1px solid var(--c-br1); flex-shrink: 0;
-    background: var(--c-bg2);
+    display: flex; align-items: center; gap: var(--sp-3);
+    padding: var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-5); flex-shrink: 0;
+    border-bottom: 1px solid var(--c-br1); background: var(--c-bg2);
   }
-  .hdr-brand { display: flex; align-items: center; gap: 8px; }
-  .hdr-icon  { width: 26px; height: 26px; flex-shrink: 0; }
-  .hdr-appname { font-size: 14px; font-weight: 600; letter-spacing: 0.06em; }
-  .hdr-title {
-    font-size: 10px; font-weight: 600; letter-spacing: 1.5px; color: var(--c-tx6);
-    padding-left: 10px; margin-left: 2px; border-left: 1px solid var(--c-br2);
-  }
-  .close-btn {
-    margin-left: auto; background: none; border: none; color: var(--c-tx7);
-    font-size: 13px; cursor: pointer; padding: 4px 8px; border-radius: 3px;
-    transition: color .1s, background .1s;
-  }
-  .close-btn:hover { color: var(--c-red); background: var(--c-red-bg); }
+  .hdr-brand { display: flex; align-items: center; gap: var(--sp-2); }
+  .hdr-icon { width: 26px; height: 26px; flex-shrink: 0; }
+  .hdr-appname { font-size: var(--fs-lg); font-weight: 700; letter-spacing: .04em; }
+  .nm-synthi { color: var(--c-accent-tx); }
+  .nm-mix { color: var(--c-blue-tx); }
+  .hdr-title { font-size: var(--fs-h); font-weight: 600; color: var(--c-tx1); padding-left: var(--sp-3); border-left: 1px solid var(--c-br2); }
+  .close-btn { margin-left: auto; }
 
-  /* ── Two-column layout ─────────────────────────────────────────────────── */
-  .layout {
-    display: flex; flex: 1; overflow: hidden;
-  }
+  .layout { flex: 1; display: flex; min-height: 0; }
 
-  /* ── Tab nav ────────────────────────────────────────────────────────────── */
+  /* Tabs links */
   .tab-nav {
-    width: 130px; flex-shrink: 0;
-    background: var(--c-bg2);
-    border-right: 1px solid var(--c-br1);
-    display: flex; flex-direction: column;
-    padding: 8px 0;
+    width: 184px; flex-shrink: 0; display: flex; flex-direction: column; gap: 2px;
+    padding: var(--sp-3) var(--sp-2); background: var(--c-bg2); border-right: 1px solid var(--c-br1);
     overflow-y: auto;
   }
-
   .tab-btn {
-    display: flex; align-items: center; gap: 8px;
-    padding: 9px 14px;
-    background: none; border: none;
-    color: var(--c-tx5); font-size: 12px; text-align: left;
-    cursor: pointer; transition: background .1s, color .1s;
-    border-left: 3px solid transparent;
+    position: relative; display: flex; align-items: center; gap: var(--sp-3);
+    height: 36px; padding: 0 var(--sp-3); border: none; border-radius: var(--r-m);
+    background: none; color: var(--c-tx2); font: 600 var(--fs-body) 'Segoe UI', system-ui, sans-serif;
+    text-align: left; cursor: pointer;
   }
-  .tab-btn:hover { background: var(--c-sel); color: var(--c-tx3); }
-  .tab-btn.active {
-    background: var(--c-sel); color: var(--c-accent);
-    border-left-color: var(--c-accent);
+  .tab-btn:hover { background: var(--c-hover); color: var(--c-tx1); }
+  .tab-btn.active { background: var(--c-act-bg); color: var(--c-accent-tx); }
+  .tab-btn.active::before {
+    content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px; border-radius: 2px; background: var(--c-accent);
   }
-  .tab-icon { font-size: 13px; width: 16px; text-align: center; flex-shrink: 0; }
-  .tab-label { font-size: 11px; font-weight: 500; }
+  .tab-icon { font-size: 16px; flex-shrink: 0; }
+  .tab-label { flex: 1; }
+  .tab-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c-accent); flex-shrink: 0; }
 
-  /* ── Content area ───────────────────────────────────────────────────────── */
-  .content {
-    flex: 1; overflow-y: auto; padding: 6px 0;
-  }
-
-  .group {
-    padding: 14px 22px 16px;
-    border-bottom: 1px solid var(--c-bg2);
-  }
-  .group:last-child { border-bottom: none; }
-
+  /* Inhalt */
+  .content { flex: 1; overflow-y: auto; padding: var(--sp-4) var(--sp-5) var(--sp-6); display: flex; flex-direction: column; gap: var(--sp-5); }
+  .group { display: flex; flex-direction: column; gap: var(--sp-2); }
+  .group + .group { padding-top: var(--sp-5); border-top: 1px solid var(--c-br1); }
   .group-title {
-    font-size: 9px; font-weight: 700; letter-spacing: 1.8px;
-    color: var(--c-tx5); text-transform: uppercase; margin-bottom: 10px;
+    font-size: var(--fs-cap); font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--c-tx4); margin-bottom: 2px;
   }
+  .row { display: flex; align-items: center; gap: var(--sp-3); min-height: var(--btn-h); }
+  .row.indent { padding-left: var(--sp-4); }
+  .lbl { flex: 1; min-width: 0; font-size: var(--fs-body); color: var(--c-tx1); }
+  .val { font-size: var(--fs-body); color: var(--c-tx2); font-variant-numeric: tabular-nums; min-width: 64px; text-align: right; }
+  .val.agg { min-width: 84px; }
+  .row input[type="range"] { width: 200px; flex-shrink: 0; }
+  .row .field { width: 280px; flex-shrink: 0; }
+  .hint { font-size: var(--fs-sm); line-height: 1.5; color: var(--c-tx3); max-width: 60ch; }
+  .hint strong { color: var(--c-tx1); }
+  .dimmed { opacity: .5; }
+  .st-ok { color: var(--c-green-tx); font-weight: 600; }
+  .st-busy { color: var(--c-accent-tx); }
+  .st-muted { color: var(--c-tx4); }
+  .st-err { color: var(--c-red-tx); font-size: var(--fs-sm); text-align: left; }
+  .row-btns { display: flex; gap: var(--sp-2); }
+  .radio-group { margin-top: 2px; }
 
-  .hint {
-    font-size: 10px; color: var(--c-tx6); line-height: 1.5;
-    margin-top: 2px;
-  }
-
-  /* ── Rows ───────────────────────────────────────────────────────────────── */
-  .row {
-    display: flex; align-items: center; gap: 12px;
-    padding: 5px 0; min-height: 30px;
-  }
-  .row.indent { padding-left: 16px; }
-  .row.dimmed { opacity: 0.4; pointer-events: none; }
-
-  .lbl {
-    font-size: 12px; color: var(--c-tx4); flex: 1; min-width: 0;
-  }
-
-  .val {
-    font-size: 11px; color: var(--c-tx5);
-    min-width: 58px; text-align: right; flex-shrink: 0;
-    font-variant-numeric: tabular-nums;
-  }
-  .val.agg { min-width: 100px; }
-
-  input[type=range] {
-    width: 120px; flex-shrink: 0;
-    accent-color: var(--c-accent); height: 2px; cursor: pointer;
-  }
-
-  /* ── Pill toggle ────────────────────────────────────────────────────────── */
+  /* Schalter (Pill-Toggle) — gross genug zum Treffen */
   .tog {
-    width: 36px; height: 20px; border-radius: 10px;
-    background: var(--c-br2); border: 1px solid var(--c-br2);
-    cursor: pointer; position: relative; flex-shrink: 0;
-    transition: background .18s, border-color .18s;
+    position: relative; width: 44px; height: 24px; flex-shrink: 0; cursor: pointer;
+    border-radius: 12px; border: 1px solid var(--c-br3); background: var(--c-bg2);
+    transition: background .15s, border-color .15s;
   }
   .tog::after {
-    content: ''; position: absolute;
-    top: 3px; left: 3px;
-    width: 12px; height: 12px; border-radius: 50%;
-    background: var(--c-tx6);
-    transition: left .18s, background .18s;
+    content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%;
+    background: var(--c-tx4); transition: transform .15s, background .15s;
   }
-  .tog.on { background: var(--c-accent); border-color: var(--c-accent2); }
-  .tog.on::after { left: 19px; background: #fff; }
+  .tog.on { background: var(--c-accent); border-color: var(--c-accent); }
+  .tog.on::after { transform: translateX(20px); background: var(--c-on-accent); }
+  .tog:hover { border-color: var(--c-tx6); }
 
-  /* ── Radio groups ───────────────────────────────────────────────────────── */
-  .radio-group { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
-  .radio-opt {
-    padding: 4px 14px; border-radius: 4px;
-    border: 1px solid var(--c-br2); background: none;
-    color: var(--c-tx5); font-size: 11px; cursor: pointer;
-    transition: all .12s;
-  }
-  .radio-opt:hover { border-color: var(--c-tx7); color: var(--c-tx3); }
-  .radio-opt.active { border-color: var(--c-accent); color: var(--c-accent); background: color-mix(in srgb, var(--c-accent) 6%, transparent); }
-
-  /* Vertical radio (filename format) */
-  .radio-group.vertical { flex-direction: column; gap: 4px; margin-top: 8px; }
+  /* Auswahl mit Beispiel (Dateiname) */
+  .radio-group.vertical, .vertical { display: flex; flex-direction: column; gap: var(--sp-1); }
   .radio-opt-v {
-    display: flex; align-items: baseline; gap: 10px;
-    padding: 7px 12px; border-radius: 4px;
-    border: 1px solid var(--c-br2); background: none;
-    cursor: pointer; text-align: left; transition: all .12s;
-  }
-  .radio-opt-v:hover { border-color: var(--c-tx7); background: var(--c-sel); }
-  .radio-opt-v.active { border-color: var(--c-accent); background: color-mix(in srgb, var(--c-accent) 3%, transparent); }
-  .ro-label { font-size: 12px; color: var(--c-tx4); flex-shrink: 0; }
-  .radio-opt-v.active .ro-label { color: var(--c-accent); }
-  .ro-example { font-size: 10px; color: var(--c-tx7); font-family: monospace; }
-  .radio-opt-v.active .ro-example { color: var(--c-accent); }
-
-  /* ── Text input ─────────────────────────────────────────────────────────── */
-  .text-input {
-    flex: 1; min-width: 0; background: var(--c-bg2); border: 1px solid var(--c-br2);
-    border-radius: 3px; color: var(--c-tx2); font-size: 11px; padding: 4px 8px;
+    display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-3);
+    min-height: var(--btn-h); padding: 6px var(--sp-3); border-radius: var(--r-m);
+    border: 1px solid var(--c-br3); background: var(--c-bg5); cursor: pointer; text-align: left;
     font-family: inherit;
   }
-  .text-input:focus { outline: none; border-color: var(--c-accent); }
+  .radio-opt-v:hover { background: var(--c-hover); }
+  .radio-opt-v.active { border-color: var(--c-accent); background: var(--c-act-bg); }
+  .ro-label { font-size: var(--fs-body); font-weight: 600; color: var(--c-tx1); }
+  .radio-opt-v.active .ro-label { color: var(--c-accent-tx); }
+  .ro-example { font-family: Consolas, 'Cascadia Mono', monospace; font-size: var(--fs-sm); color: var(--c-tx3); }
 
-  /* ── Install button (inline, small) ─────────────────────────────────────── */
-  .install-btn {
-    margin-left: 8px; padding: 2px 8px; font-size: 10px; font-family: inherit;
-    background: var(--c-accent); color: #fff; border: none; border-radius: 3px;
-    cursor: pointer; transition: opacity .15s;
-  }
-  .install-btn:hover { opacity: .85; }
+  /* Checkbox mit Text */
+  .toggle-wrap, .row-toggle { display: flex; align-items: center; gap: var(--sp-2); cursor: pointer; font-size: var(--fs-body); color: var(--c-tx1); }
+  .row-toggle { justify-content: space-between; min-height: var(--btn-h); }
+  .toggle-lbl, .row-label { color: var(--c-tx1); }
+  input[type="checkbox"] { width: 16px; height: 16px; }
 
-  /* ── Action button ──────────────────────────────────────────────────────── */
-  .action-btn {
-    background: var(--c-bg5); border: 1px solid var(--c-br2); border-radius: 3px;
-    color: var(--c-tx5); font-size: 11px; padding: 4px 14px; cursor: pointer;
-    transition: border-color .1s, color .1s; flex-shrink: 0;
-  }
-  .action-btn:hover:not(:disabled) { border-color: var(--c-accent); color: var(--c-accent); }
-  .action-btn:disabled { color: var(--c-tx7); cursor: default; }
-
-  /* ── Segment buttons (Auto-Scan etc.) ───────────────────────────────────── */
-  .btn-group { display: flex; gap: 4px; flex-wrap: wrap; }
-  .seg-btn {
-    background: var(--c-bg5); border: 1px solid var(--c-br2); border-radius: 3px;
-    color: var(--c-tx5); font-size: 11px; padding: 3px 10px; cursor: pointer;
-    transition: border-color .1s, color .1s;
-  }
-  .seg-btn:hover { border-color: var(--c-accent); color: var(--c-accent); }
-  .seg-btn.active { border-color: var(--c-accent); color: var(--c-accent); background: var(--c-act-bg); }
-  .hint-text { font-size: 10px; color: var(--c-tx7); margin: 4px 0 0; }
-  .wf-head { font-size: 10px; color: var(--c-tx5); margin: 14px 0 6px; }
-  .wf-row { display: flex; align-items: center; gap: 6px; padding: 5px 0; border-top: 1px solid var(--c-br1); }
+  /* Beobachtete Ordner */
+  .wf-head { font-size: var(--fs-sm); font-weight: 700; color: var(--c-tx2); margin-top: var(--sp-3); }
+  .wf-row { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-2) 0; border-top: 1px solid var(--c-br1); }
   .wf-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-  .wf-path { font-size: 11px; color: var(--c-tx2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .wf-meta { font-size: 10px; color: var(--c-tx6); }
+  .wf-path { font-size: var(--fs-body); color: var(--c-tx1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wf-meta { font-size: var(--fs-sm); color: var(--c-tx3); }
   .wf-warn { color: var(--c-warn-tx); }
-  .wf-confirm { font-size: 10px; color: var(--c-tx3); }
-  .toggle-wrap { display: flex; align-items: center; gap: 7px; cursor: pointer; }
-  .toggle-wrap input[type=checkbox] { accent-color: var(--c-accent); width: 14px; height: 14px; cursor: pointer; }
-  .toggle-lbl { font-size: 11px; color: var(--c-tx4); }
-  .row-btns { display: flex; gap: 6px; }
+  .wf-confirm { font-size: var(--fs-sm); color: var(--c-tx2); }
 
-  /* ── Tools ──────────────────────────────────────────────────────────────── */
-  .tool-row {
-    display: flex; align-items: center; gap: 10px; padding: 5px 0; font-size: 11px;
-  }
-  .tool-name { color: var(--c-tx4); width: 56px; flex-shrink: 0; }
-  .tool-ver  { color: var(--c-tx6); flex: 1; font-family: monospace; font-size: 10px; }
-  .upd-status { font-size: 10px; color: var(--c-accent); padding: 6px 0; }
+  /* Tools */
+  .tool-row { display: flex; align-items: center; gap: var(--sp-3); min-height: var(--btn-h); }
+  .tool-name { width: 72px; font-size: var(--fs-body); font-weight: 600; color: var(--c-tx1); }
+  .tool-ver { flex: 1; font-family: Consolas, 'Cascadia Mono', monospace; font-size: var(--fs-sm); color: var(--c-tx3); }
+  .upd-note { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+  .upd-status { font-size: var(--fs-sm); color: var(--c-accent-tx); }
 
-  /* ── Shortcuts table ────────────────────────────────────────────────────── */
-  .shortcuts {
-    width: 100%; border-collapse: collapse; margin-top: 4px;
-  }
-  .shortcuts td {
-    padding: 5px 8px; font-size: 11px; border-bottom: 1px solid var(--c-bg2);
-    vertical-align: middle;
-  }
-  .shortcuts tr:last-child td { border-bottom: none; }
-  .shortcuts td:first-child {
-    color: var(--c-tx4); font-family: monospace; font-size: 10px;
-    white-space: nowrap; width: 140px;
-    background: var(--c-bg); border-radius: 3px; padding: 4px 8px;
-  }
-  .shortcuts td:last-child { color: var(--c-tx5); padding-left: 14px; }
+  /* Darstellung */
+  .key-samples { display: flex; gap: var(--sp-2); flex-wrap: wrap; font-size: var(--fs-body); }
 
-  /* ── Remote Tab ─────────────────────────────────────────────────────────── */
-  .remote-desc { font-size: 11px; color: var(--c-tx5); line-height: 1.6; margin-bottom: 10px; }
-  .remote-status { display: flex; align-items: center; gap: 7px; font-size: 12px; margin-bottom: 10px; }
+  /* Remote */
+  .remote-desc { font-size: var(--fs-sm); line-height: 1.5; color: var(--c-tx3); max-width: 60ch; }
+  .remote-status { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-body); font-weight: 600; }
   .remote-status.on { color: var(--c-green-tx); }
-  .remote-status.off { color: var(--c-tx5); }
-  .remote-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .remote-dot.on  { background: var(--c-green-tx); }
+  .remote-status.off { color: var(--c-tx3); }
+  .remote-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .remote-dot.on { background: var(--c-green-tx); }
   .remote-dot.off { background: var(--c-tx6); }
-  .remote-url { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-  .url-label { font-size: 10px; color: var(--c-tx5); flex-shrink: 0; }
-  .url-val   { font-size: 13px; color: var(--c-blue); font-family: monospace; font-weight: 600; flex: 1; }
-  .copy-url-btn {
-    background: var(--c-bg5); border: 1px solid var(--c-br2); border-radius: 3px;
-    color: var(--c-tx5); font-size: 13px; width: 26px; height: 22px;
-    cursor: pointer; display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0; transition: border-color .1s, color .1s;
+  .remote-url {
+    display: flex; align-items: center; gap: var(--sp-2);
+    padding: 6px 6px 6px var(--sp-3); border-radius: var(--r-m); background: var(--c-bg2); border: 1px solid var(--c-br2);
   }
-  .copy-url-btn:hover { border-color: var(--c-tx5); color: var(--c-tx3); }
-  .copy-url-btn.copied { border-color: var(--c-green); color: var(--c-green-tx); }
-  .remote-url-actions { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-  .remote-hint { font-size: 10px; color: var(--c-tx6); }
-  .url-val { cursor: default; }
-  .url-val:hover { color: var(--c-tx2); }
-  .qr-row { display: flex; justify-content: center; gap: 22px; }
-  .qr-wrap { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 12px 0 8px; }
-  .qr-canvas { border-radius: 6px; border: 1px solid var(--c-br2); }
-  .qr-hint { font-size: 9px; color: var(--c-tx6); letter-spacing: .06em; }
-  .action-btn.danger { border-color: var(--c-red); color: var(--c-red); }
-  .action-btn.danger:hover { border-color: var(--c-red); color: var(--c-red); }
-  .info-row { font-size: 12px; color: var(--c-tx5); padding: 5px 0; border-bottom: 1px solid var(--c-br1); }
-  .info-row:last-child { border-bottom: none; }
+  .url-label { font-size: var(--fs-sm); color: var(--c-tx4); }
+  .url-val { flex: 1; min-width: 0; font-family: Consolas, 'Cascadia Mono', monospace; font-size: var(--fs-body); color: var(--c-blue-tx); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; }
+  .remote-url-actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+  .remote-hint { flex: 1; font-size: var(--fs-sm); color: var(--c-tx3); }
+  .qr-row { display: flex; justify-content: center; gap: var(--sp-5); flex-wrap: wrap; padding: var(--sp-2) 0; }
+  .qr-wrap { display: flex; flex-direction: column; align-items: center; gap: var(--sp-2); }
+  .qr-canvas { border-radius: var(--r-m); background: #fff; }
+  .qr-hint { font-size: var(--fs-cap); font-weight: 700; letter-spacing: .08em; color: var(--c-tx3); }
+  .info-row { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-body); color: var(--c-tx2); }
+  .info-row .ti { font-size: 16px; color: var(--c-tx4); }
+
+  /* Tastenkuerzel */
+  .shortcuts { border-collapse: collapse; font-size: var(--fs-body); }
+  .shortcuts td { padding: 6px var(--sp-3) 6px 0; border-bottom: 1px solid var(--c-br1); color: var(--c-tx2); }
+  .shortcuts td:first-child {
+    font-weight: 600; color: var(--c-tx1); white-space: nowrap;
+  }
 </style>

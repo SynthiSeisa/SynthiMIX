@@ -1,7 +1,8 @@
 <script>
   import { get } from 'svelte/store'
   import { untrack, onMount } from 'svelte'
-  import { keyCompat, keyTitle } from '../lib/keys.js'
+  import { keyCompat } from '../lib/keys.js'
+  import KeyChip from './KeyChip.svelte'
   import { library, playerState, nowPlaying, queue, waveform, waveformNext, settings, playMode, send, autoMixEnabled, appSettings, introSkipPaths, skipNextCrossfade, livePositionMs } from '../stores/ws.js'
   import Waveform from './Waveform.svelte'
 
@@ -282,15 +283,54 @@
     outroBarStart >= 0 ? Math.min(1, outroBarStart + _cfFrac) : -1
   )
 
-  const nextTrackIdx = $derived.by(() => {
-    const ci  = $playerState.current_idx
-    const n   = $queue.length
-    const rep = $playMode.repeat
-    if (!n) return -1
-    const nxt = ci + 1
-    if (nxt < n) return nxt
-    if (rep === 2) return 0
+  // ── Welcher Titel kommt als naechstes ─────────────────────────────────────
+  // Eine Stelle fuer Anzeige, Vorbereitung und tatsaechliches Abspielen.
+  // Vorher zeigte "NAECHSTER" bei Zufallswiedergabe ci+1, gespielt wurde aber
+  // ein anderer, bei jedem Aufruf neu ausgewuerfelter Titel.
+  let badPaths   = new Set()          // Dateien, die sich nicht abspielen liessen
+  let badVersion = $state(0)          // macht Aenderungen an badPaths sichtbar
+  let shufflePickPath = $state('')
+  let _shuffleFor = null
+
+  function _pickShuffle(q, ci) {
+    const cand  = [...q.keys()].filter(i => i !== ci && !badPaths.has(q[i]?.path))
+    const fresh = cand.filter(i => !q[i].played)
+    const pool  = fresh.length ? fresh : cand
+    return pool.length ? q[pool[Math.floor(Math.random() * pool.length)]].path : ''
+  }
+
+  $effect(() => {
+    const q = $queue, ci = $playerState.current_idx, on = $playMode.shuffle
+    void badVersion
+    untrack(() => {
+      if (!on) { shufflePickPath = ''; _shuffleFor = null; return }
+      const curPath = q[ci]?.path ?? ''
+      const pickOk = shufflePickPath && !badPaths.has(shufflePickPath) &&
+                     q.some((t, i) => i !== ci && t.path === shufflePickPath)
+      if (curPath !== _shuffleFor || !pickOk) {
+        _shuffleFor = curPath
+        shufflePickPath = _pickShuffle(q, ci)
+      }
+    })
+  })
+
+  function _computeNext(q, ci, pm, pick) {
+    if (!q.length) return -1
+    if (pm.repeat === 1 && ci >= 0 && ci < q.length) return ci
+    if (pm.shuffle) return pick ? q.findIndex((t, i) => i !== ci && t.path === pick) : -1
+    let nxt = ci + 1
+    while (nxt < q.length && badPaths.has(q[nxt]?.path)) nxt++
+    if (nxt < q.length) return nxt
+    if (pm.repeat === 2) {
+      const first = q.findIndex(t => !badPaths.has(t.path))
+      return first
+    }
     return -1
+  }
+
+  const nextTrackIdx = $derived.by(() => {
+    void badVersion
+    return _computeNext($queue, $playerState.current_idx, $playMode, shufflePickPath)
   })
   // Tonart aus der Bibliothek, nicht aus dem Queue-Eintrag (der traegt sie nicht)
   const keyByPath = $derived(new Map($library.filter(t => t.key).map(t => [t.path, t])))
@@ -359,11 +399,12 @@
     if (forceImmediate) skipNextCrossfade.set(false)
 
     loadedUrl = url
+    waitForNext = false
 
     if (wasPlaying && cf > 0 && !forceImmediate) {
       cfCancelled = false
       cfRafActive = true
-      a.src = url; a.volume = 0; a.load(); a.play().catch(() => {})
+      a.src = url; a.dataset.path = track.path; a.volume = 0; a.load(); a.play().catch(() => {})
       setElLufs(a, track.lufs ?? -99)
       which = untrack(() => which) === 'A' ? 'B' : 'A'
 
@@ -403,7 +444,7 @@
       if (oldAlt) _silenceAndStop(oldAlt)
       const el = untrack(cur)
       if (el) {
-        el.src = url; el.volume = v; el.load(); setElLufs(el, track.lufs ?? -99)
+        el.src = url; el.dataset.path = track.path; el.volume = v; el.load(); setElLufs(el, track.lufs ?? -99)
         if (untrack(() => $playerState.playing)) el.play().catch(() => {})
       }
     }
@@ -473,19 +514,7 @@
   })
 
   function _nextIdx() {
-    const pm = get(playMode)
-    const q  = get(queue)
-    const ci = get(playerState).current_idx
-    if (!q.length) return -1
-    if (pm.repeat === 1) return ci
-    if (pm.shuffle) {
-      const pool = [...q.keys()].filter(i => i !== ci)
-      return pool.length
-        ? pool[Math.floor(Math.random() * pool.length)]
-        : (pm.repeat === 2 ? ci : -1)
-    }
-    const nxt = ci + 1
-    return nxt < q.length ? nxt : (pm.repeat === 2 ? 0 : -1)
+    return _computeNext(get(queue), get(playerState).current_idx, get(playMode), shufflePickPath)
   }
 
   // ── Auto-crossfade ─────────────────────────────────────────────────────────
@@ -540,6 +569,7 @@
     const introFrac = _getNextIntroStart()
 
     inactive.src = nextUrl
+    inactive.dataset.path = nextTrk.path
     inactive.load()
 
     inactive.addEventListener('canplay', function onCanPlay() {
@@ -677,11 +707,86 @@
     const nxt = _nextIdx()
     if (nxt >= 0) {
       send({ type: 'play_at', index: nxt })
-    } else if (get(autoMixEnabled)) {
+    } else {
+      _queueRanOut()
+    }
+    posMs = 0
+  }
+
+  // ── Ende der Warteschlange ─────────────────────────────────────────────────
+  // Ist der letzte Titel zu Ende, bevor Auto-Mix oder Radio etwas angehaengt
+  // haben, wurde der neue Titel frueher zwar eingereiht, aber nie gestartet —
+  // es blieb still, bis jemand auf Play drueckte.
+  let waitForNext = $state(false)
+  function _queueRanOut() {
+    waitForNext = true
+    if (get(autoMixEnabled)) {
       const t = get(nowPlaying)
       if (t?.title) send({ type: 'automix_trigger', title: t.title })
     }
-    posMs = 0
+  }
+  $effect(() => {
+    const idx = nextTrackIdx
+    if (!waitForNext || idx < 0 || !$playerState.playing) return
+    untrack(() => {
+      waitForNext = false
+      skipNextCrossfade.set(true)     // der alte Titel ist schon zu Ende
+      send({ type: 'play_at', index: idx })
+    })
+  })
+
+  // ── Nicht abspielbare Dateien ─────────────────────────────────────────────
+  // Ohne das hier blendete der Crossfade in eine fehlende oder kaputte Datei
+  // ueber — danach war es still, denn ein fehlerhaftes <audio> meldet nie
+  // "ended". Jetzt wird die Datei uebersprungen und der naechste Titel genommen.
+  let playerNotice = $state('')
+  let _noticeTimer = null
+  function _notice(text) {
+    playerNotice = text
+    clearTimeout(_noticeTimer)
+    _noticeTimer = setTimeout(() => playerNotice = '', 10000)
+  }
+
+  function onMediaError(e) {
+    const el = e.target
+    const path = el.dataset.path
+    if (!el.getAttribute('src') || !path) return        // absichtlich geleert
+    badPaths.add(path); badVersion++
+    const name = path.split(/[\\/]/).pop()
+    _notice(`„${name}" lässt sich nicht abspielen — übersprungen`)
+    console.warn('[player] nicht abspielbar:', path, el.error)
+
+    if (el === alt() && cfActive) {
+      // Automatischer Crossfade in die kaputte Datei: abbrechen, der aktuelle
+      // Titel laeuft weiter; der naechste Versuch nimmt den Titel danach.
+      if (cfTimer) { clearInterval(cfTimer); cfTimer = null }
+      cfCancelled = true; cfActive = false; cfNextIdx = -1
+      const c = cur(); if (c) c.volume = volume / 100
+      _silenceAndStop(el)
+      return
+    }
+    if (el !== cur()) return
+
+    if (cfRaf !== null) {
+      // Manueller Mix in die kaputte Datei: der alte Titel spielt noch und
+      // bekommt die volle Lautstaerke zurueck, dann weiter zum naechsten.
+      cancelAnimationFrame(cfRaf); cfRaf = null; cfRafActive = false
+      const old = alt()
+      which = which === 'A' ? 'B' : 'A'
+      if (old) { old.volume = volume / 100; loadedUrl = old.getAttribute('src') ?? '' }
+      _silenceAndStop(el)
+      const nxt = _nextIdx()
+      if (nxt >= 0) send({ type: 'play_at', index: nxt })
+      return
+    }
+
+    const nxt = _nextIdx()
+    if (nxt >= 0) {
+      skipNextCrossfade.set(true)
+      send({ type: 'play_at', index: nxt })
+    } else {
+      _queueRanOut()
+    }
   }
 
   function playPrev() {
@@ -710,6 +815,13 @@
   }
 
 
+  // Mausrad am Fader: 2er-Schritte, genauer als Ziehen am kurzen Regler
+  function onVolWheel(e) {
+    e.preventDefault()
+    const v = Math.max(0, Math.min(100, volume + (e.deltaY < 0 ? 2 : -2)))
+    if (v !== volume) setVolume(v)
+  }
+
   function setCrossfade(v) {
     cfS = +v
     send({ type: 'set_crossfade', seconds: cfS })
@@ -718,38 +830,56 @@
   const pos = $derived(durMs > 0 ? posMs / durMs : 0)
 
   let centerH = $state(110)
+  let deckH   = $state(0)
 </script>
 
-<audio bind:this={elA} ontimeupdate={onTimeUpdate} onloadedmetadata={onLoadedMetadata} onended={onEnded}></audio>
-<audio bind:this={elB} ontimeupdate={onTimeUpdate} onloadedmetadata={onLoadedMetadata} onended={onEnded}></audio>
+<audio bind:this={elA} ontimeupdate={onTimeUpdate} onloadedmetadata={onLoadedMetadata} onended={onEnded} onerror={onMediaError}></audio>
+<audio bind:this={elB} ontimeupdate={onTimeUpdate} onloadedmetadata={onLoadedMetadata} onended={onEnded} onerror={onMediaError}></audio>
 
 <div class="player">
-  <div class="player-row" style="--player-h:{centerH}px">
+  <div class="player-row" style="--player-h:{Math.max(centerH, deckH)}px">
 
-    <div class="art">
-      {#if $nowPlaying?.art}
-        <img src={$nowPlaying.art} alt="" />
-      {:else}
-        <span class="art-ph">♫</span>
-      {/if}
+    <!-- Cover und Transport-Knoepfe teilen sich eine Spalte: spart die eigene Knopfzeile -->
+    <div class="deck" bind:clientHeight={deckH}>
+      <div class="art">
+        {#if $nowPlaying?.art}
+          <img src={$nowPlaying.art} alt="" />
+        {:else}
+          <i class="ti ti-music art-ph" aria-hidden="true"></i>
+        {/if}
+      </div>
+      <div class="controls">
+        <button class="btn btn-icon" onclick={playPrev} title="Zurück" aria-label="Zurück"><i class="ti ti-player-track-prev"></i></button>
+        <button class="play" onclick={() => send({ type: $playerState.playing ? 'pause' : 'resume' })}
+                title={$playerState.playing ? 'Pause' : 'Abspielen'} aria-label={$playerState.playing ? 'Pause' : 'Abspielen'}>
+          <i class="ti {$playerState.playing ? 'ti-player-pause-filled' : 'ti-player-play-filled'}"></i>
+        </button>
+        <button class="btn btn-icon" onclick={() => { const n = _nextIdx(); if (n >= 0) send({ type: 'play_at', index: n }) }}
+                title="Weiter" aria-label="Weiter"><i class="ti ti-player-track-next"></i></button>
+      </div>
     </div>
 
     <div class="center" bind:clientHeight={centerH}>
       <div class="track-info">
         <span class="title">{$nowPlaying?.title ?? '—'}</span>
-        {#if $nowPlaying?.artist}
-          <span class="artist">{$nowPlaying.artist}</span>
-        {/if}
         <span class="meta">
+          {#if $nowPlaying?.artist}<span class="artist">{$nowPlaying.artist}</span>{/if}
+          {#if curKey}<KeyChip key={curKey.key} src={curKey.key_src} />{/if}
+          {#if $nowPlaying?.bpm}<span class="m-num">{$nowPlaying.bpm} BPM</span>
+          {:else if $nowPlaying}<span class="bpm-pending">BPM wird gemessen…</span>{/if}
+          <!-- Normalisierung wird in den Einstellungen geschaltet; hier nur der Stand -->
           {#if $nowPlaying?.lufs && $nowPlaying.lufs > -90}
-            <span>{$nowPlaying.lufs.toFixed(1)} LUFS</span>
+            {#if $appSettings.normalizeVolume}
+              <span class="m-num norm-on" title="Lautstärke-Angleichung an: {$nowPlaying.lufs.toFixed(1)} LUFS wird auf {$appSettings.targetLUFS} LUFS gebracht (Einstellungen → Wiedergabe)"><b>≋</b> {$nowPlaying.lufs.toFixed(1)} → {$appSettings.targetLUFS} LUFS</span>
+            {:else}
+              <span class="m-num" title="Lautstärke-Angleichung aus (Einstellungen → Wiedergabe)">{$nowPlaying.lufs.toFixed(1)} LUFS</span>
+            {/if}
           {:else if $appSettings.normalizeVolume && $nowPlaying}
-            <span class="lufs-warn" title="Keine Lautstärkemessung — Normalisierung nicht aktiv für diesen Track">⚠ kein LUFS</span>
+            <span class="lufs-warn" title="Keine Lautstärkemessung — Normalisierung nicht aktiv für diesen Track">kein LUFS-Wert</span>
           {/if}
-          {#if curKey}<span class="{curKey.key_src === 'analyse' ? 'key-est' : ''}" title={keyTitle(curKey.key, curKey.key_src)}>{curKey.key}</span>{/if}
-          {#if $nowPlaying?.bpm}<span>{$nowPlaying.bpm} BPM</span>
-          {:else if $nowPlaying}<span class="bpm-pending">BPM…</span>{/if}
-          {#if $nowPlaying?.play_count}<span>×{$nowPlaying.play_count}</span>{/if}
+          {#if $nowPlaying?.play_count}<span class="m-num" title="So oft gespielt">×{$nowPlaying.play_count}</span>{/if}
+          {#if playerNotice}<span class="lufs-warn" role="status"><i class="ti ti-alert-triangle"></i> {playerNotice}</span>{/if}
+          <span class="time"><b>{fmt(posMs)}</b> / {fmt(durMs)}</span>
         </span>
       </div>
 
@@ -759,197 +889,104 @@
 
       {#if nextTrack}
         <div class="next-bar">
-          <span class="next-arrow">↓</span>
-          <span class="next-label">NÄCHSTER</span>
+          <span class="eyebrow next-label">Nächster</span>
           <span class="next-title">{nextTrack.title}{nextTrack.artist ? ' · ' + nextTrack.artist : ''}</span>
           {#if nextKey}
-            <span class="next-key next-key-{uebergang.level} {nextKey.key_src === 'analyse' ? 'key-est' : ''}"
-                  title={keyTitle(nextKey.key, nextKey.key_src) + (uebergang.label ? ' · ' + uebergang.label : '')}>
-              {uebergang.level === 'clash' ? '⚠ ' : uebergang.level === 'unknown' ? '' : '✓ '}{nextKey.key}
-            </span>
+            <KeyChip key={nextKey.key} src={nextKey.key_src} compat={uebergang.level === 'unknown' ? null : uebergang} hint="Übergang: " />
           {/if}
           <span class="next-dur">{fmt(nextTrack.duration_sec * 1000)}</span>
         </div>
         <Waveform data={$waveformNext} position={0} introStart={nextIntroStart} introEnd={nextIntroEnd} height={20} />
       {/if}
-
-      <div class="controls">
-        <button class="ctrl" onclick={playPrev} title="Zurück">⏮</button>
-        <button class="play" onclick={() => send({ type: $playerState.playing ? 'pause' : 'resume' })}>
-          {$playerState.playing ? '⏸' : '▶'}
-        </button>
-        <button class="ctrl" onclick={() => { const n = _nextIdx(); if (n >= 0) send({ type: 'play_at', index: n }) }} title="Weiter">⏭</button>
-        <span class="time">{fmt(posMs)}</span>
-        <span class="time-sep">/</span>
-        <span class="time">{fmt(durMs)}</span>
-
-        <button class="ctrl {$appSettings.normalizeVolume ? 'active' : ''}"
-                onclick={() => appSettings.update(s => ({...s, normalizeVolume: !s.normalizeVolume}))}
-                title={$appSettings.normalizeVolume ? 'Normalisierung ein' : 'Normalisierung aus'}>≋</button>
-        {#if $appSettings.normalizeVolume}
-          <input class="lufs-sl" type="range" min="-23" max="-8" step="1"
-                 value={$appSettings.targetLUFS}
-                 oninput={(e) => appSettings.update(s => ({...s, targetLUFS: +e.target.value}))}
-                 title="Ziel-LUFS" />
-          <span class="lufs-val">{$appSettings.targetLUFS}L</span>
-        {/if}
-      </div>
     </div>
 
-    <!-- Vertical volume fader -->
-    <div class="right">
-      <!-- Fader -->
-      <div class="mixer-fader">
-        <div class="fdr-marks">
-          <span>∞</span><span>75</span><span>50</span><span>25</span><span>0</span>
-        </div>
-        <div class="fdr-slot">
-          <div class="fdr-groove"></div>
-          <input type="range" class="fdr-input" min="0" max="100" value={volume}
-                 onmousedown={() => _volDragging = true}
-                 onmouseup={() => { _volDragging = false }}
-                 ontouchstart={() => _volDragging = true}
-                 ontouchend={() => { _volDragging = false }}
-                 oninput={(e) => setVolume(e.target.value)} />
-        </div>
-        <div class="fdr-info">
-          <span class="fdr-val">{volume}</span>
-          <span class="fdr-lbl">VOL</span>
-        </div>
+    <!-- Schmaler Lautstaerke-Fader; Mausrad fuer feine Schritte -->
+    <div class="right" onwheel={onVolWheel}>
+      <span class="fdr-val" aria-hidden="true">{volume}</span>
+      <div class="fdr-slot">
+        <div class="fdr-groove"><div class="fdr-fill" style="height:{volume}%"></div></div>
+        <input type="range" class="fdr-input" min="0" max="100" value={volume} aria-label="Lautstärke"
+               title="Lautstärke {volume} — Mausrad für feine Schritte"
+               onmousedown={() => _volDragging = true}
+               onmouseup={() => { _volDragging = false }}
+               ontouchstart={() => _volDragging = true}
+               ontouchend={() => { _volDragging = false }}
+               oninput={(e) => setVolume(e.target.value)} />
       </div>
+      <span class="eyebrow">Vol</span>
     </div>
   </div>
 </div>
 
 <style>
-  .player {
-    display: flex; flex-direction: column;
-    padding: 8px 16px 6px;
-    background: var(--c-bg); flex-shrink: 0;
-  }
-  .player-row { display: flex; align-items: flex-start; gap: 16px; padding-bottom: 2px; }
+  .player { display: flex; flex-direction: column; padding: var(--sp-3) var(--sp-4) var(--sp-2); background: var(--c-bg); flex-shrink: 0; }
+  .player-row { display: flex; align-items: flex-start; gap: var(--sp-4); }
 
+  .deck { display: flex; flex-direction: column; align-items: center; gap: 6px; flex-shrink: 0; }
   .art {
-    width: 72px; height: 72px; border-radius: 4px;
-    background: var(--c-bg3); flex-shrink: 0; align-self: flex-start; margin-top: 2px;
+    width: 88px; height: 88px; border-radius: var(--r-m); flex-shrink: 0;
+    background: var(--c-bg5); border: 1px solid var(--c-br1);
     display: flex; align-items: center; justify-content: center; overflow: hidden;
   }
   .art img { width: 100%; height: 100%; object-fit: cover; }
-  .art-ph  { font-size: 24px; color: var(--c-tx7); }
+  .art-ph { font-size: 32px; color: var(--c-tx6); }
 
-  .center { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; padding-top: 2px; }
-  .track-info { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .center { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+  .track-info { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
   .title {
-    font-size: 14px; font-weight: 600; color: var(--c-tx1);
+    font-size: var(--fs-xl); font-weight: 700; color: var(--c-tx1); line-height: 1.2;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  .artist {
-    font-size: 11px; color: var(--c-tx4);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .meta { display: flex; gap: 10px; font-size: 11px; color: var(--c-tx5); flex-shrink: 0; flex-wrap: wrap; }
-  .meta span:first-child::before { content: ''; }
-  .meta span::before { content: '· '; }
-  .bpm-pending { color: var(--c-tx7) !important; font-style: italic; }
-  .lufs-warn { color: var(--c-warn-tx) !important; font-style: italic; }
-  .controls { display: flex; align-items: center; gap: 6px; }
-  .ctrl {
-    background: none; border: none; color: var(--c-tx4); font-size: 14px;
-    cursor: pointer; width: 28px; height: 28px; border-radius: 4px;
-    transition: color .15s, background .15s; flex-shrink: 0;
-  }
-  .ctrl:hover  { color: var(--c-tx2); background: var(--c-br2); }
-  .ctrl.active { color: var(--c-accent); background: var(--c-act-bg); }
+  .meta { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; font-size: var(--fs-body); color: var(--c-tx3); }
+  .artist { color: var(--c-tx2); font-weight: 600; }
+  .m-num { font-variant-numeric: tabular-nums; }
+  .bpm-pending { color: var(--c-tx5); font-style: italic; }
+  .lufs-warn { color: var(--c-warn-tx); display: inline-flex; align-items: center; gap: 4px; }
+
+  .next-bar { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+  .next-label { flex-shrink: 0; }
+  .next-title { flex: 1; min-width: 0; font-size: var(--fs-body); color: var(--c-tx2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .next-dur { flex-shrink: 0; font-size: var(--fs-sm); color: var(--c-tx3); font-variant-numeric: tabular-nums; }
+
+  .controls { display: flex; align-items: center; gap: var(--sp-1); }
+  .norm-on b { color: var(--c-accent-tx); font-weight: 700; }
   .play {
-    width: 38px; height: 38px; border-radius: 50%;
-    border: 2px solid var(--c-accent); background: none; color: var(--c-accent);
-    font-size: 15px; cursor: pointer;
+    width: 48px; height: 48px; border-radius: 50%; flex-shrink: 0;
+    border: none; background: var(--c-accent); color: var(--c-on-accent);
+    font-size: 22px; cursor: pointer;
     display: flex; align-items: center; justify-content: center;
-    transition: background .15s; flex-shrink: 0;
+    transition: background .12s, transform .08s;
   }
-  .play:hover { background: color-mix(in srgb, var(--c-accent) 13%, transparent); }
-  .time     { font-size: 11px; color: var(--c-tx5); font-variant-numeric: tabular-nums; }
-  .time-sep { color: var(--c-tx6); font-size: 11px; }
+  .play:hover { background: var(--c-accent2); }
+  .play:active { transform: scale(.96); }
+  :global([data-density="comfortable"]) .play { width: 56px; height: 56px; font-size: 26px; }
+  .time { margin-left: auto; font-size: var(--fs-body); color: var(--c-tx3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .time b { color: var(--c-tx1); font-weight: 600; }
 
-  .lufs-sl  { width: 56px; accent-color: var(--c-accent); height: 2px; cursor: pointer; flex-shrink: 0; }
-  .lufs-val { font-size: 10px; color: var(--c-accent); min-width: 26px; flex-shrink: 0; }
-
+  /* ── Lautstaerke-Fader: schmal, Wert oben, Fuellung zeigt den Pegel ─────── */
   .right {
-    display: flex; align-items: stretch; gap: 8px; flex-shrink: 0;
-    padding: 2px 14px 2px 0;
-    /* Match the center column height without stretching to full window */
-    height: var(--player-h, 110px);
+    display: flex; flex-direction: column; align-items: center; gap: 4px; flex-shrink: 0;
+    width: 36px; height: var(--player-h, 120px);
   }
-
-  /* Mixer fader */
-  .mixer-fader { display: flex; gap: 5px; align-items: stretch; }
-
-  .fdr-marks {
-    display: flex; flex-direction: column; justify-content: space-between;
-    align-items: flex-end; flex: 1;
-  }
-  .fdr-marks span { font-size: 9px; color: var(--c-tx6); line-height: 1; }
-
-  .fdr-slot {
-    position: relative; width: 34px; flex: 1;
-    display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0;
-  }
+  .fdr-val { font-size: var(--fs-body); font-weight: 700; color: var(--c-tx1); font-variant-numeric: tabular-nums; line-height: 1; }
+  .fdr-slot { position: relative; flex: 1; min-height: 0; width: 28px; display: flex; justify-content: center; }
   .fdr-groove {
-    position: absolute;
-    width: 3px; top: 5px; bottom: 5px;
-    background: linear-gradient(to bottom, var(--c-br3) 0%, var(--c-bg4) 35%);
-    border-radius: 2px;
-    box-shadow: inset 0 1px 4px rgba(0,0,0,.9), 0 0 4px rgba(0,80,120,.3);
-    pointer-events: none;
+    position: absolute; width: 4px; top: 6px; bottom: 6px; border-radius: 2px; pointer-events: none;
+    background: var(--c-br2); display: flex; align-items: flex-end; overflow: hidden;
   }
-
+  .fdr-fill { width: 100%; background: var(--c-accent); border-radius: 2px; }
   .fdr-input {
-    -webkit-appearance: none;
-    writing-mode: vertical-lr;
-    direction: rtl;
-    width: 34px; height: 100%;
-    background: transparent;
-    cursor: grab;
-    position: relative; z-index: 1;
-    padding: 0; margin: 0;
+    -webkit-appearance: none; writing-mode: vertical-lr; direction: rtl;
+    width: 28px; height: 100%; background: transparent; cursor: grab;
+    position: relative; z-index: 1; padding: 0; margin: 0;
   }
   .fdr-input:active { cursor: grabbing; }
-  .fdr-input::-webkit-slider-runnable-track {
-    width: 3px;
-    background: transparent;
-    border-radius: 2px;
-  }
+  .fdr-input::-webkit-slider-runnable-track { width: 4px; background: transparent; border-radius: 2px; }
   .fdr-input::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    width: 32px; height: 10px;
-    background: linear-gradient(to right,
-      #c0d0e4 0%, #8aa0be 30%,
-      #6080a0 47%, #101828 50%,
-      #6080a0 53%, #8aa0be 70%,
-      #c0d0e4 100%);
-    border: 1px solid var(--c-tx4);
-    border-radius: 2px;
-    box-shadow: 0 2px 6px rgba(0,0,0,.8), inset 0 1px 0 rgba(255,255,255,.1);
-    margin-left: -15px;
+    -webkit-appearance: none; width: 24px; height: 12px; margin-left: -10px;
+    background: var(--c-tx1); border: 1px solid var(--c-br3); border-radius: var(--r-s);
+    box-shadow: 0 1px 4px rgba(0,0,0,.45), inset 0 -1px 0 var(--c-br3);
   }
-
-  .fdr-info { display: flex; flex-direction: column; align-items: center; gap: 1px; }
-  .fdr-val  { font-size: 10px; color: var(--c-tx5); font-variant-numeric: tabular-nums; }
-  .fdr-lbl  { font-size: 8px; color: var(--c-tx7); text-transform: uppercase; letter-spacing: .1em; }
-
+  .fdr-input:focus-visible { outline: 2px solid var(--c-focus); outline-offset: 2px; border-radius: var(--r-s); }
   input[type=range] { cursor: pointer; }
-
-  .next-bar {
-    display: flex; flex-direction: row; align-items: center;
-    gap: 6px; margin-top: 1px;
-  }
-  .next-arrow { font-size: 10px; color: var(--c-accent); flex-shrink: 0; }
-  .next-label { font-size: 9px; font-weight: 700; letter-spacing: .08em; color: var(--c-tx5); text-transform: uppercase; flex-shrink: 0; }
-  .next-title { flex: 1; font-size: 11px; color: var(--c-tx4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .next-dur   { font-size: 10px; color: var(--c-tx5); font-variant-numeric: tabular-nums; flex-shrink: 0; }
-  .next-key { font-size: 9px; color: var(--c-tx5); flex-shrink: 0; margin-left: 6px; }
-  .next-key-same, .next-key-good { color: var(--c-green-tx); }
-  .next-key-clash { color: var(--c-warn-tx); }
-  .key-est { font-style: italic; opacity: .75; }
 </style>

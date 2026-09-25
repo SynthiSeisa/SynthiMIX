@@ -1,0 +1,224 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   SynthiMIX Grundsystem (September 2026)
+
+   Farben stehen als Tokens in App.svelte (:root und [data-theme="light"]).
+   Hier liegt alles, was fuer beide Themes gleich ist: Schrift-, Abstands- und
+   Radius-Skala, die Dichte (Kompakt / Komfortabel), das Knopf-System, der
+   Tastatur-Fokus und die Tonart-Chips.
+
+   Regeln:
+   - Keine Schrift unter 11px. 11px nur fuer Grossbuchstaben-Etiketten und Zaehler.
+   - Jede Schriftfarbe erreicht auf jeder Flaeche mindestens 4,5 : 1.
+   - Neue Knoepfe nur ueber .btn und seine Varianten — keine eigenen Klassen.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* Schrift */
+  --fs-cap:  11px;   /* Etiketten in Grossbuchstaben, Zaehler */
+  --fs-sm:   12px;   /* Hinweise, Metadaten */
+  --fs-body: 13px;   /* Standard */
+  --fs-lg:   14px;   /* Hervorgehobenes, Queue-Titel */
+  --fs-h:    16px;   /* Dialogtitel */
+  --fs-xl:   20px;   /* Titel im Player */
+
+  /* Abstaende */
+  --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px;  --sp-4: 16px;  --sp-5: 24px;  --sp-6: 32px;
+
+  /* Radien: Chips / Knoepfe und Felder / Dialoge */
+  --r-s: 4px;  --r-m: 8px;  --r-l: 12px;
+
+  /* Dichte: Kompakt (Standard) */
+  --row-h:   28px;   /* Zeile in Bibliothek */
+  --row-fs:  12px;
+  --q-row-h: 30px;   /* Zeile in der Queue */
+  --q-fs:    12px;
+  --btn-h:    32px;
+  --btn-h-sm: 28px;
+  --icon-fs: 15px;
+  --nav-h:   28px;   /* Eintrag in der linken Navigation */
+  --nav-fs:  13px;
+}
+:root[data-density="comfortable"] {
+  --row-h:   40px;
+  --row-fs:  14px;
+  --q-row-h: 42px;
+  --q-fs:    14px;
+  --btn-h:    36px;
+  --btn-h-sm: 32px;
+  --icon-fs: 17px;
+  --nav-h:   34px;
+  --nav-fs:  14px;
+}
+
+/* ── Tastatur-Fokus: immer sichtbar, nie bei Mausklick ───────────────────── */
+:focus { outline: none; }
+:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 2px;
+  border-radius: var(--r-s);
+}
+
+/* ── Scrollbalken ────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--c-br3); border-radius: 4px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--c-tx7); background-clip: padding-box; border: 2px solid transparent; }
+
+/* ── Knopf-System ────────────────────────────────────────────────────────────
+   .btn                     Sekundaer (Standard)
+   .btn.btn-primary         Primaer — hoechstens einmal pro Bereich
+   .btn.btn-ghost           Ohne Rahmen, fuer Werkzeugleisten
+   .btn.btn-danger          Loeschen, Entfernen, Papierkorb
+   .btn.btn-icon            Nur Icon, quadratisch
+   .btn-sm                  klein (Standard: normal)
+   .is-active               eingeschaltet (Umschalter, gewaehlter Filter)
+   ─────────────────────────────────────────────────────────────────────────── */
+.btn {
+  --h: var(--btn-h);
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: var(--h); min-width: var(--h);
+  padding: 0 14px; border-radius: var(--r-m);
+  font: 600 var(--fs-body)/1 'Segoe UI', system-ui, sans-serif;
+  white-space: nowrap; text-decoration: none;
+  border: 1px solid var(--c-br3); background: var(--c-bg5); color: var(--c-tx1);
+  cursor: pointer; flex-shrink: 0;
+  transition: background .12s, border-color .12s, color .12s;
+}
+.btn:hover { background: var(--c-hover); border-color: var(--c-tx7); }
+.btn:active { background: var(--c-sel); }
+.btn.is-active { background: var(--c-act-bg); border-color: var(--c-accent); color: var(--c-accent-tx); }
+.btn:disabled, .btn[aria-disabled="true"] { opacity: .45; cursor: default; pointer-events: none; }
+.btn .ti { font-size: 1.1em; }
+
+.btn-primary { background: var(--c-accent); border-color: var(--c-accent); color: var(--c-on-accent); }
+.btn-primary:hover { background: var(--c-accent2); border-color: var(--c-accent2); }
+.btn-primary:active { background: var(--c-accent); }
+
+.btn-ghost { background: transparent; border-color: transparent; color: var(--c-tx2); }
+.btn-ghost:hover { background: var(--c-hover); border-color: transparent; color: var(--c-tx1); }
+.btn-ghost.is-active { background: var(--c-act-bg); border-color: transparent; }
+
+.btn-danger { background: var(--c-red-bg); border-color: var(--c-red-br); color: var(--c-red-tx); }
+.btn-danger:hover { background: var(--c-red-bg); border-color: var(--c-red-tx); }
+
+.btn-icon {
+  width: var(--h); padding: 0;
+  background: transparent; border-color: transparent; color: var(--c-tx3);
+  font-size: var(--icon-fs); font-weight: 400;
+}
+.btn-icon:hover { background: var(--c-hover); border-color: transparent; color: var(--c-tx1); }
+.btn-icon.btn-danger { color: var(--c-red-tx); background: transparent; border-color: transparent; }
+.btn-icon.btn-danger:hover { background: var(--c-red-bg); }
+
+.btn-sm { --h: var(--btn-h-sm); padding: 0 10px; font-size: var(--fs-sm); border-radius: var(--r-s); }
+.btn-sm.btn-icon { padding: 0; font-size: calc(var(--icon-fs) - 2px); }
+
+/* Knopfgruppe (Segmente wie Auto-Scan-Intervall oder Formatwahl) */
+.btn-group { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+
+/* ── Tonart-Chips ────────────────────────────────────────────────────────────
+   Farbe je Camelot-Nummer (A und B teilen sie). Text- und Flaechenfarbe
+   kommen aus --cam-N / --cam-N-bg in App.svelte, beide Themes >= 4,7 : 1.
+   ─────────────────────────────────────────────────────────────────────────── */
+.kc {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 36px; height: 1.6em; padding: 0 6px;
+  border-radius: var(--r-s);
+  font-weight: 600; font-size: .92em; line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--c-tx3); background: var(--c-bg2);
+  white-space: nowrap;
+}
+.kc.est { font-style: italic; }
+.kc.est::after { content: "~"; margin-left: 2px; font-weight: 400; }
+.cam-1  { color: var(--cam-1);  background: var(--cam-1-bg); }
+.cam-2  { color: var(--cam-2);  background: var(--cam-2-bg); }
+.cam-3  { color: var(--cam-3);  background: var(--cam-3-bg); }
+.cam-4  { color: var(--cam-4);  background: var(--cam-4-bg); }
+.cam-5  { color: var(--cam-5);  background: var(--cam-5-bg); }
+.cam-6  { color: var(--cam-6);  background: var(--cam-6-bg); }
+.cam-7  { color: var(--cam-7);  background: var(--cam-7-bg); }
+.cam-8  { color: var(--cam-8);  background: var(--cam-8-bg); }
+.cam-9  { color: var(--cam-9);  background: var(--cam-9-bg); }
+.cam-10 { color: var(--cam-10); background: var(--cam-10-bg); }
+.cam-11 { color: var(--cam-11); background: var(--cam-11-bg); }
+.cam-12 { color: var(--cam-12); background: var(--cam-12-bg); }
+
+/* Uebergang zwischen zwei Tonarten: Zeichen UND Farbe, fuer Farbschwache
+   ● gleiche Tonart   ✓ passt (Parallel-/Nachbartonart)   ⚠ passt nicht */
+.cmp { display: inline-flex; align-items: center; gap: 4px; font-weight: 700; }
+.cmp-same, .cmp-good { color: var(--c-green-tx); }
+.cmp-clash { color: var(--c-red-tx); }
+
+/* ── Kleine Bausteine ────────────────────────────────────────────────────── */
+/* Etikett in Grossbuchstaben (Abschnitte, Spaltenkoepfe) */
+.eyebrow {
+  font-size: var(--fs-cap); font-weight: 700; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--c-tx4);
+}
+/* Zaehler neben Navigationseintraegen */
+.count { font-size: var(--fs-cap); color: var(--c-tx5); font-variant-numeric: tabular-nums; }
+/* Hinweis-Kasten */
+.notice {
+  font-size: var(--fs-sm); line-height: 1.45; padding: 8px 10px; border-radius: var(--r-m);
+  border: 1px solid var(--c-warn-br); background: var(--c-warn-bg); color: var(--c-warn-tx);
+}
+.notice.ok    { border-color: var(--c-green-br); background: var(--c-green-bg); color: var(--c-green-tx); }
+.notice.error { border-color: var(--c-red-br);   background: var(--c-red-bg);   color: var(--c-red-tx); }
+.notice.info  { border-color: var(--c-blue-br);  background: var(--c-blue-bg);  color: var(--c-blue-tx); }
+
+/* ── Eingabefelder ───────────────────────────────────────────────────────── */
+.field {
+  height: var(--btn-h); padding: 0 10px; min-width: 0;
+  background: var(--c-bg5); border: 1px solid var(--c-br3); border-radius: var(--r-m);
+  color: var(--c-tx1); font: var(--fs-body) 'Segoe UI', system-ui, sans-serif;
+  transition: border-color .12s;
+}
+.field::placeholder { color: var(--c-tx6); }
+.field:hover { border-color: var(--c-tx7); }
+.field:focus { border-color: var(--c-accent); outline: none; }
+.field-sm { height: var(--btn-h-sm); font-size: var(--fs-sm); border-radius: var(--r-s); }
+input[type="checkbox"], input[type="radio"], input[type="range"] { accent-color: var(--c-accent); }
+
+/* ── Dialoge ─────────────────────────────────────────────────────────────── */
+.dlg-overlay {
+  position: fixed; inset: 0; z-index: 2000;
+  background: rgba(0, 0, 0, .55); backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center;
+}
+.dlg {
+  background: var(--c-bg5); border: 1px solid var(--c-br2); border-radius: var(--r-l);
+  padding: var(--sp-5); width: 420px; max-width: calc(100vw - 32px);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, .5);
+  display: flex; flex-direction: column; gap: var(--sp-4);
+}
+.dlg-title { font-size: var(--fs-h); font-weight: 700; color: var(--c-tx1); }
+.dlg-field { display: flex; flex-direction: column; gap: 6px; font-size: var(--fs-sm); font-weight: 600; color: var(--c-tx3); }
+.dlg-check { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-body); color: var(--c-tx2); cursor: pointer; }
+.dlg-hint { font-size: var(--fs-sm); color: var(--c-tx4); line-height: 1.45; }
+.dlg-list { max-height: 140px; overflow-y: auto; font-size: var(--fs-sm); color: var(--c-tx3); display: grid; gap: 2px; }
+.dlg-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); flex-wrap: wrap; margin-top: var(--sp-1); }
+
+/* ── Kontextmenue ────────────────────────────────────────────────────────── */
+.ctx-menu {
+  position: fixed; z-index: 9999; min-width: 220px; padding: var(--sp-1);
+  background: var(--c-bg5); border: 1px solid var(--c-br2); border-radius: var(--r-m);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .45);
+}
+.ctx-menu button {
+  display: flex; align-items: center; gap: var(--sp-2); width: 100%;
+  height: var(--btn-h); padding: 0 var(--sp-3); border: none; border-radius: var(--r-s);
+  background: none; color: var(--c-tx2); font: var(--fs-body) 'Segoe UI', system-ui, sans-serif;
+  text-align: left; white-space: nowrap; cursor: pointer;
+}
+.ctx-menu button:hover { background: var(--c-hover); color: var(--c-tx1); }
+.ctx-menu button:disabled { opacity: .45; cursor: default; }
+.ctx-menu .ctx-sep { height: 1px; background: var(--c-br1); margin: var(--sp-1) var(--sp-2); }
+.ctx-menu .ctx-danger { color: var(--c-red-tx); }
+.ctx-menu .ctx-danger:hover { background: var(--c-red-bg); color: var(--c-red-tx); }
+.ctx-menu .ctx-mix { color: var(--c-accent-tx); font-weight: 600; }
+.ctx-menu .ctx-mix:hover { background: var(--c-act-bg); color: var(--c-accent-tx); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}

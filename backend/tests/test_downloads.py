@@ -60,6 +60,27 @@ class UrlTest(BackendTest):
         for arg in main._JS_ARGS:
             self.assertIn(arg, einzel)
 
+    def test_loudnorm_nur_beim_umwandeln(self):
+        # "ffmpeg:" galt fuer alle ffmpeg-Schritte; der Metadaten-Schritt
+        # (-c copy) scheiterte am Filter und Tags und Cover fehlten.
+        alt = main._state.get("loudnorm_on_dl", False)
+        main._state["loudnorm_on_dl"] = True
+        try:
+            cmd = main._ytdlp_cmd("https://www.youtube.com/watch?v=ABC", "mp3-best", str(self.tmp))
+        finally:
+            main._state["loudnorm_on_dl"] = alt
+        arg = cmd[cmd.index("--postprocessor-args") + 1]
+        self.assertTrue(arg.startswith("ExtractAudio+ffmpeg_o:-af loudnorm="), arg)
+
+    def test_loudnorm_standardmaessig_aus(self):
+        main.SETTINGS_FILE.write_text("{}", "utf-8")
+        alt = main._state.get("loudnorm_on_dl", False)
+        try:
+            main.load_settings()
+            self.assertFalse(main._state["loudnorm_on_dl"])
+        finally:
+            main._state["loudnorm_on_dl"] = alt
+
 
 class RunDownloadTest(BackendTest):
 

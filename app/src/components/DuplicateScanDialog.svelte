@@ -1,9 +1,20 @@
 <script>
   let { groups = [], onclose, onremove, playlistMode = false } = $props()
 
-  // Local copy so user actions (keep/skip) can remove groups without affecting the parent
-  let remaining = $state([])
-  $effect(() => { remaining = [...groups] })
+  // Was der Nutzer hier entschieden hat, liegt in zwei Mengen neben den
+  // Gruppen. Vorher war es eine Kopie, die bei jeder Aenderung der Bibliothek
+  // (etwa waehrend der Hintergrundanalyse) neu gefuellt wurde — uebersprungene
+  // Gruppen tauchten dann wieder auf.
+  let removed = $state(new Set())   // entfernte Pfade (Backend kommt gleich nach)
+  let skipped = $state(new Set())   // Pfade uebersprungener Gruppen
+  const remaining = $derived(groups
+    .map(g => {
+      const all = [g.best, ...g.others].filter(t => !removed.has(t.path))
+      return all.length >= 2 ? { best: all[0], others: all.slice(1) } : null
+    })
+    .filter(g => g && ![g.best, ...g.others].some(t => skipped.has(t.path))))
+
+  function markRemoved(paths) { removed = new Set([...removed, ...paths]) }
 
   // Checkbox-Auswahl für Mehrfachlöschung (nur "Kopie"-Tracks, nie die "Beste" Version)
   let checked = $state(new Set())
@@ -20,11 +31,7 @@
       : `${checked.size} ausgewählte Kopien in den Papierkorb verschieben?`
     if (!confirm(msg)) return
     for (const p of checked) onremove(p)
-    const del = checked
-    remaining = remaining.map(g => ({
-      best: g.best,
-      others: g.others.filter(t => !del.has(t.path)),
-    })).filter(g => g.others.length > 0)
+    markRemoved(checked)
     checked = new Set()
   }
 
@@ -82,37 +89,32 @@
 
   function keepOnly(group, trackToKeep) {
     const allInGroup = [group.best, ...group.others]
-    allInGroup.forEach(t => { if (t.path !== trackToKeep.path) onremove(t.path) })
-    remaining = remaining.filter(g => g.best.path !== group.best.path)
+    const weg = allInGroup.filter(t => t.path !== trackToKeep.path).map(t => t.path)
+    weg.forEach(p => onremove(p))
+    markRemoved(weg)
   }
 
   function removeTrack(group, track) {
     onremove(track.path)
-    const newAll = [group.best, ...group.others].filter(t => t.path !== track.path)
-    if (newAll.length < 2) {
-      remaining = remaining.filter(g => g.best.path !== group.best.path)
-    } else {
-      remaining = remaining.map(g => g.best.path === group.best.path
-        ? { best: newAll[0], others: newAll.slice(1) }
-        : g)
-    }
+    markRemoved([track.path])
   }
 
   function skipGroup(group) {
-    remaining = remaining.filter(g => g.best.path !== group.best.path)
+    skipped = new Set([...skipped, group.best.path, ...group.others.map(t => t.path)])
   }
 
   function deleteFolderDupes(folderEntry) {
+    const msg = playlistMode
+      ? `${folderEntry.tracks.length} Kopien aus „${folderEntry.name}" aus der Playlist entfernen?`
+      : `${folderEntry.tracks.length} Kopien aus „${folderEntry.name}" in den Papierkorb verschieben?`
+    if (!confirm(msg)) return
     folderEntry.tracks.forEach(t => onremove(t.path))
-    const deletedPaths = new Set(folderEntry.tracks.map(t => t.path))
-    remaining = remaining.map(g => {
-      const newOthers = g.others.filter(t => !deletedPaths.has(t.path))
-      return { best: g.best, others: newOthers }
-    }).filter(g => g.others.length > 0)
+    markRemoved(folderEntry.tracks.map(t => t.path))
   }
 
   function removeAllLower() {
-    const count = groups.reduce((n, g) => n + g.others.length, 0)
+    // Nur was noch angezeigt wird — uebersprungene Gruppen bleiben unberuehrt
+    const count = remaining.reduce((n, g) => n + g.others.length, 0)
     const msg = playlistMode
       ? `${count} niedrigwertige Kopien aus der Playlist entfernen?`
       : `${count} niedrigwertige Kopien in den Papierkorb verschieben?`
@@ -122,28 +124,29 @@
   }
 </script>
 
-<div class="overlay" onclick={onclose} role="dialog">
-  <div class="panel" onclick={(e) => e.stopPropagation()}>
+<div class="dlg-overlay" onclick={onclose} role="presentation">
+  <div class="dlg panel" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Duplikate prüfen">
 
     <div class="hdr">
-      <span class="title">DUPLIKATE PRÜFEN</span>
+      <span class="dlg-title">Duplikate prüfen</span>
       <span class="subtitle">{remaining.length} Gruppen</span>
-      <button class="mode-toggle {groupByFolder ? 'active' : ''}"
+      <span class="hdr-space"></span>
+      <button class="btn btn-sm" class:is-active={groupByFolder}
               onclick={() => groupByFolder = !groupByFolder}
-              title="Nach Ordner gruppieren statt nach Song">
-        📁 Nach Ordner
+              title="Nach Ordner gruppieren statt nach Song"><i class="ti ti-folder"></i> Nach Ordner</button>
+      <button class="btn btn-sm btn-danger" onclick={removeAllLower}>
+        {#if playlistMode}Alle Kopien aus der Playlist{:else}<i class="ti ti-trash"></i> Alle Kopien in den Papierkorb{/if}
       </button>
-      <button class="remove-all-btn" onclick={removeAllLower}>{playlistMode ? '✕ Alle Kopien aus Playlist' : '✕ Alle Kopien löschen'}</button>
-      <button class="close-btn" onclick={onclose}>✕</button>
+      <button class="btn btn-icon btn-sm" onclick={onclose} title="Schließen" aria-label="Schließen"><i class="ti ti-x"></i></button>
     </div>
 
     {#if folderGroups.length > 0 && !playlistMode}
       <div class="folder-bar">
-        <span class="folder-bar-label">Ordner komplett löschen:</span>
+        <span class="folder-bar-label">Ordner, die nur Kopien enthalten:</span>
         {#each folderGroups as f}
-          <button class="folder-del-btn" onclick={() => deleteFolderDupes(f)}
-                  title="Alle {f.tracks.length} Kopien aus '{f.dir}' von Festplatte löschen">
-            📁 {f.name} <span class="folder-count">×{f.tracks.length}</span>
+          <button class="btn btn-sm" onclick={() => deleteFolderDupes(f)}
+                  title="Alle {f.tracks.length} Kopien aus '{f.dir}' in den Papierkorb verschieben">
+            <i class="ti ti-folder"></i> {f.name} <span class="folder-count">×{f.tracks.length}</span>
           </button>
         {/each}
       </div>
@@ -151,10 +154,10 @@
 
     {#if groupByFolder}
       <div class="filter-bar">
-        <input class="folder-filter" placeholder="Ordner filtern…" bind:value={folderFilter} />
+        <input class="field field-sm folder-filter" placeholder="Ordner filtern…" bind:value={folderFilter} aria-label="Ordner filtern" />
         {#if checkedCount > 0}
-          <button class="del-checked-btn" onclick={deleteChecked}>
-            🗑 {checkedCount} markierte löschen
+          <button class="btn btn-sm btn-danger" onclick={deleteChecked}>
+            <i class="ti ti-trash"></i> {checkedCount} markierte entfernen
           </button>
         {/if}
       </div>
@@ -162,7 +165,7 @@
 
     <div class="body">
       {#if remaining.length === 0}
-        <div class="done">✓ Alle Duplikate bereinigt</div>
+        <div class="done"><i class="ti ti-check"></i> Alle Duplikate bereinigt</div>
       {:else if groupByFolder}
         {#if byFolderView.length === 0}
           <div class="done">Keine Ordner gefunden</div>
@@ -174,27 +177,29 @@
               <span class="folder-item-count">{folder.items.length} Kopien</span>
             </div>
             {#each folder.items as { group, track }}
-              <div class="track-row worse checkable">
-                <input type="checkbox" class="track-check"
+              <div class="track-row worse">
+                <input type="checkbox" class="track-check" aria-label="Markieren"
                        checked={checked.has(track.path)}
                        onchange={() => toggleCheck(track.path)} />
-                <div class="track-badge">✕ Kopie</div>
+                <span class="track-badge">Kopie</span>
                 <div class="track-info">
                   <div class="track-title">{track.title}</div>
                   <div class="track-meta">
-                    <span class="meta-tag q">{track.bitrate_kbps || '?'} kbps</span>
+                    <span class="meta-tag">{track.bitrate_kbps || '?'} kbps</span>
                     {#if track.lufs && track.lufs > -90}
-                      <span class="meta-tag l">{track.lufs?.toFixed(1)} LUFS</span>
+                      <span class="meta-tag">{track.lufs?.toFixed(1)} LUFS</span>
                     {/if}
-                    <span class="meta-tag d">{fmt(track.duration_sec)}</span>
+                    <span class="meta-tag">{fmt(track.duration_sec)}</span>
                     <span class="meta-path" title={track.path}>{trackDir(track)}</span>
                   </div>
                 </div>
                 <div class="track-actions">
-                  <button class="keep-btn" onclick={() => keepOnly(group, track)}
-                          title="Diese behalten, alle anderen in der Gruppe löschen">Behalten</button>
-                  <button class="del-btn" onclick={() => removeTrack(group, track)}
-                          title={playlistMode ? 'Aus Playlist entfernen' : 'Diese Datei in den Papierkorb verschieben'}>{playlistMode ? '✕ Aus Playlist' : '🗑 In Papierkorb'}</button>
+                  <button class="btn btn-sm" onclick={() => keepOnly(group, track)}
+                          title="Diese behalten, alle anderen in der Gruppe entfernen">Behalten</button>
+                  <button class="btn btn-sm btn-danger" onclick={() => removeTrack(group, track)}
+                          title={playlistMode ? 'Aus Playlist entfernen' : 'Diese Datei in den Papierkorb verschieben'}>
+                    {#if playlistMode}Aus Playlist{:else}<i class="ti ti-trash"></i> Papierkorb{/if}
+                  </button>
                 </div>
               </div>
             {/each}
@@ -206,28 +211,30 @@
           <div class="group">
             <div class="group-hdr">
               <span class="group-title">{group.best.title?.replace(/^.+?\s+[-–—]\s+/, '') || group.best.title}</span>
-              <button class="skip-btn" onclick={() => skipGroup(group)}>Überspringen</button>
+              <button class="btn btn-ghost btn-sm" onclick={() => skipGroup(group)}>Überspringen</button>
             </div>
 
             {#each allTracks as track, i}
               <div class="track-row {i === 0 ? 'best' : 'worse'}">
-                <div class="track-badge">{i === 0 ? '★ Beste' : '✕ Kopie'}</div>
+                <span class="track-badge">{#if i === 0}<i class="ti ti-star"></i> Beste{:else}Kopie{/if}</span>
                 <div class="track-info">
                   <div class="track-title">{track.title}</div>
                   <div class="track-meta">
-                    <span class="meta-tag q">{track.bitrate_kbps || '?'} kbps</span>
+                    <span class="meta-tag">{track.bitrate_kbps || '?'} kbps</span>
                     {#if track.lufs && track.lufs > -90}
-                      <span class="meta-tag l">{track.lufs?.toFixed(1)} LUFS</span>
+                      <span class="meta-tag">{track.lufs?.toFixed(1)} LUFS</span>
                     {/if}
-                    <span class="meta-tag d">{fmt(track.duration_sec)}</span>
+                    <span class="meta-tag">{fmt(track.duration_sec)}</span>
                     <span class="meta-path" title={track.path}>{trackDir(track)}</span>
                   </div>
                 </div>
                 <div class="track-actions">
-                  <button class="keep-btn" onclick={() => keepOnly(group, track)}
-                          title="Diese behalten, alle anderen in der Gruppe löschen">Behalten</button>
-                  <button class="del-btn" onclick={() => removeTrack(group, track)}
-                          title={playlistMode ? 'Aus Playlist entfernen' : 'Diese Datei in den Papierkorb verschieben'}>{playlistMode ? '✕ Aus Playlist' : '🗑 In Papierkorb'}</button>
+                  <button class="btn btn-sm" onclick={() => keepOnly(group, track)}
+                          title="Diese behalten, alle anderen in der Gruppe entfernen">Behalten</button>
+                  <button class="btn btn-sm btn-danger" onclick={() => removeTrack(group, track)}
+                          title={playlistMode ? 'Aus Playlist entfernen' : 'Diese Datei in den Papierkorb verschieben'}>
+                    {#if playlistMode}Aus Playlist{:else}<i class="ti ti-trash"></i> Papierkorb{/if}
+                  </button>
                 </div>
               </div>
             {/each}
@@ -240,165 +247,38 @@
 </div>
 
 <style>
-  .overlay {
-    position: fixed; inset: 0; z-index: 1100;
-    background: rgba(0,0,0,.75); backdrop-filter: blur(3px);
-    display: flex; align-items: center; justify-content: center;
+  .panel { width: 780px; max-width: calc(100vw - 32px); max-height: 84vh; padding: 0; gap: 0; }
+  .hdr { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-5); border-bottom: 1px solid var(--c-br1); flex-shrink: 0; }
+  .subtitle { font-size: var(--fs-sm); color: var(--c-tx3); font-variant-numeric: tabular-nums; }
+  .hdr-space { flex: 1; }
+  .folder-bar, .filter-bar {
+    display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; flex-shrink: 0;
+    padding: var(--sp-2) var(--sp-5); border-bottom: 1px solid var(--c-br1); background: var(--c-bg2);
   }
-  .panel {
-    background: var(--c-bg2); border: 1px solid var(--c-br2); border-radius: 6px;
-    width: 720px; max-height: 82vh;
-    display: flex; flex-direction: column;
-    box-shadow: 0 20px 60px rgba(0,0,0,.9);
-  }
-  .hdr {
-    display: flex; align-items: center; gap: 10px; padding: 12px 16px;
-    border-bottom: 1px solid var(--c-br1); flex-shrink: 0;
-  }
-  .title {
-    font-size: 10px; font-weight: 700; letter-spacing: 2px; color: var(--c-tx6);
-  }
-  .subtitle {
-    font-size: 11px; color: var(--c-tx7);
-  }
-  .mode-toggle {
-    margin-left: auto; padding: 3px 12px;
-    background: var(--c-bg2); border: 1px solid var(--c-br2); border-radius: 3px;
-    color: var(--c-tx5); font-size: 10px; cursor: pointer;
-    transition: border-color .1s, color .1s, background .1s;
-  }
-  .mode-toggle:hover { border-color: var(--c-br3); color: var(--c-tx4); }
-  .mode-toggle.active { background: var(--c-blue-bg); border-color: var(--c-blue-br); color: var(--c-blue-tx); }
-  .remove-all-btn {
-    padding: 3px 12px;
-    background: var(--c-red-bg); border: 1px solid var(--c-red-bg); border-radius: 3px;
-    color: var(--c-red-br); font-size: 10px; cursor: pointer;
-    transition: border-color .1s, color .1s;
-  }
-  .remove-all-btn:hover { border-color: var(--c-red-tx); color: var(--c-red-tx); }
-
-  .filter-bar {
-    display: flex; align-items: center; gap: 8px;
-    padding: 7px 16px; background: var(--c-bg2); border-bottom: 1px solid var(--c-br1);
-    flex-shrink: 0;
-  }
-  .folder-filter {
-    flex: 1; background: var(--c-bg2); border: 1px solid var(--c-br2);
-    border-radius: 3px; color: var(--c-tx4); font-size: 11px;
-    padding: 4px 8px; outline: none;
-  }
-  .del-checked-btn {
-    padding: 4px 12px; background: var(--c-red-bg); border: 1px solid var(--c-red-bg); border-radius: 3px;
-    color: var(--c-red-tx); font-size: 10px; cursor: pointer; white-space: nowrap;
-    transition: border-color .1s, color .1s;
-  }
-  .del-checked-btn:hover { border-color: var(--c-red-tx); color: var(--c-red-tx); }
-
-  .folder-item-count {
-    font-size: 10px; color: var(--c-tx7); flex-shrink: 0;
-  }
-  .track-row.checkable { padding-left: 12px; }
-  .track-check {
-    flex-shrink: 0; width: 14px; height: 14px; cursor: pointer; accent-color: var(--c-blue-br);
-  }
-  .close-btn {
-    background: none; border: none; color: var(--c-tx7); font-size: 13px;
-    cursor: pointer; padding: 4px 6px; border-radius: 3px;
-    transition: color .1s, background .1s;
-  }
-  .close-btn:hover { color: var(--c-red-tx); background: var(--c-red-bg); }
-
-  /* Folder bulk-delete bar */
-  .folder-bar {
-    display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
-    padding: 7px 16px; background: var(--c-bg2); border-bottom: 1px solid var(--c-br1);
-    flex-shrink: 0;
-  }
-  .folder-bar-label {
-    font-size: 9px; font-weight: 700; letter-spacing: .08em;
-    color: var(--c-tx7); text-transform: uppercase; flex-shrink: 0; margin-right: 2px;
-  }
-  .folder-del-btn {
-    padding: 3px 10px; background: var(--c-warn-bg); border: 1px solid var(--c-warn-bg);
-    border-radius: 3px; color: var(--c-warn-br); font-size: 10px; cursor: pointer;
-    transition: border-color .1s, color .1s; white-space: nowrap;
-  }
-  .folder-del-btn:hover { border-color: var(--c-warn-tx); color: var(--c-warn-tx); }
-  .folder-count {
-    font-size: 9px; color: var(--c-warn-br); margin-left: 2px;
-  }
-
-  .body { overflow-y: auto; padding: 8px 0; }
-
-  .done {
-    padding: 40px; text-align: center; font-size: 14px; color: var(--c-green-tx);
-  }
-
-  .group {
-    border-bottom: 1px solid var(--c-br1); padding: 8px 0;
-  }
-  .group-hdr {
-    display: flex; align-items: center; gap: 8px;
-    padding: 4px 16px 6px; min-width: 0;
-  }
-  .group-title {
-    font-size: 12px; font-weight: 600; color: var(--c-tx4);
-    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  .skip-btn {
-    background: none; border: 1px solid var(--c-br2); border-radius: 3px;
-    color: var(--c-tx7); font-size: 10px; padding: 2px 8px; cursor: pointer;
-    flex-shrink: 0; transition: border-color .1s, color .1s;
-  }
-  .skip-btn:hover { border-color: var(--c-br3); color: var(--c-tx5); }
-
-  .track-row {
-    display: flex; align-items: center; gap: 8px;
-    padding: 5px 16px; min-height: 38px;
-    transition: background 0.06s;
-  }
-  .track-row:hover { background: var(--c-bg3); }
-  .track-row.best  { border-left: 3px solid var(--c-green-br); }
-  .track-row.worse { border-left: 3px solid var(--c-red-br); }
-
+  .folder-bar-label { font-size: var(--fs-sm); color: var(--c-tx3); }
+  .folder-count { color: var(--c-tx4); font-weight: 400; }
+  .folder-filter { width: 240px; }
+  .body { flex: 1; overflow-y: auto; }
+  .done { display: flex; align-items: center; justify-content: center; gap: var(--sp-2); padding: 40px; font-size: var(--fs-lg); font-weight: 600; color: var(--c-green-tx); }
+  .group { border-bottom: 1px solid var(--c-br2); }
+  .group-hdr { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-3) var(--sp-3) var(--sp-1) var(--sp-5); }
+  .group-title { flex: 1; min-width: 0; font-size: var(--fs-lg); font-weight: 700; color: var(--c-tx1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .folder-item-count { font-size: var(--fs-sm); color: var(--c-tx3); }
+  .track-row { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-2) var(--sp-3) var(--sp-2) var(--sp-5); }
+  .track-row:hover { background: var(--c-hover); }
+  .track-row.best { background: var(--c-green-bg); }
+  .track-check { flex-shrink: 0; }
   .track-badge {
-    font-size: 9px; font-weight: 700; letter-spacing: .05em;
-    width: 52px; flex-shrink: 0; text-align: center;
+    flex-shrink: 0; min-width: 64px; display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+    font-size: var(--fs-cap); font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+    padding: 3px 6px; border-radius: var(--r-s);
   }
-  .track-row.best  .track-badge { color: var(--c-green-tx); }
-  .track-row.worse .track-badge { color: var(--c-red-br); }
-
-  .track-info { flex: 1; min-width: 0; }
-  .track-title {
-    font-size: 12px; color: var(--c-tx3);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .track-meta {
-    display: flex; align-items: center; gap: 6px; margin-top: 2px;
-  }
-  .meta-tag {
-    font-size: 9px; padding: 1px 5px; border-radius: 2px;
-    font-variant-numeric: tabular-nums;
-  }
-  .meta-tag.q { background: var(--c-green-bg); color: var(--c-green-br); }
-  .meta-tag.l { background: var(--c-bg5); color: var(--c-tx7); }
-  .meta-tag.d { background: var(--c-bg4); color: var(--c-tx7); }
-  .meta-path {
-    font-size: 10px; color: var(--c-br3);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px;
-  }
-
-  .track-actions { display: flex; gap: 6px; flex-shrink: 0; }
-  .keep-btn {
-    background: var(--c-green-bg); border: 1px solid var(--c-green-bg); border-radius: 3px;
-    color: var(--c-green-br); font-size: 10px; padding: 3px 10px; cursor: pointer;
-    transition: border-color .1s, color .1s;
-  }
-  .keep-btn:hover { border-color: var(--c-green-tx); color: var(--c-green-tx); }
-  .del-btn {
-    background: var(--c-red-bg); border: 1px solid var(--c-red-bg); border-radius: 3px;
-    color: var(--c-red-br); font-size: 10px; padding: 3px 10px; cursor: pointer;
-    transition: border-color .1s, color .1s;
-  }
-  .del-btn:hover { border-color: var(--c-red-br); color: var(--c-red-tx); }
+  .best .track-badge { color: var(--c-green-tx); border: 1px solid var(--c-green-br); }
+  .worse .track-badge { color: var(--c-tx3); border: 1px solid var(--c-br3); }
+  .track-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .track-title { font-size: var(--fs-body); color: var(--c-tx1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .track-meta { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; font-size: var(--fs-sm); }
+  .meta-tag { color: var(--c-tx2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .meta-path { color: var(--c-tx4); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .track-actions { display: flex; gap: var(--sp-1); flex-shrink: 0; }
 </style>

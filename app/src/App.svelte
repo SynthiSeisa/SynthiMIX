@@ -9,10 +9,11 @@
   import Downloads from './components/Downloads.svelte'
   import Settings  from './components/Settings.svelte'
   import PlaylistChoiceDialog from './components/PlaylistChoiceDialog.svelte'
+  import VideoChoiceDialog from './components/VideoChoiceDialog.svelte'
+  // Theme und Dichte (Kompakt / Komfortabel) setzen beim Import ihre
+  // Attribute am <html> — siehe lib/prefs.js
+  import './lib/prefs.js'
 
-  // Apply saved theme on load
-  const _savedTheme = localStorage.getItem('synthimix-theme') || 'dark'
-  document.documentElement.setAttribute('data-theme', _savedTheme)
 
   onMount(() => {
     window.electron?.onMediaKey?.((key) => {
@@ -155,8 +156,8 @@
       {#if !dlCollapsed}
         <!-- Vertical drag handle -->
         <div class="v-handle" onmousedown={startVResize} role="separator" aria-orientation="horizontal">
-          <span class="dl-label">⬇ DOWNLOADS</span>
-          <button class="collapse-btn" onclick={() => dlCollapsed = true} title="Zuklappen">▼</button>
+          <span class="eyebrow dl-label"><i class="ti ti-download"></i> Downloads</span>
+          <button class="btn btn-icon btn-sm" onclick={() => dlCollapsed = true} title="Zuklappen" aria-label="Downloads zuklappen"><i class="ti ti-chevron-down"></i></button>
         </div>
 
         <!-- Downloads -->
@@ -168,8 +169,8 @@
         <div class="dl-collapsed" onclick={() => dlCollapsed = false}
              role="button" tabindex="0"
              onkeydown={(e) => e.key === 'Enter' && (dlCollapsed = false)}>
-          <span class="dl-label">⬇ DOWNLOADS</span>
-          <span class="collapse-btn">▲</span>
+          <span class="eyebrow dl-label"><i class="ti ti-download"></i> Downloads</span>
+          <i class="ti ti-chevron-up collapse-ico" aria-hidden="true"></i>
         </div>
       {/if}
 
@@ -183,11 +184,13 @@
   {#if $settingsOpen}<Settings />{/if}
 
   <PlaylistChoiceDialog />
+  <VideoChoiceDialog />
 </div>
 
 <style>
   /* ── CSS Custom Properties ────────────────────────────────────────────── */
   :global(:root) {
+    /* Flaechen */
     --c-bg:     #0a0e18;
     --c-bg2:    #080c16;
     --c-bg3:    #090e1c;
@@ -195,20 +198,28 @@
     --c-bg5:    #0e1624;
     --c-br1:    #121e30;
     --c-br2:    #1e2e44;
-    --c-br3:    #243650;
+    --c-br3:    #2a3e5c;
+    /* Schrift — jede Stufe >= 4,5 : 1 auf Grund, Karte, Hover und Auswahl.
+       Rangfolge ueber Groesse und Gewicht, nicht ueber immer blasseres Grau:
+       tx1 Titel · tx2 Text · tx3 sekundaer · tx4–tx7 Metadaten und Hinweise */
     --c-tx1:    #ecf2ff;
-    --c-tx2:    #d0dcf0;
-    --c-tx3:    #a0bcd4;
-    --c-tx4:    #80a0bc;
-    --c-tx5:    #6088a8;
-    --c-tx6:    #5078a0;
-    --c-tx7:    #406090;
-    --c-act-bg: #0e0a00;
+    --c-tx2:    #d4e0f2;
+    --c-tx3:    #b0c6dc;
+    --c-tx4:    #9ab2cc;
+    --c-tx5:    #8ba6c4;
+    --c-tx6:    #809cbc;
+    --c-tx7:    #7894b4;
+    --c-act-bg: #1a1206;
     --c-act-tx: #f0a040;
     --c-sel:    #0e1c38;
     --c-hover:  #101828;
+    /* Orange: accent fuer Flaechen und Kanten, accent-tx fuer Schrift,
+       on-accent fuer Schrift auf orangem Grund (6,3 : 1) */
     --c-accent: #e07800;
     --c-accent2:#ff9020;
+    --c-accent-tx: #ff9a33;
+    --c-on-accent: #0a0e18;
+    --c-focus:  #ff9a33;
     --c-blue:   #3b82f6;
     --c-green:  #2a8a4a;
     --c-red:    #c04040;
@@ -224,6 +235,19 @@
     --c-red-br:   #8a3030;  --c-red-tx:   #e06060;
     --c-blue-br:  #2a5888;  --c-blue-tx:  #6aa0e0;  --c-blue-bg:  #0e1a2c;
     --c-warn-br:  #604020;  --c-warn-tx:  #e08040;  --c-warn-bg:  #1a1008;
+    /* Tonart-Farben je Camelot-Nummer (siehe .kc in lib/ui.css) */
+    --cam-1: #8beeee;  --cam-1-bg: hsla(180, 70%, 50%, .18);
+    --cam-2: #8bbdee;  --cam-2-bg: hsla(210, 70%, 50%, .18);
+    --cam-3: #8b8bee;  --cam-3-bg: hsla(240, 70%, 50%, .18);
+    --cam-4: #bd8bee;  --cam-4-bg: hsla(270, 70%, 50%, .18);
+    --cam-5: #ee8bee;  --cam-5-bg: hsla(300, 70%, 50%, .18);
+    --cam-6: #ee8bbd;  --cam-6-bg: hsla(330, 70%, 50%, .18);
+    --cam-7: #ee8b8b;  --cam-7-bg: hsla(0, 70%, 50%, .18);
+    --cam-8: #eebd8b;  --cam-8-bg: hsla(30, 70%, 50%, .18);
+    --cam-9: #eeee8b;  --cam-9-bg: hsla(60, 70%, 50%, .18);
+    --cam-10: #bdee8b; --cam-10-bg: hsla(90, 70%, 50%, .18);
+    --cam-11: #8bee8b; --cam-11-bg: hsla(120, 70%, 50%, .18);
+    --cam-12: #8beebd; --cam-12-bg: hsla(150, 70%, 50%, .18);
   }
   :global(:root[data-theme="light"]) {
     --c-bg:     #f4f0eb;
@@ -231,22 +255,26 @@
     --c-bg3:    #e5e1db;
     --c-bg4:    #edeae5;
     --c-bg5:    #ffffff;
-    --c-br1:    #d0ccc6;
-    --c-br2:    #b8b4ae;
-    --c-br3:    #a0a09a;
+    --c-br1:    #d6d0c8;
+    --c-br2:    #bdb6ad;
+    --c-br3:    #a39b91;
     --c-tx1:    #0a0806;
     --c-tx2:    #1e1a14;
     --c-tx3:    #3a342a;
-    --c-tx4:    #4e4840;
-    --c-tx5:    #5e5650;
-    --c-tx6:    #6a6058;
-    --c-tx7:    #7a7068;
-    --c-act-bg: #fff4e0;
+    --c-tx4:    #4a443c;
+    --c-tx5:    #554e47;
+    --c-tx6:    #5c554e;
+    --c-tx7:    #625a52;
+    --c-act-bg: #fff1dc;
     --c-act-tx: #8a4800;
     --c-sel:    #ddeeff;
     --c-hover:  #e0dcd6;
-    --c-accent: #c86000;
-    --c-accent2:#e07800;
+    /* Dunkleres Orange: das alte #c86000 erreichte als Schrift nur 3,0 : 1 */
+    --c-accent: #b35400;
+    --c-accent2:#c86000;
+    --c-accent-tx: #9a4700;
+    --c-on-accent: #ffffff;
+    --c-focus:  #9a4700;
     --c-blue:   #1a5cb0;
     --c-green:  #1a7030;
     --c-red:    #b82020;
@@ -259,19 +287,28 @@
     --c-red-br:   #d89a9a;  --c-red-tx:   #b82020;
     --c-blue-br:  #93b6e0;  --c-blue-tx:  #1a5cb0;  --c-blue-bg:  #e8f0fb;
     --c-warn-br:  #e0b483;  --c-warn-tx:  #9a5000;  --c-warn-bg:  #fdf1e3;
+    --cam-1: #096d6d;  --cam-1-bg: hsla(180, 70%, 50%, .14);
+    --cam-2: #0e5caa;  --cam-2-bg: hsla(210, 70%, 50%, .14);
+    --cam-3: #0f0fbd;  --cam-3-bg: hsla(240, 70%, 50%, .14);
+    --cam-4: #660fbd;  --cam-4-bg: hsla(270, 70%, 50%, .14);
+    --cam-5: #a00da0;  --cam-5-bg: hsla(300, 70%, 50%, .14);
+    --cam-6: #af0e5e;  --cam-6-bg: hsla(330, 70%, 50%, .14);
+    --cam-7: #b30f0f;  --cam-7-bg: hsla(0, 70%, 50%, .14);
+    --cam-8: #8e4c0b;  --cam-8-bg: hsla(30, 70%, 50%, .14);
+    --cam-9: #686808;  --cam-9-bg: hsla(60, 70%, 50%, .14);
+    --cam-10: #3b6d09; --cam-10-bg: hsla(90, 70%, 50%, .14);
+    --cam-11: #097109; --cam-11-bg: hsla(120, 70%, 50%, .14);
+    --cam-12: #09713d; --cam-12-bg: hsla(150, 70%, 50%, .14);
   }
   :global(*, *::before, *::after) { box-sizing: border-box; margin: 0; padding: 0; }
   :global(body) {
     background: var(--c-bg);
     color: var(--c-tx2);
     font-family: 'Segoe UI', system-ui, sans-serif;
-    font-size: 13px;
+    font-size: var(--fs-body);
     overflow: hidden;
     user-select: none;
   }
-  :global(::-webkit-scrollbar) { width: 4px; }
-  :global(::-webkit-scrollbar-track) { background: transparent; }
-  :global(::-webkit-scrollbar-thumb) { background: var(--c-tx7); border-radius: 2px; }
 
   .app {
     display: flex;
@@ -320,7 +357,7 @@
     transition: background 0.15s;
     z-index: 10;
   }
-  .h-handle:hover { background: #e0780044; }
+  .h-handle:hover { background: color-mix(in srgb, var(--c-accent) 27%, transparent); }
 
   /* ── Queue pane ────────────────────────────────────────────────────────── */
   .queue-pane {
@@ -332,40 +369,15 @@
 
   /* ── Vertical resize handle (also the download header) ────────────────── */
   .v-handle {
-    height: 28px;
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    padding: 0 10px;
-    background: var(--c-bg3);
-    border-top: 1px solid var(--c-br2);
-    cursor: row-resize;
-    transition: background 0.15s;
-    gap: 8px;
-    user-select: none;
+    height: 36px; flex-shrink: 0;
+    display: flex; align-items: center; gap: var(--sp-2);
+    padding: 0 var(--sp-2) 0 var(--sp-3);
+    background: var(--c-bg2); border-top: 1px solid var(--c-br2);
+    cursor: row-resize; user-select: none;
   }
   .v-handle:hover { background: var(--c-hover); }
-
-  .dl-label {
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 1.2px;
-    color: var(--c-tx6);
-    flex: 1;
-    pointer-events: none;
-  }
-
-  .collapse-btn {
-    background: none;
-    border: none;
-    color: var(--c-tx6);
-    font-size: 13px;
-    cursor: pointer;
-    padding: 0 4px;
-    line-height: 1;
-    transition: color 0.15s;
-  }
-  .collapse-btn:hover { color: var(--c-accent); }
+  .dl-label { flex: 1; display: inline-flex; align-items: center; gap: 6px; pointer-events: none; }
+  .collapse-ico { font-size: 15px; color: var(--c-tx3); }
 
   /* ── Downloads pane ─────────────────────────────────────────────────────── */
   .dl-pane {
@@ -378,12 +390,12 @@
 
   /* ── Collapsed downloads strip ──────────────────────────────────────────── */
   .dl-collapsed {
-    height: 28px;
+    height: 36px;
     flex-shrink: 0;
     display: flex;
     align-items: center;
-    padding: 0 10px;
-    background: var(--c-bg3);
+    padding: 0 var(--sp-3);
+    background: var(--c-bg2);
     border-top: 1px solid var(--c-br2);
     cursor: pointer;
     gap: 8px;
@@ -396,12 +408,12 @@
     position: fixed;
     bottom: 6px;
     right: 8px;
-    width: 6px;
-    height: 6px;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
     transition: background 0.3s;
     z-index: 100;
   }
-  .conn-dot.on  { background: var(--c-green); }
-  .conn-dot.off { background: var(--c-red); }
+  .conn-dot.on  { background: var(--c-green-tx); }
+  .conn-dot.off { background: var(--c-red-tx); }
 </style>

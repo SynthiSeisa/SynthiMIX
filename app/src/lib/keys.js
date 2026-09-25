@@ -45,3 +45,20 @@ export function keyTitle(key, src) {
     ? `${key}${cam} — geschätzt, kann danebenliegen`
     : `${key}${cam}`
 }
+
+/**
+ * Anzeige einer Tonart in der gewaehlten Schreibweise.
+ * notation: 'musical' ("F♯m", Standard) oder 'camelot' ("11A").
+ */
+export function keyLabel(key, notation = 'musical') {
+  if (!key) return ''
+  if (notation !== 'camelot') return key
+  const c = toCamelot(key)
+  return c ? `${c.num}${c.letter}` : key
+}
+
+/** CSS-Klasse fuer die Chip-Farbe ("cam-11"), leer wenn unbekannt. */
+export function keyClass(key) {
+  const c = toCamelot(key)
+  return c ? `cam-${c.num}` : ''
+}

@@ -24,9 +24,16 @@ class WishStatusTest(BackendTest):
         self.assertEqual(st["in_sec"], 150 + 100)
 
     def test_lief_schon(self):
-        main._state["play_log"] = [{"title": "Netsky - Rio", "played_at": 1_700_000_000}]
+        vorhin = int(time.time()) - 3600
+        main._state["play_log"] = [{"title": "Netsky - Rio", "played_at": vorhin}]
         st = main._wish_title_status("Netsky - Rio")
-        self.assertEqual((st["state"], st["at"]), ("played", 1_700_000_000))
+        self.assertEqual((st["state"], st["at"]), ("played", vorhin))
+
+    def test_lief_letzte_woche_zaehlt_nicht(self):
+        # Das Play-Log reicht ueber Wochen zurueck; den Gaesten stand sonst
+        # "lief um 21:14 Uhr" fuer einen Titel von letzter Woche da.
+        main._state["play_log"] = [{"title": "Netsky - Rio", "played_at": int(time.time()) - 7 * 86400}]
+        self.assertEqual(main._wish_title_status("Netsky - Rio")["state"], "free")
 
     def test_schon_gewuenscht(self):
         main._state["wishes"] = [{"title": "Netsky - Rio", "status": "bereit", "count": 3}]
@@ -83,3 +90,32 @@ class WishDecisionTest(BackendTest):
         self.assertFalse(f.exists())
         self.assertEqual(main._state["wishes"], [])
         self.assertEqual(main._state["library"], [])
+
+
+class WishResumeTest(BackendTest):
+    """Wuensche, die beim Beenden in Arbeit waren, duerfen nicht haengenbleiben."""
+
+    def test_fertig_geladener_wunsch_wird_bereit(self):
+        f = self.tmp / "da.mp3"
+        f.write_bytes(b"x")
+        main._state["wishes"] = [{"id": 1, "status": "analysiert", "path": str(f), "url": "https://x"}]
+        main._resume_wishes()
+        self.assertEqual(main._state["wishes"][0]["status"], "bereit")
+
+    def test_abgebrochener_download_wird_neu_gestartet(self):
+        gestartet = []
+        async def attrappe(w):
+            gestartet.append(w["id"])
+        echt, main._process_wish = main._process_wish, attrappe
+        try:
+            async def ablauf():
+                main._state["wishes"] = [
+                    {"id": 1, "status": "laedt", "path": None, "url": "https://x"},
+                    {"id": 2, "status": "fehler", "path": None, "url": "https://y"},
+                    {"id": 3, "status": "bereit", "path": None, "url": "https://z"}]
+                main._resume_wishes()
+                await __import__("asyncio").sleep(0)
+            self.run_async(ablauf())
+        finally:
+            main._process_wish = echt
+        self.assertEqual(gestartet, [1])

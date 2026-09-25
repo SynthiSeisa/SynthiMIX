@@ -146,3 +146,41 @@ class OrdnerTest(TrashTestBase):
         finally:
             main.scan_folder = echt
         self.assertEqual(main._state["watched_folders"], [str(self.musik)])
+
+
+class AusschliessenTest(TrashTestBase):
+    """"Aus Bibliothek ausschliessen" muss halten — der Ordner-Waechter lief
+    frueher alle 10 s und holte die Titel sofort zurueck."""
+
+    def setUp(self):
+        super().setUp()
+        self._excl = list(main._state.get("excluded_folders", []))
+        main._state["excluded_folders"] = []
+        self.musik = self.tmp / "Musik"
+        self.party = self.musik / "Party"
+        for n in ("oben.mp3", "Party/drin.mp3", "Party/Unter/tief.mp3"):
+            f = self.musik / n
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(b"x")
+        main._state["watched_folders"] = [str(self.musik)]
+        main._state["library"] = [{"path": str(self.musik / n)} for n in
+                                  ("oben.mp3", "Party/drin.mp3", "Party/Unter/tief.mp3")]
+
+    def tearDown(self):
+        main._state["excluded_folders"] = self._excl
+        super().tearDown()
+
+    def test_ausschliessen_entfernt_und_bleibt_draussen(self):
+        self.run_async(main.handle_message(FakeWS(), {"type": "exclude_folder",
+                                                      "folder": str(self.party)}))
+        self.assertEqual([lt["path"] for lt in main._state["library"]], [str(self.musik / "oben.mp3")])
+        # Der Waechter findet nur, was nicht ausgeschlossen ist
+        neu = main._find_new_audio_paths(str(self.musik), {str(self.musik / "oben.mp3")}, True)
+        self.assertEqual(neu, [])
+        self.assertIn(str(self.party), main._state["excluded_folders"])
+
+    def test_wieder_aufnehmen(self):
+        self.run_async(main.handle_message(FakeWS(), {"type": "exclude_folder", "folder": str(self.party)}))
+        self.run_async(main.handle_message(FakeWS(), {"type": "include_folder", "folder": str(self.party)}))
+        neu = main._find_new_audio_paths(str(self.musik), {str(self.musik / "oben.mp3")}, True)
+        self.assertEqual(len(neu), 2)

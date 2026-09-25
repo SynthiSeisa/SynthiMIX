@@ -37,16 +37,16 @@
   }
 </script>
 
-<div class="overlay" onclick={onclose} role="dialog">
-  <div class="panel" onclick={(e) => e.stopPropagation()}>
+<div class="dlg-overlay" onclick={onclose} role="presentation">
+  <div class="dlg panel" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Bessere Version suchen">
 
     <div class="hdr">
-      <span class="title">BESSERE VERSION SUCHEN</span>
-      <button class="close-btn" onclick={onclose}>✕</button>
+      <span class="dlg-title">Bessere Version suchen</span>
+      <button class="btn btn-icon btn-sm close-btn" onclick={onclose} title="Schließen" aria-label="Schließen"><i class="ti ti-x"></i></button>
     </div>
 
     <div class="current">
-      <span class="cur-label">Aktuell:</span>
+      <span class="eyebrow">Aktuell</span>
       <span class="cur-title" title={track?.title}>{track?.title}</span>
       {#if track?.bitrate_kbps}
         <span class="cur-meta">{track.bitrate_kbps} kbps</span>
@@ -54,32 +54,32 @@
     </div>
 
     <div class="search-row">
-      <input class="q-input" type="text" bind:value={query}
-        placeholder="Suchbegriff…"
+      <input class="field q-input" type="text" bind:value={query}
+        placeholder="Suchbegriff…" aria-label="Suchbegriff"
         onkeydown={(e) => e.key === 'Enter' && doSearch()} />
-      <button class="search-btn" onclick={doSearch} disabled={searching}>
-        {searching ? '…' : '⌕ Suchen'}
+      <button class="btn btn-primary" onclick={doSearch} disabled={searching}>
+        <i class="ti ti-search"></i> {searching ? 'Sucht…' : 'Suchen'}
       </button>
     </div>
 
     <div class="opts-row">
       <label class="opt-label">
-        Format:
-        <select bind:value={fmt} class="fmt-sel">
+        Format
+        <select bind:value={fmt} class="field field-sm fmt-sel">
           {#each formats as f}
             <option value={f}>{f}</option>
           {/each}
         </select>
       </label>
-      <label class="opt-label chk">
+      <label class="dlg-check">
         <input type="checkbox" bind:checked={removeOld} />
-        Alte Version aus Bibliothek entfernen
+        Alte Version aus der Bibliothek entfernen
       </label>
     </div>
 
     <div class="results">
       {#if !$searchResults && !searching}
-        <div class="hint">Suche starten um Ergebnisse zu laden</div>
+        <div class="hint">Suche starten, um Ergebnisse zu laden</div>
       {:else if searching}
         <div class="hint">Suche läuft…</div>
       {:else if !$searchResults?.results?.length}
@@ -93,9 +93,9 @@
               <span class="r-meta">{r.uploader}</span>
             </div>
             <div class="r-right">
-              {#if r.abr}<span class="r-abr">{Math.round(r.abr)}k</span>{/if}
+              {#if r.abr}<span class="r-abr">{Math.round(r.abr)} kbps</span>{/if}
               <span class="r-dur">{fmt_dur(r.duration)}</span>
-              <button class="dl-btn">⬇ Laden</button>
+              <span class="btn btn-sm dl-btn"><i class="ti ti-download"></i> Laden</span>
             </div>
           </div>
         {/each}
@@ -106,92 +106,27 @@
 </div>
 
 <style>
-  .overlay {
-    position: fixed; inset: 0; z-index: 2000;
-    background: rgba(0,0,0,.75); backdrop-filter: blur(3px);
-    display: flex; align-items: center; justify-content: center;
-  }
-  .panel {
-    background: var(--c-bg3); border: 1px solid var(--c-br2); border-radius: 6px;
-    width: 580px; max-height: 78vh; display: flex; flex-direction: column;
-    box-shadow: 0 20px 60px rgba(0,0,0,.9);
-  }
-  .hdr {
-    display: flex; align-items: center; padding: 11px 16px;
-    border-bottom: 1px solid var(--c-br1); flex-shrink: 0;
-  }
-  .title {
-    font-size: 10px; font-weight: 700; letter-spacing: 1.8px; color: var(--c-tx6);
-  }
-  .close-btn {
-    margin-left: auto; background: none; border: none; color: var(--c-tx7);
-    font-size: 12px; cursor: pointer; padding: 4px 8px; border-radius: 3px;
-  }
-  .close-btn:hover { color: var(--c-red-tx); }
-
-  .current {
-    display: flex; align-items: center; gap: 10px;
-    padding: 8px 16px; border-bottom: 1px solid var(--c-br1); flex-shrink: 0;
-  }
-  .cur-label { font-size: 10px; color: var(--c-tx7); flex-shrink: 0; }
-  .cur-title { font-size: 12px; color: var(--c-tx4); flex: 1; overflow: hidden;
-               text-overflow: ellipsis; white-space: nowrap; }
-  .cur-meta  { font-size: 10px; color: var(--c-tx7); flex-shrink: 0; }
-
-  .search-row {
-    display: flex; gap: 8px; padding: 10px 16px; flex-shrink: 0;
-    border-bottom: 1px solid var(--c-br1);
-  }
-  .q-input {
-    flex: 1; background: var(--c-bg5); border: 1px solid var(--c-br2); border-radius: 3px;
-    color: var(--c-tx2); font-size: 12px; padding: 5px 10px; outline: none;
-  }
-  .q-input:focus { border-color: var(--c-accent); }
-  .search-btn {
-    background: var(--c-accent); border: none; border-radius: 3px;
-    color: #fff; font-size: 11px; padding: 5px 14px; cursor: pointer;
-    transition: background .1s;
-  }
-  .search-btn:hover:not(:disabled) { background: var(--c-accent2); }
-  .search-btn:disabled { background: var(--c-br1); color: var(--c-tx7); cursor: default; }
-
-  .opts-row {
-    display: flex; align-items: center; gap: 20px;
-    padding: 6px 16px 8px; border-bottom: 1px solid var(--c-br1); flex-shrink: 0;
-  }
-  .opt-label { display: flex; align-items: center; gap: 6px;
-               font-size: 11px; color: var(--c-tx5); cursor: pointer; }
-  .opt-label.chk input { accent-color: var(--c-accent); }
-  .fmt-sel {
-    background: var(--c-bg5); border: 1px solid var(--c-br2); border-radius: 3px;
-    color: var(--c-tx4); font-size: 11px; padding: 2px 6px;
-  }
-
-  .results { flex: 1; overflow-y: auto; padding: 4px 0; }
-
-  .hint { padding: 30px 20px; text-align: center; font-size: 12px; color: var(--c-tx7); }
-
-  .result-row {
-    display: flex; align-items: center; gap: 10px;
-    padding: 7px 16px; border-bottom: 1px solid var(--c-br1);
-    cursor: pointer; transition: background .08s;
-  }
+  .panel { width: 620px; max-height: 80vh; padding: 0; gap: 0; }
+  .hdr { display: flex; align-items: center; padding: var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-5); border-bottom: 1px solid var(--c-br1); flex-shrink: 0; }
+  .close-btn { margin-left: auto; }
+  .current { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-3) var(--sp-5); border-bottom: 1px solid var(--c-br1); flex-shrink: 0; }
+  .cur-title { flex: 1; min-width: 0; font-size: var(--fs-body); font-weight: 600; color: var(--c-tx1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cur-meta { flex-shrink: 0; font-size: var(--fs-sm); color: var(--c-tx3); font-variant-numeric: tabular-nums; }
+  .search-row { display: flex; gap: var(--sp-2); padding: var(--sp-3) var(--sp-5) var(--sp-2); flex-shrink: 0; }
+  .q-input { flex: 1; }
+  .opts-row { display: flex; align-items: center; gap: var(--sp-5); flex-wrap: wrap; padding: var(--sp-2) var(--sp-5) var(--sp-3); border-bottom: 1px solid var(--c-br1); flex-shrink: 0; }
+  .opt-label { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-body); color: var(--c-tx2); }
+  .fmt-sel { width: auto; }
+  .results { flex: 1; overflow-y: auto; }
+  .hint { padding: 32px var(--sp-5); text-align: center; font-size: var(--fs-body); color: var(--c-tx3); }
+  .result-row { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-2) var(--sp-5); border-bottom: 1px solid var(--c-br1); cursor: pointer; }
   .result-row:hover { background: var(--c-hover); }
-  .result-row:hover .dl-btn { opacity: 1; }
-
+  .result-row:hover .dl-btn, .result-row:focus-visible .dl-btn { opacity: 1; }
   .r-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-  .r-title { font-size: 12px; color: var(--c-tx3); overflow: hidden;
-             text-overflow: ellipsis; white-space: nowrap; }
-  .r-meta  { font-size: 10px; color: var(--c-tx6); }
-
-  .r-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-  .r-abr   { font-size: 10px; color: var(--c-green-tx); }
-  .r-dur   { font-size: 10px; color: var(--c-tx6); min-width: 36px; text-align: right; }
-
-  .dl-btn {
-    background: var(--c-green-bg); border: 1px solid var(--c-green-br); border-radius: 3px;
-    color: var(--c-green-tx); font-size: 10px; padding: 3px 9px; cursor: pointer;
-    opacity: 0; transition: opacity .1s, border-color .1s, color .1s;
-  }
-  .dl-btn:hover { border-color: var(--c-green-tx); color: var(--c-green-tx); }
+  .r-title { font-size: var(--fs-body); color: var(--c-tx1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .r-meta { font-size: var(--fs-sm); color: var(--c-tx4); }
+  .r-right { display: flex; align-items: center; gap: var(--sp-3); flex-shrink: 0; }
+  .r-abr { font-size: var(--fs-sm); font-weight: 600; color: var(--c-green-tx); font-variant-numeric: tabular-nums; }
+  .r-dur { font-size: var(--fs-sm); color: var(--c-tx3); min-width: 36px; text-align: right; font-variant-numeric: tabular-nums; }
+  .dl-btn { opacity: 0; transition: opacity .1s; }
 </style>
