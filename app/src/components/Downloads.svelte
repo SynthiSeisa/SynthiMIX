@@ -205,7 +205,7 @@
   </div>
 
   {#if $videoCheckPending > 0}
-    <div class="check-line" role="status"><i class="ti ti-refresh spinner"></i> Prüfe, ob es eine Song-Version ohne Video-Intro gibt…</div>
+    <div class="check-line" role="status"><i class="ti ti-refresh spinner"></i> Prüfe Link: schon in der Bibliothek? Gibt es eine Song-Version ohne Video-Intro?</div>
   {/if}
 
   <!-- Suchergebnisse -->

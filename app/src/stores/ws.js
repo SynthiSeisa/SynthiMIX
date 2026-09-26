@@ -58,6 +58,15 @@ export const playlistChoice      = writable(null)   // null | {pending:true} | {
 // Musikvideo-Links: Warteliste der Rueckfragen und laufende Pruefungen
 export const videoChoices        = writable([])     // [{url, format, video:{title,uploader,duration}, song:{url,title,uploader,duration}}]
 export const videoCheckPending   = writable(0)
+// Download eines Songs, der schon in der Bibliothek liegt: Warteliste der Rueckfragen
+export const dupeChoices         = writable([])     // [{url, format, video, matches:[{path,title,…}]}]
+export const revealPath          = writable(null)   // Bibliothek springt zu diesem Titel
+// Genres ergaenzen: {busy, progress:{done,total}, suggestions, applying:{done,total}, applied}
+export const genreState          = writable({})
+// Qualitaetspruefung: Fortschritt der Bandbreiten-Messung, Kandidaten und Ersetzen
+export const qualityScan         = writable(null)   // null | {done, total}
+export const qualityCandidates   = writable(null)   // {path, query, results, final}
+export const qualityReplace      = writable({})     // {[path]: {state, text}}
 export const spotdlInstalling    = writable(false)
 export const spotdlInstallText   = writable(null)   // Fortschrittstext während des Downloads
 export const spotdlInstallError  = writable(null)
@@ -270,6 +279,11 @@ function connect() {
       case 'track_meta_update':
         library.update(l => l.map(t => t.path === msg.track?.path ? { ...t, ...msg.track } : t))
         break
+      case 'quality_scan':
+        qualityScan.set(msg.finished ? null : { done: msg.done, total: msg.total })
+        break
+      case 'quality_candidates':      qualityCandidates.set(msg); break
+      case 'quality_replace_status':  qualityReplace.update(m => ({ ...m, [msg.path]: { state: msg.state, text: msg.text } })); break
       case 'analyze_progress':
         if (msg.finished) analyzeProgress.set(null)
         else analyzeProgress.set({ done: msg.done, total: msg.total })
@@ -291,6 +305,11 @@ function connect() {
       case 'video_check_pending':     videoCheckPending.update(n => n + 1); break
       case 'video_check_done':        videoCheckPending.update(n => Math.max(0, n - 1)); break
       case 'video_choice':            videoChoices.update(l => [...l, msg]); break
+      case 'dupe_choice':             dupeChoices.update(l => [...l, msg]); break
+      case 'genre_progress':          genreState.update(s => ({ ...s, progress: { done: msg.done, total: msg.total } })); break
+      case 'genre_suggestions':       genreState.update(s => ({ ...s, busy: false, progress: null, suggestions: msg })); break
+      case 'genre_apply_progress':    genreState.update(s => ({ ...s, applying: { done: msg.done, total: msg.total } })); break
+      case 'genre_applied':           genreState.update(s => ({ ...s, applying: null, applied: msg })); break
       case 'spotdl_install_progress': spotdlInstalling.set(true);  spotdlInstallError.set(null); spotdlInstallText.set(msg.text ?? null); break
       case 'spotdl_install_done':     spotdlInstalling.set(false); spotdlInstallText.set(null); if (msg.version) toolsInfo.update(t => ({ ...t, spotdl_version: msg.version })); break
       case 'spotdl_install_error':    spotdlInstalling.set(false); spotdlInstallText.set(null); spotdlInstallError.set(msg.text ?? 'Fehler'); break

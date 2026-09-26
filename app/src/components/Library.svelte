@@ -1,13 +1,15 @@
 <script>
-  import { onMount, untrack } from 'svelte'
-  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected } from '../stores/ws.js'
+  import { onMount, untrack, tick } from 'svelte'
+  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected, qualityScan, revealPath } from '../stores/ws.js'
   import BetterVersionDialog from './BetterVersionDialog.svelte'
   import { keySortValue } from '../lib/keys.js'
   import KeyChip from './KeyChip.svelte'
   import { density } from '../lib/prefs.js'
   import DuplicateScanDialog from './DuplicateScanDialog.svelte'
+  import GenreDialog from './GenreDialog.svelte'
 
   let showDupeScan     = $state(false)
+  let showGenres       = $state(false)
   let showPlDupeScan   = $state(false)
   let editTrack        = $state(null)   // { path, title, artist } — metadata edit dialog
   let plNameDialog     = $state(false)  // add playlist dialog
@@ -141,7 +143,7 @@
   // Download-Baum ergeben. "Mein Computer" braeuchte eine Ordnerabfrage,
   // "Duplikate" einen Scan — die startet man lieber bewusst.
   function restorableMode(mode) {
-    if (['all', 'recent', 'history', 'dl_recent', 'dl_all'].includes(mode)) return mode
+    if (['all', 'recent', 'history', 'dl_recent', 'dl_all', 'quality'].includes(mode)) return mode
     if (/^(artist|album|genre|playlist):/.test(mode)) return mode
     if (mode.startsWith('dl:') && !mode.startsWith('dl:file:')) return mode
     return null
@@ -612,6 +614,10 @@
         return (t.genre ?? '').split(/[,;/]/).map(s => s.trim().toLowerCase()).includes(target)
       }
       if (navMode === 'duplicates') return dupesAll.has(t.path)
+      if (navMode === 'quality') {
+        const r = qualityInfo.map.get(t.path)
+        return !!r && (qualityFilter === 'all' || r.includes(qualityFilter))
+      }
       if (navMode === 'all' && hideDupesAuto) return !globalDupes.hidden.has(t.path)
       return true
     })
@@ -691,6 +697,43 @@
     return Math.min(kbps, fromStream ? 160 : 320)   // YouTube liefert hoechstens ~160 kbps
   }
   function isLossless(t) { return LOSSLESS_EXT.has((t.ext ?? '').toLowerCase().replace('.', '')) }
+
+  // ── Qualitaet ─────────────────────────────────────────────────────────────
+  // Drei Gruende: Musikvideo-Version (Intro, Pausen), echte niedrige Bitrate,
+  // und hochgerechnet — die Datei behauptet viel kbps, schneidet die Hoehen
+  // aber wie eine 128er-Quelle ab (Messung im Backend, Feld cutoff_khz).
+  const QUALITY_MIN_SEC = 60                 // Samples und FX nicht bewerten
+  const CUTOFF_UPSCALED = 17.0               // kHz, wie _CUTOFF_UPSCALED_KHZ im Backend
+  const MV_TITLE_RE = /\b(official\s+(?:music\s+)?video|music\s+video|official\s+mv|mv)\b/i
+  const QUALITY_LABELS = { video: 'Musikvideo', bitrate: 'Niedrige Bitrate', upscaled: 'Hochgerechnet' }
+  const QUALITY_TIPS = {
+    video: 'Musikvideo-Version: oft Intro, Pausen oder Geräusche',
+    bitrate: 'Unter 192 kbps',
+    upscaled: 'Höhen enden früh — klingt wie höchstens 128 kbps, egal was die Datei angibt',
+  }
+  function qualityReasons(t) {
+    if (t.missing || (t.duration_sec ?? 0) < QUALITY_MIN_SEC || STEM_RE.test(t.title ?? '')) return []
+    const r = []
+    if (MV_TITLE_RE.test(t.title ?? '')) r.push('video')
+    const kbps = t.bitrate_kbps ?? 0
+    if (!isLossless(t) && kbps > 0 && kbps < 192) r.push('bitrate')
+    else if ((t.cutoff_khz ?? 0) > 5 && t.cutoff_khz < CUTOFF_UPSCALED) r.push('upscaled')
+    return r
+  }
+  const qualityInfo = $derived.by(() => {
+    const map = new Map()
+    const counts = { video: 0, bitrate: 0, upscaled: 0 }
+    let measured = 0
+    for (const t of $library) {
+      if (t.cutoff_khz != null) measured++
+      const r = qualityReasons(t)
+      if (!r.length) continue
+      map.set(t.path, r)
+      for (const k of r) counts[k]++
+    }
+    return { map, counts, measured }
+  })
+  let qualityFilter = $state('all')
 
   function findDupes(tracks) {
     const byKey = new Map()  // normalized key → track[]
@@ -871,12 +914,39 @@
   // Scroll sync: header follows rows horizontally
   let _colHeaderEl = $state(null)
   let _rowsEl      = $state(null)
-  function onRowsScroll() { if (_colHeaderEl && _rowsEl) _colHeaderEl.scrollLeft = _rowsEl.scrollLeft }
+  function onRowsScroll() { if (_colHeaderEl && _rowsEl) _colHeaderEl.scrollLeft = _rowsEl.scrollLeft; qTip = null }
+
+  // Hinweis zum Warnzeichen: frei schwebend, damit ihn Tabellenrand und
+  // Scrollbereich nicht abschneiden
+  let qTip = $state(null)   // { x, y, track, reasons }
+  function showQTip(e, track) {
+    const r = e.currentTarget.getBoundingClientRect()
+    qTip = { x: Math.min(r.right + 6, window.innerWidth - 356), y: r.top + r.height / 2,
+             track, reasons: qualityInfo.map.get(track.path) ?? [] }
+  }
 
   // Virtual scrolling
   // Zeilenhoehe folgt der Dichte (lib/ui.css: --row-h) — die virtuelle
   // Liste muss dieselbe Hoehe rechnen, sonst springt das Scrollen
   const ROW_H  = $derived($density === 'comfortable' ? 40 : 28)
+
+  // Sprung zu einem Titel (z. B. "Zeigen" in der Download-Rueckfrage): Alle Titel,
+  // Suche leeren, ausgeblendete Kopie notfalls einblenden, markieren, hinscrollen.
+  $effect(() => {
+    const p = $revealPath
+    if (!p) return
+    untrack(() => {
+      selectNav('all')
+      if (globalDupes.hidden.has(p)) hideDupesAuto = false
+      selected = new Set([p])
+      selectionOwner.set('library')
+      tick().then(() => {
+        const idx = filtered.findIndex(t => t.path === p)
+        if (idx >= 0 && _rowsEl) _rowsEl.scrollTop = Math.max(0, idx * ROW_H - _rowsEl.clientHeight / 2)
+      })
+    })
+    revealPath.set(null)
+  })
   const BUFFER = 30
   let _scrollTop  = $state(0)
   let _clientH    = $state(600)
@@ -1048,6 +1118,7 @@
 
   function qualityDot(track) {
     const ext = track.path?.split('.').pop()?.toLowerCase() ?? ''
+    if ((track.cutoff_khz ?? 0) > 5 && track.cutoff_khz < CUTOFF_UPSCALED) return 'q-red'
     if (['flac', 'wav', 'aiff', 'aif', 'alac'].includes(ext)) return 'q-green'
     const br = track.bitrate_kbps ?? 0
     if (br >= 192) return 'q-green'
@@ -1295,6 +1366,14 @@
           <span class="t-count">{globalDupes.groups.length}</span>
         </button>
       {/if}
+      {#if qualityInfo.map.size > 0 || navMode === 'quality'}
+        <button class="t-item {navMode === 'quality' ? 'active' : ''}" onclick={() => selectNav('quality')}
+                title="Titel mit schlechter Qualität: Musikvideo-Versionen, niedrige Bitrate, hochgerechnete Dateien">
+          <i class="ti ti-alert-triangle t-ico t-ico-warn" aria-hidden="true"></i>
+          <span class="t-name">Qualität</span>
+          <span class="t-count">{qualityInfo.map.size}</span>
+        </button>
+      {/if}
       {#if $favorites.length > 0}
         <div class="fav-wrap">
           <button class="t-item {favOpen ? 'active' : ''}" onclick={(e) => { e.stopPropagation(); favOpen = !favOpen }}>
@@ -1493,12 +1572,17 @@
     {/if}
 
     <!-- 4. GENRES -->
-    {#if genres.length > 0}
-    <button class="t-sec-hdr" onclick={() => toggleSection('genre')}>
+    {#if genres.length > 0 || !navQ}
+    <div class="t-sec-hdr" role="button" tabindex="0"
+         onclick={() => toggleSection('genre')}
+         onkeydown={(e) => e.key === 'Enter' && toggleSection('genre')}>
       <i class="ti ti-chevron-right t-chevron" class:open={secGenreOpen} aria-hidden="true"></i>
       <span class="t-sec-label">Genres</span>
       <span class="t-count">{zahl(filteredGenres.length, genres.length)}</span>
-    </button>
+      <span class="row-act" title="Genres vereinheitlichen und fehlende ergänzen" aria-label="Genres ergänzen" role="button" tabindex="0"
+            onclick={(e) => { e.stopPropagation(); showGenres = true }}
+            onkeydown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); showGenres = true } }}><i class="ti ti-wand"></i></span>
+    </div>
     {#if secGenreOpen}
       {#each filteredGenres as genre}
         <button class="t-child {navMode === 'genre:' + genre.toLowerCase() ? 'active' : ''}"
@@ -1722,6 +1806,25 @@
         <button class="btn btn-icon btn-sm" onclick={addAllToQueue} title="Alle angezeigten Titel einreihen" aria-label="Alle angezeigten Titel einreihen"><i class="ti ti-playlist-add"></i></button>
       {/if}
     </div>
+    {#if navMode === 'quality'}
+      <div class="dupe-info quality-info" role="status">
+        <p class="dupe-text">
+          {#if qualityInfo.map.size}<b>{qualityInfo.map.size} Titel mit schlechter Qualität.</b>{:else}<b>Keine Titel mit schlechter Qualität.</b>{/if}
+          Doppelklick oder Rechtsklick → „Bessere Version suchen“ ersetzt die Datei unter gleichem Namen und Ordner.
+          {#if $qualityScan}
+            <span class="q-scan"><i class="ti ti-refresh spinner"></i> Höhen-Messung läuft: {$qualityScan.done} / {$qualityScan.total}</span>
+          {/if}
+        </p>
+        <div class="btn-group" role="radiogroup" aria-label="Grund">
+          <button class="btn btn-sm" class:is-active={qualityFilter === 'all'} role="radio" aria-checked={qualityFilter === 'all'}
+                  onclick={() => qualityFilter = 'all'}>Alle <span class="q-n">{qualityInfo.map.size}</span></button>
+          {#each Object.keys(QUALITY_LABELS) as k}
+            <button class="btn btn-sm" class:is-active={qualityFilter === k} role="radio" aria-checked={qualityFilter === k}
+                    title={QUALITY_TIPS[k]} onclick={() => qualityFilter = k}>{QUALITY_LABELS[k]} <span class="q-n">{qualityInfo.counts[k]}</span></button>
+          {/each}
+        </div>
+      </div>
+    {/if}
     {#if navMode === 'duplicates'}
       <div class="dupe-info" role="status">
         {#if dupesGroups.length > 0}
@@ -1758,6 +1861,7 @@
     <div class="col-header-wrap">
       <div class="col-header" bind:this={_colHeaderEl}>
         <div class="col-pad"></div>
+        {#if navMode === 'quality'}<div class="q-col" aria-hidden="true"></div>{/if}
         {#each cols as col, ci}
           <button
             class="col-btn {sortCol === col.key ? 'sort-active' : ''}"
@@ -1820,11 +1924,20 @@
                    draggable="true"
                    ondragstart={(e) => dragStart(e, track)}
                    onclick={(e) => handleRowClick(e, track)}
-                   ondblclick={(e) => onCtx(e, track)}
+                   ondblclick={(e) => navMode === 'quality' ? openBetterVersion(track) : onCtx(e, track)}
                    oncontextmenu={(e) => onCtx(e, track)}>
                 <div class="col-pad">
                   {#if qdot}<span class="qdot {qdot}"></span>{/if}
                 </div>
+                {#if navMode === 'quality'}
+                  {@const reasons = qualityInfo.map.get(track.path) ?? []}
+                  <span class="q-col" role="img" aria-label={reasons.map(k => QUALITY_LABELS[k]).join(', ')}
+                        onmouseenter={(e) => showQTip(e, track)} onmouseleave={() => qTip = null}>
+                    {#if reasons.length}
+                      <i class="ti ti-alert-triangle q-warn {reasons.some(k => k !== 'video') ? 'q-bad' : ''}" aria-hidden="true"></i>
+                    {/if}
+                  </span>
+                {/if}
                 {#each cols as col}
                   {#if col.key === 'title'}
                     <span class="cell c-title" style="width:{colWidths.title}px" title={track.title}>
@@ -1884,6 +1997,19 @@
 
 <!-- Click-outside / right-click-outside to close context menu -->
 <svelte:window onclick={() => { closeCtx(); folderCtx = null; playlistCtx = null; colPickerOpen = false; favOpen = false }} oncontextmenu={() => { if (!ctxMenu) return; closeCtx() }} onkeydown={libKey} />
+
+{#if qTip && qTip.reasons.length}
+  <div class="q-tip" role="tooltip" style="left:{qTip.x}px;top:{qTip.y}px">
+    {#each qTip.reasons as k}
+      <span class="q-tip-row"><b>{QUALITY_LABELS[k]}</b> {QUALITY_TIPS[k]}{#if k === 'upscaled' && qTip.track.cutoff_khz} (Höhen bis {qTip.track.cutoff_khz} kHz){:else if k === 'bitrate'} ({qTip.track.bitrate_kbps} kbps){/if}</span>
+    {/each}
+    <span class="q-tip-hint">Doppelklick: bessere Version suchen</span>
+  </div>
+{/if}
+
+{#if showGenres}
+  <GenreDialog onclose={() => showGenres = false} />
+{/if}
 
 {#if betterVersionTrack}
   <BetterVersionDialog track={betterVersionTrack} onclose={() => betterVersionTrack = null} />
@@ -2264,6 +2390,24 @@
   }
   .dupe-text { flex: 1 1 320px; margin: 0; font-size: var(--fs-body); color: var(--c-tx2); line-height: 1.45; }
   .dupe-text b { color: var(--c-tx1); }
+  .quality-info .btn-group { flex-wrap: wrap; }
+  .q-n { font-variant-numeric: tabular-nums; opacity: .8; margin-left: 2px; }
+  .q-scan { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; color: var(--c-tx3); font-size: var(--fs-sm); }
+  .spinner { display: inline-block; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  /* Warn-Spalte der Qualitaets-Ansicht: Titel beginnen buendig, Grund beim Draufzeigen */
+  .q-col { width: 22px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; position: relative; }
+  .q-warn { font-size: 15px; color: var(--c-warn-tx); cursor: help; }
+  .q-warn.q-bad { color: var(--c-red-tx); }
+  .q-tip {
+    position: fixed; transform: translateY(-50%); z-index: 1000;
+    display: flex; flex-direction: column; gap: 3px;
+    width: max-content; max-width: 340px; padding: 8px 10px; border-radius: var(--r-m);
+    background: var(--c-bg5); border: 1px solid var(--c-br2); box-shadow: 0 6px 18px rgba(0,0,0,.35);
+    pointer-events: none; font-size: var(--fs-sm); color: var(--c-tx2); line-height: 1.4;
+  }
+  .q-tip-row b { color: var(--c-tx1); }
+  .q-tip-hint { margin-top: 2px; font-size: var(--fs-cap); color: var(--c-tx4); }
   .dupe-best { text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }
   .dupe-acts { display: flex; gap: var(--sp-2); flex-shrink: 0; }
 

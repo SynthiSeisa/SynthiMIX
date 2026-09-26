@@ -10,6 +10,7 @@
   import Settings  from './components/Settings.svelte'
   import PlaylistChoiceDialog from './components/PlaylistChoiceDialog.svelte'
   import VideoChoiceDialog from './components/VideoChoiceDialog.svelte'
+  import DupeChoiceDialog from './components/DupeChoiceDialog.svelte'
   // Theme und Dichte (Kompakt / Komfortabel) setzen beim Import ihre
   // Attribute am <html> — siehe lib/prefs.js
   import './lib/prefs.js'
@@ -185,6 +186,7 @@
 
   <PlaylistChoiceDialog />
   <VideoChoiceDialog />
+  <DupeChoiceDialog />
 </div>
 
 <style>

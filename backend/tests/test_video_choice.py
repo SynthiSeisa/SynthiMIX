@@ -92,3 +92,78 @@ class VideoChoiceTest(BackendTest):
         ws, gestartet = self._ablauf(VIDEO, [])
         self.assertEqual(gestartet, ["https://www.youtube.com/watch?v=VID"])
         self.assertEqual(ws.of_type("video_choice"), [])
+
+
+class DownloadDupeTest(BackendTest):
+    """Vor dem Laden: gibt es den Song schon in der Bibliothek?"""
+
+    LIB = [
+        {"path": "M/Vance Joy - Riptide (Official Video).mp3", "title": "Vance Joy - 'Riptide' Official Video",
+         "artist": "VanceJoyVEVO", "duration_sec": 204},
+        {"path": "M/Meiko - Leave The Lights On (Krot Remix).mp3",
+         "title": "Meiko - Leave The Lights On (Krot Remix)", "artist": "SuicideSheeep", "duration_sec": 405},
+        {"path": "M/Higher.mp3", "title": "Higher", "artist": "", "duration_sec": 180},
+        {"path": "M/Where Are U Now.mp3", "title": "Skrillex & Diplo - Where Are Ü Now (feat. Justin Bieber)",
+         "duration_sec": 250},
+    ]
+
+    def setUp(self):
+        super().setUp()
+        main._state["library"] = [dict(t) for t in self.LIB]
+
+    def titles(self, video):
+        return [m["title"] for m in main._library_matches(video)]
+
+    def test_gleicher_song_trotz_abweichungen(self):
+        self.assertEqual(self.titles({"title": "Riptide", "artist": "Vance Joy", "duration": 204}),
+                         ["Vance Joy - 'Riptide' Official Video"])
+        self.assertEqual(len(self.titles({"title": "Skrillex & Diplo - Where Are U Now ft. Justin Bieber",
+                                          "duration": 251})), 1)
+
+    def test_remix_und_original_sind_verschieden(self):
+        self.assertEqual(self.titles({"title": "Leave The Lights On", "artist": "Meiko", "duration": 230}), [])
+        self.assertEqual(len(self.titles({"title": "Leave The Lights On (Krot Remix)", "artist": "Meiko",
+                                          "duration": 406})), 1)
+
+    def test_ohne_kuenstler_muss_die_laenge_passen(self):
+        # Bibliothekstitel ohne Kuenstler: gleicher Titel bis 30 s, aehnlicher nur bei fast gleicher Laenge
+        self.assertEqual(self.titles({"title": "Higher", "artist": "Jauz", "duration": 200}), ["Higher"])
+        self.assertEqual(self.titles({"title": "Higher", "artist": "Jauz", "duration": 215}), [])
+        self.assertEqual(self.titles({"title": "Highers", "artist": "", "duration": 200}), [])
+        self.assertEqual(self.titles({"title": "Highers", "artist": "", "duration": 181}), ["Higher"])
+
+    def _ablauf(self, check_dupes=True):
+        ws, gestartet = FakeWS(), []
+
+        async def probe(url):
+            return {"url": url, "title": "Riptide", "artist": "Vance Joy", "uploader": "Vance Joy", "duration": 204}
+
+        async def download(url, fmt="mp3-best"):
+            gestartet.append(url)
+
+        async def search(query, n=3):
+            return []
+
+        alt = (main._probe_video, main.run_download, main._ytm_song_search)
+        main._probe_video, main.run_download, main._ytm_song_search = probe, download, search
+        try:
+            async def los():
+                await main._check_video_then_download("https://music.youtube.com/watch?v=R", "mp3-best", ws,
+                                                      check_dupes=check_dupes)
+                await asyncio.sleep(0)
+            self.run_async(los())
+        finally:
+            main._probe_video, main.run_download, main._ytm_song_search = alt
+        return ws, gestartet
+
+    def test_treffer_fragt_nach(self):
+        ws, gestartet = self._ablauf()
+        self.assertEqual(gestartet, [])
+        frage = ws.of_type("dupe_choice")
+        self.assertEqual(len(frage), 1)
+        self.assertEqual(frage[0]["matches"][0]["path"], "M/Vance Joy - Riptide (Official Video).mp3")
+
+    def test_trotzdem_laden(self):
+        ws, gestartet = self._ablauf(check_dupes=False)
+        self.assertEqual(ws.of_type("dupe_choice"), [])
+        self.assertEqual(gestartet, ["https://music.youtube.com/watch?v=R"])

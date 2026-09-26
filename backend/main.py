@@ -148,6 +148,7 @@ async def lifespan(application: FastAPI):
     asyncio.create_task(_auto_scan_loop())
     asyncio.create_task(_ytdlp_autoupdate_loop())
     asyncio.create_task(_refresh_tag_meta_task())
+    asyncio.create_task(_quality_scan_loop())
     print(f"[backend] ready on ws://127.0.0.1:{_BACKEND_PORT}/ws", flush=True)
     yield
 
@@ -358,6 +359,8 @@ def load_library():
             "ext":          str(t.get("ext", Path(str(t.get("path",""))).suffix.lstrip('.').lower())),
             "mtime":        int(t.get("mtime", 0)),
             "play_count":   int(t.get("play_count", 0)),
+            # Obere Grenzfrequenz (Qualitaetspruefung); fehlt = noch nicht gemessen
+            **({"cutoff_khz": float(t["cutoff_khz"])} if t.get("cutoff_khz") is not None else {}),
             **({"unanalyzable": True} if t.get("unanalyzable") else {}),
             **({"missing": True} if t.get("missing") else {}),
         })
@@ -1142,6 +1145,625 @@ async def _enrich_track(path: str, force: bool = False):
 
     save_queue()
     await broadcast({"type": "track_enriched", "path": path, "art": art, "lufs": lufs, "bpm": bpm, "duration_sec": duration})
+
+# ── Qualitaet: Bandbreite messen, bessere Version einsetzen ─────────────────
+# Die Bitrate sagt wenig: YouTube-Konverter schreiben "320 kbps" auch aus einer
+# 128er-Quelle. Verraten wird das von der oberen Grenzfrequenz — verlustbehaftete
+# Encoder schneiden die Hoehen ab. Gemessen 09/2026 an der Bibliothek:
+#   dvdvideosoft-Dateien ("320 kbps")   ~16 kHz
+#   eigene Downloads (YouTube-Opus, V0) ~20 kHz
+#   FLAC / echte WAV                    ~22 kHz
+_CUTOFF_UPSCALED_KHZ = 17.0    # darunter klingt eine Datei wie <= 128 kbps
+_QUALITY_MIN_SEC     = 60      # Samples, FX, Chops nicht pruefen
+_QUALITY_PARALLEL    = 2
+_QUALITY_RESCAN_SEC  = 600     # neue Titel werden spaeter nachgemessen
+
+
+def _cutoff_khz_sync(path: str, duration: float = 0) -> float:
+    """Obere Grenzfrequenz in kHz aus 10 s ab 40 % der Laenge. 0 = nicht messbar."""
+    if not _numpy_ok():
+        return 0.0
+    import numpy as np
+    sr, n = 44100, 8192
+    start = max(0.0, (duration or 0) * 0.4)
+    cmd = [FFMPEG, "-nostdin", "-v", "error", "-ss", f"{start:.1f}", "-t", "10", "-i", path,
+           "-ac", "1", "-ar", str(sr), "-f", "f32le", "-"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=60, creationflags=_NO_WINDOW)
+    except Exception:
+        return 0.0
+    x = np.frombuffer(r.stdout, dtype=np.float32)
+    if x.size < n * 2:
+        return 0.0
+    win = np.hanning(n)
+    acc = np.zeros(n // 2 + 1)
+    cnt = 0
+    for i in range(0, x.size - n, n // 2):
+        seg = x[i:i + n]
+        if np.max(np.abs(seg)) < 1e-3:       # Stille zaehlt nicht
+            continue
+        acc += np.abs(np.fft.rfft(seg * win)) ** 2
+        cnt += 1
+    if not cnt:
+        return 0.0
+    db = 10 * np.log10(acc / cnt + 1e-20)
+    db = np.convolve(db, np.ones(19) / 19, mode="same")      # ~100 Hz glaetten
+    freqs = np.fft.rfftfreq(n, 1 / sr)
+    ref = float(np.median(db[(freqs > 2000) & (freqs < 8000)]))
+    above = np.where((db > ref - 45) & (freqs > 5000) & (freqs < 21900))[0]
+    return round(float(freqs[above[-1]]) / 1000, 1) if above.size else 5.0
+
+
+def _quality_pending() -> list[dict]:
+    return [lt for lt in _state["library"]
+            if lt.get("path") and lt.get("cutoff_khz") is None and not lt.get("missing")
+            and (lt.get("duration_sec") or 0) >= _QUALITY_MIN_SEC]
+
+
+async def _quality_scan_once():
+    pending = _quality_pending()
+    if not pending:
+        return
+    total, done = len(pending), 0
+    loop = asyncio.get_running_loop()
+    sem = asyncio.Semaphore(_QUALITY_PARALLEL)
+    await broadcast({"type": "quality_scan", "done": 0, "total": total})
+
+    async def one(lt):
+        nonlocal done
+        async with sem:
+            path = lt["path"]
+            if not os.path.exists(path):
+                return                        # Laufwerk fehlt: spaeter nochmal
+            lt["cutoff_khz"] = await loop.run_in_executor(
+                None, _cutoff_khz_sync, path, lt.get("duration_sec") or 0)
+            done += 1
+            if done % 25 == 0:
+                schedule_save()
+                await broadcast({"type": "quality_scan", "done": done, "total": total})
+            if done % 500 == 0:
+                await push_library()
+
+    await asyncio.gather(*(one(lt) for lt in pending))
+    save_library()
+    await push_library()
+    await broadcast({"type": "quality_scan", "done": done, "total": total, "finished": True})
+    print(f"[quality] Bandbreite gemessen: {done} Titel", flush=True)
+
+
+async def _quality_scan_loop():
+    """Misst im Hintergrund alle Titel ohne Wert, danach alle 10 Minuten neue."""
+    await asyncio.sleep(60)     # Start, Tag-Abgleich und Wiedergabe gehen vor
+    while True:
+        try:
+            await _quality_scan_once()
+        except Exception as e:
+            print(f"[quality] {e}", flush=True)
+        await asyncio.sleep(_QUALITY_RESCAN_SEC)
+
+
+async def _quality_candidates(path: str, query: str, ws: WebSocket):
+    """Kandidaten fuer "Bessere Version": Studio-Versionen zuerst, dann
+    YouTube-Uploads ohne Musikvideos. Zweistufig wie die Suche."""
+    lt = next((x for x in _state["library"] if x.get("path") == path), None)
+    q = (query or "").strip() or _song_query((lt or {}).get("title") or Path(path).stem)
+
+    async def send(results, final):
+        try:
+            await ws.send_text(json.dumps({"type": "quality_candidates", "path": path, "query": q,
+                                           "results": _public(results), "final": final}))
+        except Exception:
+            pass
+
+    songs, videos = await _songs_and_videos(q, 5, 8)
+    await send(_merge_songs_first(songs, videos), not songs)
+    if songs:
+        await _ytm_fill_details(songs)
+        songs = [r for r in songs if not _is_unwanted_result(r) and not LIVE_RE.search(r.get("title", ""))]
+        await send(_merge_songs_first(songs, videos), True)
+
+
+# Format der alten Datei → yt-dlp --audio-format (gleiche Endung, gleicher Name)
+_REPLACE_FORMATS = {"mp3": "mp3", "m4a": "m4a", "flac": "flac", "wav": "wav",
+                    "opus": "opus", "ogg": "vorbis", "aac": "aac"}
+_replace_running: set[str] = set()
+
+
+async def _download_replacement(url: str, ext: str, tmpdir: str) -> tuple[str | None, str]:
+    """Neue Version ohne eigene Tags und Cover in tmpdir laden (die kommen von
+    der alten Datei). Liefert (Pfad oder None, Fehlermeldung von yt-dlp)."""
+    cmd = _yt("-x", "--audio-format", _REPLACE_FORMATS[ext], "--audio-quality", "0",
+              "--no-playlist", "--newline", "--encoding", "utf-8",
+              "-o", os.path.join(tmpdir, "neu.%(ext)s"))
+    if FFMPEG_DIR:
+        cmd += ["--ffmpeg-location", FFMPEG_DIR]
+    cmd.append(url)
+    err = ""
+    try:
+        pr = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+            creationflags=_NO_WINDOW)
+        _, raw = await asyncio.wait_for(pr.communicate(), timeout=900)
+        lines = [l.strip() for l in raw.decode("utf-8", errors="replace").splitlines() if "ERROR" in l]
+        err = lines[-1].replace("ERROR:", "").strip()[:160] if lines else ""
+    except Exception as e:
+        return None, str(e)
+    want = ".ogg" if ext == "ogg" else "." + ext
+    found = [f for f in os.listdir(tmpdir) if f.lower().endswith(want)]
+    return (os.path.join(tmpdir, found[0]) if found else None), err
+
+
+def _copy_tags_sync(src: str, dst: str) -> bool:
+    """Alle Tags der alten Datei auf die neue: Titel, Kuenstler, Tonart und
+    Kommentar (Mixed In Key), Cover, rekordbox-/Serato-Felder. Was yt-dlp oder
+    ffmpeg selbst geschrieben haben, faellt weg."""
+    import mutagen
+    ext = Path(dst).suffix.lower()
+    try:
+        if ext == ".mp3":
+            from mutagen.id3 import ID3, ID3NoHeaderError
+            try:
+                tags = ID3(src)
+            except ID3NoHeaderError:
+                tags = None
+            try:
+                ID3(dst).delete()
+            except ID3NoHeaderError:
+                pass
+            if tags is not None:
+                v = tags.version[1] if tags.version[1] in (3, 4) else 4
+                tags.save(dst, v2_version=v)
+            return True
+        s_file, d_file = mutagen.File(src), mutagen.File(dst)
+        if d_file is None:
+            return False
+        if d_file.tags is not None:
+            d_file.delete()
+            d_file = mutagen.File(dst)
+        if s_file is not None and s_file.tags is not None:
+            if d_file.tags is None:
+                d_file.add_tags()
+            if ext in (".wav", ".aif", ".aiff"):
+                for frame in s_file.tags.values():
+                    d_file.tags.add(frame)
+            else:
+                for k, val in s_file.tags.items():
+                    d_file.tags[k] = val
+            if hasattr(s_file, "pictures") and hasattr(d_file, "add_picture"):
+                d_file.clear_pictures()
+                for pic in s_file.pictures:
+                    d_file.add_picture(pic)
+            d_file.save()
+        return True
+    except Exception as e:
+        print(f"[quality] Tags {Path(src).name}: {e}", flush=True)
+        return False
+
+
+async def _quality_replace(path: str, url: str, ws: WebSocket):
+    """Neue Version unter exakt demselben Namen und Pfad einsetzen, damit
+    rekordbox, Playlisten und Warteschlange den Titel weiter finden. Die alte
+    Datei geht in den Papierkorb. Schlaegt ein Schritt fehl, bleibt alles wie es war."""
+    async def status(state, text=""):
+        try:
+            await ws.send_text(json.dumps({"type": "quality_replace_status", "path": path,
+                                           "state": state, "text": text}))
+        except Exception:
+            pass
+
+    lt = next((x for x in _state["library"] if x.get("path") == path), None)
+    if lt is None or not os.path.exists(path):
+        await status("error", "Datei nicht gefunden.")
+        return
+    ci = _state.get("current_idx", -1)
+    q = _state.get("queue", [])
+    if 0 <= ci < len(q) and q[ci].get("path") == path:
+        await status("error", "Der Titel ist gerade im Player geladen. Erst einen anderen Titel spielen.")
+        return
+    ext = Path(path).suffix.lower().lstrip(".")
+    if ext not in _REPLACE_FORMATS:
+        await status("error", f"Dateien vom Typ .{ext} kann SynthiMIX nicht ersetzen.")
+        return
+    if path in _replace_running:
+        return
+    _replace_running.add(path)
+    tmpdir = tempfile.mkdtemp(prefix="synthimix-ersatz-")
+    loop = asyncio.get_running_loop()
+    try:
+        await status("download", "Lade die neue Version…")
+        new, err = await _download_replacement(url, ext, tmpdir)
+        if not new and "403" in err:
+            # YouTube weist nach vielen schnellen Abfragen gelegentlich ab — einmal nachfassen
+            await asyncio.sleep(3)
+            new, err = await _download_replacement(url, ext, tmpdir)
+        if not new:
+            await status("error", "Download fehlgeschlagen" + (f" ({err})" if err else "") + ". Nichts ersetzt.")
+            return
+        await status("tags", "Übernehme Tags und Cover…")
+        if not await loop.run_in_executor(None, _copy_tags_sync, path, new):
+            await status("error", "Tags ließen sich nicht übernehmen. Nichts ersetzt.")
+            return
+        # Ohne Audio-Endung: der Ordner-Waechter nimmt die Zwischendatei nicht auf
+        staged = path + ".synthimix-neu"
+        shutil.move(new, staged)
+        if not await loop.run_in_executor(None, _move_to_trash, path):
+            try: os.remove(staged)
+            except OSError: pass
+            await status("error", "Die alte Datei ließ sich nicht in den Papierkorb legen. Nichts ersetzt.")
+            return
+        try:
+            os.replace(staged, path)
+        except OSError as e:
+            await status("error", f"Neue Datei liegt unter {staged}, die alte im Papierkorb ({e}).")
+            return
+
+        probe = await loop.run_in_executor(None, _probe_sync, path)
+        dur = probe.get("duration_sec") or lt.get("duration_sec") or 0
+        lt["duration_sec"] = dur
+        lt["bitrate_kbps"] = probe.get("bitrate_kbps") or 0
+        lt["lufs"]         = -99.0
+        lt["mtime"]        = int(os.path.getmtime(path))
+        lt["meta_rev"]     = _TAG_META_REV
+        lt.pop("unanalyzable", None)
+        _unanalyzable_paths.discard(path)
+        lt["cutoff_khz"]   = await loop.run_in_executor(None, _cutoff_khz_sync, path, dur)
+        for item in _state["queue"]:
+            if item.get("path") == path:
+                item["lufs"] = -99.0
+                item["duration_sec"] = dur
+                item["bitrate_kbps"] = lt["bitrate_kbps"]
+        _wf_cache.pop(path, None)
+        save_library()
+        save_queue()
+        await broadcast({"type": "track_meta_update", "track": lt})
+        asyncio.create_task(_enrich_track(path))       # Lautheit neu messen
+        await status("done", f"Ersetzt: {lt['bitrate_kbps']} kbps, Höhen bis {lt['cutoff_khz']} kHz.")
+    finally:
+        _replace_running.discard(path)
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ── Genres: vereinheitlichen und fehlende ergaenzen ─────────────────────────
+# Grobe Hauptgenres, damit die Navigation uebersichtlich bleibt. Quellen fuer
+# fehlende Genres, in dieser Reihenfolge: Ordner-Regeln (die eigene Sortierung),
+# Last.fm-Tags des Titels, Spotify-Genres des Kuenstlers, Last.fm-Tags des
+# Kuenstlers. Nichts wird ohne Bestaetigung geschrieben (Vorschlagsliste).
+GENRES = ["Drum & Bass", "Dubstep", "House", "Techno", "Trance", "Hardstyle",
+          "EDM / Dance", "Pop", "Hip-Hop / Rap", "R&B / Soul", "Rock / Metal",
+          "Latin", "Schlager / Party", "Chill"]
+
+# Stichwort -> Hauptgenre. Reihenfolge zaehlt: Spezielles vor Allgemeinem
+# ("bass house" ist House, nicht EDM; "post-hardcore" ist Rock, nicht Hardstyle).
+_GENRE_RULES = [(g, re.compile(rx, re.IGNORECASE)) for g, rx in [
+    ("Drum & Bass",      r"drum\s*(?:and|n|&|'n'|’n’)?\s*bass|\bdnb\b|\bd\s*&\s*b\b|jungle|neuro\s*funk|\bneuro\b|jump\s*up|\bliquid\b|halftime|drumstep"),
+    ("Dubstep",          r"dubstep|riddim|brostep|tear\s*out"),
+    ("Rock / Metal",     r"post[\s-]*hardcore|metalcore|pop[\s-]*punk|melodic\s+hardcore"),
+    ("Hardstyle",        r"hardstyle|rawstyle|hard\s*dance|gabber|frenchcore|\bhardcore\b|hard\s*techno"),
+    ("Techno",           r"techno|\bminimal\b"),
+    ("Trance",           r"trance|\bgoa\b"),
+    ("House",            r"house|bassline|\bgarage\b|\bukg\b|nu[\s-]*disco|\bdisco\b"),
+    ("Latin",            r"reggaeton|\blatin|salsa|bachata|cumbia|dembow"),
+    ("Hip-Hop / Rap",    r"hip[\s-]*hop|\brap\b|deutschrap|german\s+rap|\btrap\b|grime|\bdrill\b"),
+    ("R&B / Soul",       r"\br\s*&\s*b\b|\brnb\b|\bsoul\b"),
+    ("Schlager / Party", r"schlager|ballermann|mallorca|apres[\s-]*ski|après[\s-]*ski|volksmusik|stimmungs"),
+    ("Chill",            r"chill|lo[\s-]*fi|ambient|downtempo"),
+    ("Pop",              r"dance[\s-]*pop|electro[\s-]*pop|synth[\s-]*pop|\bk[\s-]*pop|\bpop\b|deutschpop|singer[\s-]*songwriter"),
+    ("EDM / Dance",      r"\bedm\b|electro|big\s*room|future\s*bass|\bdance\b|electronic|eurodance|moombahton|bass\s*music"),
+    ("Rock / Metal",     r"\brock\b|metal|punk|grunge|alternative|\bindie\b"),
+]]
+# Keine Genres: yt-dlp schreibt die YouTube-Kategorie ins Genre-Feld
+_YT_CATEGORIES = {"music", "other", "entertainment", "people & blogs", "gaming", "film & animation",
+                  "comedy", "howto & style", "education", "news & politics", "science & technology",
+                  "autos & vehicles", "pets & animals", "sports", "travel & events", "nonprofits & activism"}
+_GENRE_MIN_SEC = 60            # Samples und FX bekommen kein Genre
+_GENRE_SKIP_RE = re.compile(r"\b(stems?|vocals?|instrumental|karaoke|a[\s-]?cap+ella|sample[\s-]*pack|drums|fx)\b", re.IGNORECASE)
+_LFM_SURE_SHARE = 0.6          # Anteil des staerksten Genres an allen passenden Last.fm-Tags
+_genre_cancel = False
+_genre_running = False
+
+
+def _genre_map(text: str) -> str | None:
+    """Freies Genre/Tag/Ordnername -> Hauptgenre oder None."""
+    t = (text or "").strip()
+    if not t:
+        return None
+    if t in GENRES:
+        return t
+    for genre, rx in _GENRE_RULES:
+        if rx.search(t):
+            return genre
+    return None
+
+
+def _genre_from_tags(tags: list) -> tuple[str | None, float]:
+    """Last.fm-/Spotify-Tags [(name, gewicht), ...] -> (Genre, Anteil)."""
+    score: dict[str, float] = {}
+    for name, weight in tags:
+        g = _genre_map(name)
+        if g:
+            score[g] = score.get(g, 0) + max(float(weight or 0), 1.0)
+    if not score:
+        return None, 0.0
+    best = max(score, key=score.get)
+    return best, score[best] / sum(score.values())
+
+
+def _genre_rules_file() -> Path:
+    return BASE_DIR / "genre_rules.json"
+
+
+def _genre_rules_load() -> dict:
+    return _load_json(_genre_rules_file(), {})
+
+
+def _genre_rules_save(rules: dict):
+    # "" = bewusst keine Regel (sonst gilt der Vorschlag aus dem Ordnernamen)
+    clean = {str(k): v for k, v in rules.items() if v in GENRES or v == ""}
+    _save_json(_genre_rules_file(), clean)
+
+
+def _genre_cache_file() -> Path:
+    return BASE_DIR / "genre_cache.json"
+
+
+def _artist_title(lt: dict) -> tuple[str, str]:
+    """Kuenstler und Titel fuer die Online-Abfrage. "Kuenstler - Titel" im
+    Dateititel geht vor dem Kuenstler-Tag (bei YouTube-Downloads der Kanal)."""
+    t = _DL_DUPE_NOISE_RE.sub(" ", lt.get("title") or Path(lt.get("path", "")).stem)
+    t = re.sub(r"^\s*\[[^\]]*\]\s*", "", t)
+    t = re.sub(r"\s+", " ", t).strip(" -")
+    m = re.match(r"^(.+?)\s+[-–—]\s+(.+)$", t)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return (lt.get("artist") or lt.get("album_artist") or "").strip(), t
+
+
+def _http_json(url: str, headers: dict | None = None, data: bytes | None = None) -> dict:
+    import urllib.request as _req
+    try:
+        req = _req.Request(url, data=data, headers={"User-Agent": "SynthiMIX/1.5", **(headers or {})})
+        with _req.urlopen(req, timeout=10) as r:
+            return json.loads(r.read().decode("utf-8", errors="replace"))
+    except Exception:
+        return {}
+
+
+def _lfm_tags_sync(method: str, api_key: str, artist: str, title: str = "") -> list:
+    from urllib.parse import urlencode
+    params = {"method": method, "artist": artist, "api_key": api_key, "format": "json", "autocorrect": 1}
+    if title:
+        params["track"] = title
+    data = _http_json("https://ws.audioscrobbler.com/2.0/?" + urlencode(params))
+    tags = (data.get("toptags") or {}).get("tag") or []
+    if isinstance(tags, dict):
+        tags = [tags]
+    return [(t.get("name", ""), t.get("count", 0)) for t in tags[:15]]
+
+
+class _Spotify:
+    """Minimaler Zugriff auf die Spotify-Web-API (Client-Credentials)."""
+    def __init__(self, cid: str, secret: str):
+        self.cid, self.secret, self.token, self.until = cid, secret, "", 0.0
+
+    def _auth(self) -> bool:
+        if self.token and time.time() < self.until - 60:
+            return True
+        raw = base64.b64encode(f"{self.cid}:{self.secret}".encode()).decode()
+        d = _http_json("https://accounts.spotify.com/api/token",
+                       headers={"Authorization": f"Basic {raw}",
+                                "Content-Type": "application/x-www-form-urlencoded"},
+                       data=b"grant_type=client_credentials")
+        self.token = d.get("access_token", "")
+        self.until = time.time() + float(d.get("expires_in", 3600))
+        return bool(self.token)
+
+    def artist_genres(self, artist: str, title: str) -> list:
+        from urllib.parse import urlencode
+        if not self._auth():
+            return []
+        h = {"Authorization": f"Bearer {self.token}"}
+        q = f"track:{title} artist:{artist}" if artist else title
+        d = _http_json("https://api.spotify.com/v1/search?" + urlencode({"q": q, "type": "track", "limit": 1}), h)
+        items = ((d.get("tracks") or {}).get("items")) or []
+        if not items or not items[0].get("artists"):
+            return []
+        aid = items[0]["artists"][0].get("id")
+        a = _http_json(f"https://api.spotify.com/v1/artists/{aid}", h) if aid else {}
+        return [(g, 50) for g in (a.get("genres") or [])]
+
+
+def _genre_candidates() -> list[dict]:
+    """Titel, die einen Vorschlag brauchen: Genre leer, YouTube-Kategorie oder
+    anders geschrieben als das Hauptgenre."""
+    out = []
+    for lt in _state["library"]:
+        if lt.get("missing") or not lt.get("path") or (lt.get("duration_sec") or 0) < _GENRE_MIN_SEC:
+            continue
+        if _GENRE_SKIP_RE.search(lt.get("title") or "") or _GENRE_SKIP_RE.search(os.path.basename(os.path.dirname(lt["path"]))):
+            continue    # Stems, Acapellas, Sample-Packs
+        cur = (lt.get("genre") or "").strip()
+        if cur in GENRES:
+            continue
+        out.append(lt)
+    return out
+
+
+def _nearest_rule(path: str, rules: dict) -> str | None:
+    """Regel des naechsten Ordners nach oben. Ohne gespeicherte Regel zaehlt der
+    Vorschlag aus dem Ordnernamen ("Liquid" -> Drum & Bass); "" heisst bewusst keine."""
+    d = os.path.dirname(path)
+    while d and d != os.path.dirname(d):
+        if d in rules:
+            return rules[d] or None
+        auto = _genre_map(os.path.basename(d))
+        if auto:
+            return auto
+        d = os.path.dirname(d)
+    return None
+
+
+async def _genre_suggest(ws: WebSocket, online: bool = True):
+    """Vorschlaege berechnen und an den Dialog schicken. Online-Antworten
+    werden zwischengespeichert, ein zweiter Durchlauf ist schnell."""
+    global _genre_cancel, _genre_running
+    if _genre_running:
+        return
+    _genre_running, _genre_cancel = True, False
+
+    async def send(t, **kw):
+        try: await ws.send_text(json.dumps({"type": t, **kw}))
+        except Exception: pass
+
+    try:
+        rules = _genre_rules_load()
+        cands = _genre_candidates()
+        # Ordner der betroffenen Titel mit Vorschlag aus dem Ordnernamen
+        folders: dict[str, dict] = {}
+        for lt in cands:
+            d = os.path.dirname(lt["path"])
+            f = folders.setdefault(d, {"folder": d, "name": os.path.basename(d), "count": 0,
+                                       "auto": _genre_map(os.path.basename(d)), "rule": rules.get(d)})
+            f["count"] += 1
+
+        cache = _load_json(_genre_cache_file(), {})
+        lfm_key = (_state.get("lastfm_api_key") or "").strip()
+        cid, csec = (_state.get("spotify_client_id") or "").strip(), (_state.get("spotify_client_secret") or "").strip()
+        spotify = _Spotify(cid, csec) if cid and csec else None
+        loop = asyncio.get_running_loop()
+        items, need_online = [], []
+
+        for lt in cands:
+            cur = (lt.get("genre") or "").strip()
+            base = {"path": lt["path"], "title": lt.get("title", ""), "current": cur}
+            mapped = None if cur.lower() in _YT_CATEGORIES else _genre_map(cur)
+            if mapped:
+                items.append({**base, "genre": mapped, "source": "Vereinheitlicht", "sure": True})
+                continue
+            rule = _nearest_rule(lt["path"], rules)
+            if rule:
+                items.append({**base, "genre": rule, "source": "Ordner", "sure": True})
+                continue
+            need_online.append((lt, base))
+
+        total = len(need_online) if online and (lfm_key or spotify) else 0
+        await send("genre_progress", done=0, total=total)
+        done = 0
+        for lt, base in need_online:
+            if _genre_cancel:
+                break
+            artist, title = _artist_title(lt)
+            genre, source, sure = None, "", False
+            if total and artist and title:
+                if lfm_key:
+                    k = f"lt|{artist.lower()}|{title.lower()}"
+                    if k not in cache:
+                        cache[k] = await loop.run_in_executor(None, _lfm_tags_sync, "track.gettoptags", lfm_key, artist, title)
+                        await asyncio.sleep(0.2)          # Last.fm: hoechstens ~5 Anfragen/s
+                    g, share = _genre_from_tags(cache[k])
+                    if g:
+                        genre, source, sure = g, "Last.fm", share >= _LFM_SURE_SHARE
+                if not sure and spotify:
+                    k = f"sp|{artist.lower()}|{title.lower()}"
+                    if k not in cache:
+                        cache[k] = await loop.run_in_executor(None, spotify.artist_genres, artist, title)
+                    g, share = _genre_from_tags(cache[k])
+                    if g and (not genre or share >= _LFM_SURE_SHARE):
+                        genre, source, sure = g, "Spotify (Künstler)", False
+                if not genre and lfm_key:
+                    k = f"la|{artist.lower()}"
+                    if k not in cache:
+                        cache[k] = await loop.run_in_executor(None, _lfm_tags_sync, "artist.gettoptags", lfm_key, artist)
+                        await asyncio.sleep(0.2)
+                    g, _ = _genre_from_tags(cache[k])
+                    if g:
+                        genre, source, sure = g, "Last.fm (Künstler)", False
+            if genre:
+                items.append({**base, "genre": genre, "source": source, "sure": sure})
+            if total:
+                done += 1
+                if done % 20 == 0:
+                    _save_json(_genre_cache_file(), cache)
+                    await send("genre_progress", done=done, total=total)
+        _save_json(_genre_cache_file(), cache)
+        await send("genre_suggestions", items=items, genres=GENRES,
+                   folders=sorted(folders.values(), key=lambda f: -f["count"]),
+                   missing=len(cands) - len(items), cancelled=_genre_cancel,
+                   has_lastfm=bool(lfm_key), has_spotify=bool(spotify))
+    finally:
+        _genre_running = False
+
+
+def _write_genre_sync(path: str, genre: str) -> bool:
+    """Nur das Genre-Feld der Datei aendern, alle anderen Tags bleiben."""
+    import mutagen
+    ext = Path(path).suffix.lower()
+    try:
+        if ext == ".mp3":
+            from mutagen.id3 import ID3, TCON, ID3NoHeaderError
+            try:
+                tags = ID3(path)
+            except ID3NoHeaderError:
+                tags = ID3()
+            tags.setall("TCON", [TCON(encoding=3, text=genre)])
+            v = tags.version[1] if tags.version and tags.version[1] in (3, 4) else 3
+            tags.save(path, v2_version=v)
+            return True
+        f = mutagen.File(path)
+        if f is None:
+            return False
+        if f.tags is None:
+            f.add_tags()
+        if ext in (".wav", ".aif", ".aiff"):
+            from mutagen.id3 import TCON
+            f.tags.setall("TCON", [TCON(encoding=3, text=genre)])
+        elif ext in (".m4a", ".mp4", ".aac"):
+            f.tags["\xa9gen"] = [genre]
+        else:
+            f.tags["genre"] = [genre]
+        f.save()
+        return True
+    except Exception as e:
+        print(f"[genre] {Path(path).name}: {e}", flush=True)
+        return False
+
+
+async def _genre_apply(items: list, ws: WebSocket):
+    """Genres in Dateien und Bibliothek schreiben. Der gerade geladene Titel
+    wird uebersprungen (die Datei ist im Player offen)."""
+    async def send(t, **kw):
+        try: await ws.send_text(json.dumps({"type": t, **kw}))
+        except Exception: pass
+
+    by_path = {lt.get("path"): lt for lt in _state["library"]}
+    ci = _state.get("current_idx", -1)
+    q = _state.get("queue", [])
+    loaded = q[ci].get("path") if 0 <= ci < len(q) else None
+    loop = asyncio.get_running_loop()
+    ok, failed, skipped = 0, [], 0
+    total = len(items)
+    for n, it in enumerate(items, 1):
+        path, genre = it.get("path"), it.get("genre")
+        lt = by_path.get(path)
+        if not lt or genre not in GENRES:
+            continue
+        if path == loaded:
+            skipped += 1
+            continue
+        if os.path.exists(path) and await loop.run_in_executor(None, _write_genre_sync, path, genre):
+            lt["genre"] = genre
+            try:
+                lt["mtime"] = int(os.path.getmtime(path))
+            except OSError:
+                pass
+            ok += 1
+        else:
+            failed.append(lt.get("title") or path)
+        if n % 25 == 0:
+            await send("genre_apply_progress", done=n, total=total)
+    save_library()
+    await push_library()
+    await send("genre_applied", ok=ok, failed=failed[:20], failed_count=len(failed), skipped=skipped)
+
 
 # ── waveform ─────────────────────────────────────────────────────────────────
 _wf_cache: dict[str, list] = {}
@@ -2598,8 +3220,10 @@ async def handle_message(ws: WebSocket, msg: dict):
         url    = msg.get("url", "").strip()
         fmt    = msg.get("format", "mp3-best")
         choice = msg.get("playlist_choice")   # None | "single" | "all"
-        # "song"/"video": im Dialog entschieden, dann nicht noch einmal pruefen
+        # "song"/"video": im Dialog entschieden, dann nicht noch einmal pruefen.
+        # dupe_checked: "Trotzdem laden" trotz Treffer in der Bibliothek.
         video_choice = msg.get("video_choice")
+        dupe_checked = bool(msg.get("dupe_checked"))
         if url:
             if _is_spotify(url):
                 asyncio.create_task(run_spotify_download(url, fmt))
@@ -2608,8 +3232,8 @@ async def handle_message(ws: WebSocket, msg: dict):
             else:
                 if choice == "single":
                     url = _strip_playlist_params(url)
-                if video_choice is None and _is_single_youtube_video(url):
-                    asyncio.create_task(_check_video_then_download(url, fmt, ws))
+                if video_choice is None and _is_single_link(url):
+                    asyncio.create_task(_check_video_then_download(url, fmt, ws, check_dupes=not dupe_checked))
                 else:
                     asyncio.create_task(run_download(url, fmt))
 
@@ -2996,6 +3620,28 @@ async def handle_message(ws: WebSocket, msg: dict):
             else:
                 seen[key] = lt["path"]
         await ws.send_text(json.dumps({"type": "duplicates", "paths": dupes}))
+
+    elif t == "genre_suggest":
+        if "folder_rules" in msg:
+            _genre_rules_save(msg.get("folder_rules") or {})
+        asyncio.create_task(_genre_suggest(ws, online=bool(msg.get("online", True))))
+
+    elif t == "genre_apply":
+        asyncio.create_task(_genre_apply(msg.get("items") or [], ws))
+
+    elif t == "genre_cancel":
+        global _genre_cancel
+        _genre_cancel = True
+
+    elif t == "quality_candidates":
+        path = msg.get("path", "")
+        if path:
+            asyncio.create_task(_quality_candidates(path, msg.get("query", ""), ws))
+
+    elif t == "quality_replace":
+        path, url = msg.get("path", ""), msg.get("url", "")
+        if path and url:
+            asyncio.create_task(_quality_replace(path, url, ws))
 
     elif t == "analyze_library_meta":
         paths = msg.get("paths")
@@ -3929,6 +4575,75 @@ def _merge_songs_first(songs: list[dict], videos: list[dict]) -> list[dict]:
     return songs + rest
 
 
+def _is_single_link(url: str) -> bool:
+    """Ein einzelner Titel-Link (YouTube, YouTube Music, SoundCloud …), keine Playlist."""
+    return url.lower().startswith("http") and not _is_spotify(url) and not _is_playlist(url)
+
+
+# Gleicher Song trotz kleiner Abweichungen: Video-Zusaetze, "ft."/"feat.", Umlaute,
+# Satzzeichen, Tippfehler. Remix/Edit/VIP/Extended bleiben verschiedene Versionen.
+_DL_DUPE_NOISE_RE = re.compile(
+    r'[\(\[][^\)\]]*\b(official|video|audio|lyrics?|visuali[sz]er|hd|hq|4k|mv|clip|videoclip|free\s+download|out\s+now)\b[^\)\]]*[\)\]]'
+    r'|\b(official\s+(?:music\s+)?video|official\s+audio|lyric\s+video|music\s+video|lyrics)\b',
+    re.IGNORECASE)
+_DL_DUPE_SONG_SIM   = 0.88   # Titel-Aehnlichkeit
+_DL_DUPE_ARTIST_SIM = 0.7
+_DL_DUPE_MAX_DIFF   = 30     # s — deutlich laenger/kuerzer ist eine andere Fassung
+
+
+def _dupe_norm(text: str) -> str:
+    import unicodedata
+    t = unicodedata.normalize("NFKD", (text or "").lower())
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    t = t.replace("&", " and ")
+    t = re.sub(r"\b(ft|feat|featuring)\b\.?", "feat", t)
+    t = re.sub(r"[^\w\s]", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _dupe_parts(title: str, artist: str = "") -> tuple[str, str]:
+    """(Kuenstler, Songtitel) normalisiert. "Kuenstler - Titel" im Titel geht vor
+    dem Kuenstler-Feld, das bei YouTube-Downloads meist der Kanal ist."""
+    t = _DL_DUPE_NOISE_RE.sub(" ", title or "")
+    t = re.sub(r"[\(\[]\s*original\s+mix\s*[\)\]]", " ", t, flags=re.IGNORECASE)   # "Original Mix" = der Song selbst
+    t = re.sub(r"^\s*\[[^\]]*\]\s*", "", t).strip()
+    m = re.match(r"^(.+?)\s+[-–—]\s+(.+)$", t)
+    a, song = (m.group(1), m.group(2)) if m else (artist or "", t)
+    return _dupe_norm(a), _dupe_norm(song)
+
+
+def _library_matches(video: dict, limit: int = 5) -> list[dict]:
+    """Bibliothekstitel, die derselbe Song sein duerften wie video
+    ({title, artist, uploader, duration}). Beste zuerst."""
+    a, song = _dupe_parts(video.get("title", ""), video.get("artist") or "")
+    if len(song) < 2:
+        return []
+    words = set(song.split())
+    version = words & _VERSION_WORDS
+    vdur = video.get("duration") or 0
+    found = []
+    for lt in _state["library"]:
+        if lt.get("missing") or not lt.get("path"):
+            continue
+        la, ls = _dupe_parts(lt.get("title", ""), lt.get("artist") or lt.get("album_artist") or "")
+        if not ls or (set(ls.split()) & _VERSION_WORDS) != version:
+            continue
+        sm = SequenceMatcher(None, song, ls)
+        if sm.real_quick_ratio() < _DL_DUPE_SONG_SIM or sm.ratio() < _DL_DUPE_SONG_SIM:
+            continue
+        ldur = lt.get("duration_sec") or 0
+        if vdur and ldur and abs(vdur - ldur) > _DL_DUPE_MAX_DIFF:
+            continue
+        if a and la:
+            if not (a in la or la in a or SequenceMatcher(None, a, la).ratio() >= _DL_DUPE_ARTIST_SIM):
+                continue
+        elif song != ls and not (vdur and ldur and abs(vdur - ldur) <= 3):
+            continue        # ohne Kuenstler: gleicher Titel, sonst muss die Laenge passen
+        found.append((sm.ratio(), -abs((vdur or 0) - ldur), lt))
+    found.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [lt for _, _, lt in found[:limit]]
+
+
 def _is_single_youtube_video(url: str) -> bool:
     u = url.lower()
     if not u.startswith("http") or _is_playlist(url):
@@ -4003,7 +4718,9 @@ async def _probe_video(url: str) -> dict | None:
             creationflags=_NO_WINDOW)
         out, _ = await asyncio.wait_for(pr.communicate(), timeout=25)
         item = json.loads(out.decode("utf-8", errors="replace").strip().splitlines()[0])
-        return {"url": url, "title": item.get("title") or "",
+        artists = item.get("artists") or []
+        return {"url": url, "title": item.get("track") or item.get("title") or "",
+                "artist": item.get("artist") or ", ".join(artists[:2]) or "",
                 "uploader": item.get("uploader") or item.get("channel") or "",
                 "duration": item.get("duration") or 0}
     except Exception:
@@ -4015,18 +4732,24 @@ async def _ytm_song_search(query: str, n: int = 3) -> list[dict]:
     return await _ytm_songs(query, n, details=True)
 
 
-async def _check_video_then_download(url: str, fmt: str, ws: WebSocket):
-    """Bei Musikvideos nachfragen, sonst gleich laden. Faellt die Pruefung aus
-    (kein Netz, Zeitlimit), wird ohne Rueckfrage geladen wie bisher."""
+async def _check_video_then_download(url: str, fmt: str, ws: WebSocket, check_dupes: bool = True):
+    """Vor dem Laden pruefen: Gibt es den Titel schon in der Bibliothek, wird
+    gefragt (trotzdem laden oder zur Datei springen). Bei YouTube-Musikvideos
+    wird die Studio-Version angeboten. Faellt die Pruefung aus (kein Netz,
+    Zeitlimit), wird ohne Rueckfrage geladen wie bisher."""
     async def _send(t, **kw):
         try: await ws.send_text(json.dumps({"type": t, **kw}))
         except Exception: pass
 
     await _send("video_check_pending", url=url)
+    matches: list[dict] = []
     try:
         video = await _probe_video(url)
         song = None
-        if video and "- topic" not in video["uploader"].lower() \
+        if video and check_dupes:
+            matches = _library_matches(video)
+        if video and not matches and _is_single_youtube_video(url) \
+                and "- topic" not in video["uploader"].lower() \
                 and (not _AUDIO_TITLE_RE.search(video["title"]) or _MV_TITLE_RE.search(video["title"])):
             query = _song_query(video["title"])
             if query:
@@ -4034,6 +4757,12 @@ async def _check_video_then_download(url: str, fmt: str, ws: WebSocket):
     finally:
         await _send("video_check_done", url=url)
 
+    if matches:
+        await _send("dupe_choice", url=url, format=fmt,
+                    video={k: video.get(k, "") for k in ("title", "artist", "uploader", "duration")},
+                    matches=[{k: m.get(k) for k in ("path", "title", "artist", "folder", "duration_sec",
+                                                     "bitrate_kbps", "cutoff_khz")} for m in matches])
+        return
     if video and _needs_video_choice(video, song):
         await _send("video_choice", url=url, format=fmt,
                     video={k: video[k] for k in ("title", "uploader", "duration")},
