@@ -1,7 +1,20 @@
 <script>
   import { get }    from 'svelte/store'
   import { onMount } from 'svelte'
-  import { connected, playerState, queue, send, settingsOpen } from './stores/ws.js'
+  import { connected, playerState, queue, send, settingsOpen, setupOpen, appSettings, library, watchedFolders } from './stores/ws.js'
+  import SetupWizard from './components/SetupWizard.svelte'
+
+  // Einrichtung beim ersten Start: nach dem Verbinden kurz warten, bis
+  // Bibliothek und Ordner da sind — wer schon Musik hat, sieht ihn nicht
+  // automatisch (Einstellungen → Info → „Einrichtung starten“).
+  let _setupChecked = false
+  $effect(() => {
+    if (!$connected || _setupChecked || $appSettings.setupDone) return
+    _setupChecked = true
+    setTimeout(() => {
+      if (!get(library).length && !get(watchedFolders).length && !get(appSettings).setupDone) setupOpen.set(true)
+    }, 2500)
+  })
   import TitleBar  from './components/TitleBar.svelte'
   import Player    from './components/Player.svelte'
   import Queue     from './components/Queue.svelte'
@@ -187,6 +200,7 @@
   <PlaylistChoiceDialog />
   <VideoChoiceDialog />
   <DupeChoiceDialog />
+  {#if $setupOpen}<SetupWizard onclose={() => setupOpen.set(false)} />{/if}
 </div>
 
 <style>

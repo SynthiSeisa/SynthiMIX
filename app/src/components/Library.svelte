@@ -1,15 +1,19 @@
 <script>
   import { onMount, untrack, tick } from 'svelte'
-  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected, qualityScan, revealPath } from '../stores/ws.js'
+  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected, qualityScan, revealPath, excludedFolders } from '../stores/ws.js'
   import BetterVersionDialog from './BetterVersionDialog.svelte'
   import { keySortValue } from '../lib/keys.js'
   import KeyChip from './KeyChip.svelte'
   import { density } from '../lib/prefs.js'
   import DuplicateScanDialog from './DuplicateScanDialog.svelte'
   import GenreDialog from './GenreDialog.svelte'
+  import QualityBatchDialog from './QualityBatchDialog.svelte'
+  import TitleDialog from './TitleDialog.svelte'
 
   let showDupeScan     = $state(false)
   let showGenres       = $state(false)
+  let batchPaths       = $state(null)    // Sammel-Ersetzen: Liste der Pfade
+  let titlePaths       = $state(undefined) // Titel aufraeumen: null = alle, Liste = Auswahl
   let showPlDupeScan   = $state(false)
   let editTrack        = $state(null)   // { path, title, artist } — metadata edit dialog
   let plNameDialog     = $state(false)  // add playlist dialog
@@ -120,6 +124,7 @@
     // Der Nav-Eintrag zeigt immer die ganze Bibliothek; Ordner und Playlisten
     // prueft man gezielt ueber deren Kontextmenue ("Auf Duplikate scannen").
     if (mode === 'duplicates') dupeSourceMode = 'all'
+    if (mode === 'downloads') dlColSort = false
     navMode = mode
     search  = ''
     selected = new Set()
@@ -143,7 +148,8 @@
   // Download-Baum ergeben. "Mein Computer" braeuchte eine Ordnerabfrage,
   // "Duplikate" einen Scan — die startet man lieber bewusst.
   function restorableMode(mode) {
-    if (['all', 'recent', 'history', 'dl_recent', 'dl_all', 'quality'].includes(mode)) return mode
+    if (mode === 'history' || mode === 'dl_recent') return 'downloads'
+    if (['all', 'recent', 'downloads', 'dl_all', 'quality'].includes(mode)) return mode
     if (/^(artist|album|genre|playlist):/.test(mode)) return mode
     if (mode.startsWith('dl:') && !mode.startsWith('dl:file:')) return mode
     return null
@@ -167,8 +173,8 @@
   // es bei "Alle Titel".
   $effect(() => {
     if (_navRestored) return
-    const want = _navSaved.mode
-    if (!want || want === 'all' || !restorableMode(want)) { _navRestored = true; return }
+    const want = restorableMode(_navSaved.mode ?? 'all')
+    if (!want || want === 'all') { _navRestored = true; return }
     if (!$connected) return
 
     if (want.startsWith('playlist:')) {
@@ -478,47 +484,44 @@
       })
     }
 
-    // ── History mode: show history items (with library enrichment) ──────────
-    if (navMode === 'history') {
+    // ── Downloads: Verlauf und Download-Ordner in einem, neueste zuerst ─────
+    // Aus dem Verlauf kommt das Ladedatum, aus dem Ordner alles, was vor dem
+    // Verlauf oder von Hand dort gelandet ist. Geloeschte Dateien bleiben
+    // ausgegraut stehen und lassen sich neu laden.
+    if (navMode === 'downloads') {
       const libByPath = new Map($library.map(t => [t.path, t]))
-      let list = $dlHistory
-        .filter(h => h.path)
-        .map(h => libByPath.get(h.path) ?? {
+      const seen = new Set()
+      let list = []
+      $dlHistory.forEach((h, i) => {
+        if (!h.path || seen.has(h.path)) return
+        seen.add(h.path)
+        const t = libByPath.get(h.path) ?? {
           path: h.path, title: h.title || h.path.split(/[\\/]/).pop(),
-          artist: '', duration_sec: 0, lufs: -99, bpm: 0,
-          bitrate_kbps: h.bitrate_kbps ?? 0
-        })
-      if (q) list = list.filter(t => {
-        const { artist, title } = getTrackArtistTitle(t)
-        return title.toLowerCase().includes(q) || artist.toLowerCase().includes(q)
-      })
-      return applySort(list)
-    }
-
-    // ── dl_recent: all downloads sorted by file date, newest first ──────────
-    if (navMode === 'dl_recent') {
-      if (!$downloadTreeLoaded) return []
-      const libByPath = new Map($library.map(t => [t.path, t]))
-      const make = (f) => ({ ...(libByPath.get(f.path) ?? { path: f.path, title: f.name, artist: '', duration_sec: 0, lufs: -99, bpm: 0 }), _mtime: f.mtime ?? 0 })
-      function gatherRecent(folders) {
-        let r = []
-        for (const folder of folders) {
-          r.push(...(folder.tracks ?? []).map(make))
-          if (folder.folders?.length) r.push(...gatherRecent(folder.folders))
+          artist: '', duration_sec: 0, lufs: -99, bpm: 0, bitrate_kbps: h.bitrate_kbps ?? 0
         }
-        return r
+        // Aeltere Eintraege kennen nur den Tag: dann die Reihenfolge des
+        // Verlaufs (neueste zuerst) innerhalb des Tages beibehalten
+        const day = h.date ? Date.parse(h.date + 'T00:00:00') / 1000 : 0
+        const ts  = h.ts || (day ? day + 86399 - i : 0)
+        list.push({ ...t, _dlTs: ts, _gone: !!h.gone, _url: h.url || '', missing: t.missing || !!h.gone })
+      })
+      if ($downloadTreeLoaded) {
+        const add = (f) => {
+          if (seen.has(f.path)) return
+          seen.add(f.path)
+          const t = libByPath.get(f.path) ?? { path: f.path, title: f.name, artist: '', duration_sec: 0, lufs: -99, bpm: 0 }
+          list.push({ ...t, _dlTs: Math.floor(f.mtime ?? 0), _gone: false, _url: '' })
+        }
+        const walk = (folders) => { for (const fo of folders ?? []) { (fo.tracks ?? []).forEach(add); walk(fo.folders) } }
+        ;($downloadTree.files ?? []).forEach(add)
+        walk($downloadTree.folders)
       }
-      let all = [
-        ...($downloadTree.files ?? []).map(make),
-        ...gatherRecent($downloadTree.folders ?? [])
-      ]
-      all.sort((a, b) => (b._mtime ?? 0) - (a._mtime ?? 0))
-      let list = all.slice(0, 40)
+      list.sort((a, b) => (b._dlTs ?? 0) - (a._dlTs ?? 0))
       if (q) list = list.filter(t => {
         const { artist, title } = getTrackArtistTitle(t)
         return title.toLowerCase().includes(q) || artist.toLowerCase().includes(q)
       })
-      return list
+      return dlColSort ? applySort(list) : list
     }
 
     // ── dl_all: all downloaded files (root + all subfolders recursively) ───
@@ -615,6 +618,7 @@
       }
       if (navMode === 'duplicates') return dupesAll.has(t.path)
       if (navMode === 'quality') {
+        if (qualityFilter === 'ignored') return qualityInfo.ignored.has(t.path)
         const r = qualityInfo.map.get(t.path)
         return !!r && (qualityFilter === 'all' || r.includes(qualityFilter))
       }
@@ -633,7 +637,8 @@
       })
     }
 
-    return applySort(list)
+    const sorted = applySort(list)
+    return navMode === 'duplicates' ? groupDupes(sorted) : sorted
   })
 
   let hideDupesAuto = $state(true)
@@ -722,17 +727,20 @@
   }
   const qualityInfo = $derived.by(() => {
     const map = new Map()
+    const ignored = new Map()      // "Passt so" — ausgeblendet, aber wieder abrufbar
     const counts = { video: 0, bitrate: 0, upscaled: 0 }
     let measured = 0
     for (const t of $library) {
       if (t.cutoff_khz != null) measured++
       const r = qualityReasons(t)
       if (!r.length) continue
+      if (t.quality_ok) { ignored.set(t.path, r); continue }
       map.set(t.path, r)
       for (const k of r) counts[k]++
     }
-    return { map, counts, measured }
+    return { map, ignored, counts, measured }
   })
+  function qualityOk(track, ok) { send({ type: 'quality_ok', path: track.path, ok }) }
   let qualityFilter = $state('all')
 
   function findDupes(tracks) {
@@ -779,12 +787,58 @@
     return { hidden, all, groups: groupsList }
   }
 
-  const globalDupes = $derived(findDupes($library))
+  // Welche Datei einer Gruppe bleibt: automatisch die beste, per "Behalten"
+  // in der Zeile aenderbar (gemerkt je Gruppe, Schluessel = kleinster Pfad)
+  const KEEP_KEY = 'synthimix-dupe-keep'
+  let dupeKeep = $state((() => { try { return JSON.parse(localStorage.getItem(KEEP_KEY) ?? '{}') } catch { return {} } })())
+  function withKeep(d) {
+    const groups = d.groups.map(g => {
+      const members = [g.best, ...g.others]
+      const gid = members.map(t => t.path).sort()[0]
+      const keeper = members.find(t => t.path === dupeKeep[gid]) ?? g.best
+      return { gid, best: keeper, others: members.filter(t => t !== keeper) }
+    })
+    return { all: d.all, groups, hidden: new Set(groups.flatMap(g => g.others.map(t => t.path))) }
+  }
+  function keepDupe(track) {
+    const g = dupeGroupOf.get(track.path)
+    if (!g) return
+    dupeKeep = { ...dupeKeep, [g.gid]: track.path }
+    try { localStorage.setItem(KEEP_KEY, JSON.stringify(dupeKeep)) } catch {}
+  }
+  function trashOne(track) { send({ type: 'library_remove_disk', path: track.path }) }
+
+  const globalDupes = $derived(withKeep(findDupes($library)))
   const scopedDupes = $derived(dupeSourceMode === 'all' || dupeSourceMode === 'duplicates'
-                               ? globalDupes : findDupes(dupeScopeTracks))
+                               ? globalDupes : withKeep(findDupes(dupeScopeTracks)))
   const dupesHidden = $derived(scopedDupes.hidden)   // schlechtere Kopien
   const dupesAll    = $derived(scopedDupes.all)      // alle Dateien in Gruppen
   const dupesGroups = $derived(scopedDupes.groups)   // je Song eine Gruppe
+  const dupeGroupOf = $derived(new Map(dupesGroups.flatMap(g => [g.best, ...g.others].map(t => [t.path, g]))))
+  // Duplikat-Ansicht: Gruppen zusammenhalten, die bleibende Datei zuerst
+  function groupDupes(list) {
+    const inList = new Set(list.map(t => t.path))
+    const out = [], seen = new Set()
+    for (const t of list) {
+      const g = dupeGroupOf.get(t.path)
+      if (!g) { out.push(t); continue }
+      if (seen.has(g.gid)) continue
+      seen.add(g.gid)
+      for (const m of [g.best, ...g.others]) if (inList.has(m.path)) out.push(m)
+    }
+    return out
+  }
+  const dupeGrpStart = $derived.by(() => {
+    const s = new Set()
+    if (navMode !== 'duplicates') return s
+    let last = null
+    for (const t of filtered) {
+      const gid = dupeGroupOf.get(t.path)?.gid
+      if (gid !== last && last !== null) s.add(t.path)
+      last = gid
+    }
+    return s
+  })
 
   // Wo gerade geprueft wird, fuer den Satz oben in der Duplikat-Ansicht
   const dupeScopeLabel = $derived.by(() => {
@@ -831,7 +885,12 @@
   })
 
 
+  // Downloads stehen nach Ladedatum; erst ein Klick auf eine Spalte sortiert um
+  let dlColSort = $state(false)
+  // Wiedergabe-Verlauf und Downloads haben ihre eigene Reihenfolge
+  const sortShown = $derived(navMode !== 'recent' && (navMode !== 'downloads' || dlColSort))
   function setSort(key) {
+    if (navMode === 'downloads' && !dlColSort) { dlColSort = true; sortCol = key; sortAsc = key === 'title' || key === 'key'; return }
     if (sortCol === key) sortAsc = !sortAsc
     else { sortCol = key; sortAsc = key === 'title' || key === 'key' }   // Tonart beginnt bei 1A
   }
@@ -922,7 +981,7 @@
   function showQTip(e, track) {
     const r = e.currentTarget.getBoundingClientRect()
     qTip = { x: Math.min(r.right + 6, window.innerWidth - 356), y: r.top + r.height / 2,
-             track, reasons: qualityInfo.map.get(track.path) ?? [] }
+             track, reasons: qualityInfo.map.get(track.path) ?? qualityInfo.ignored.get(track.path) ?? [] }
   }
 
   // Virtual scrolling
@@ -1042,6 +1101,26 @@
     playlistCtx = { x: e.clientX, y: e.clientY, path: pl.path, name: pl.name }
   }
 
+  // Ausgeschlossener Ordner, der diesen Pfad enthaelt (oder er selbst)
+  function excludedBy(path) {
+    const n = (p) => (p ?? '').replace(/\//g, '\\').replace(/\\$/, '').toLowerCase()
+    const pn = n(path)
+    return $excludedFolders.find(f => pn === n(f) || pn.startsWith(n(f) + '\\')) ?? null
+  }
+  function includeFolder(folder) {
+    folderCtx = null
+    send({ type: 'include_folder', folder })
+  }
+
+  // ── Statuszeile unten links: Menue ────────────────────────────────────────
+  let libMenu = $state(null)   // {x, y}
+  function toggleLibMenu(e) {
+    e.stopPropagation()
+    if (libMenu) { libMenu = null; return }
+    const r = e.currentTarget.getBoundingClientRect()
+    libMenu = { x: r.left, y: window.innerHeight - r.top + 4 }
+  }
+
   function onFolderCtx(e, path) {
     e.preventDefault()
     e.stopPropagation()
@@ -1051,20 +1130,20 @@
   // Titel der Bibliothek, die in diesem Ordner oder darunter liegen.
   // t.folder ist nur der Ordnername ("Drum and Bass"), nicht der Pfad — der
   // fruehere Vergleich damit fand nie etwas ("Keine Tracks gefunden").
-  function tracksInFolder(fp) {
+  function tracksInFolder(fp, recursive = true) {
     const norm = (p) => (p ?? '').replace(/\\/g, '/').replace(/\/$/, '').toLowerCase()
     const fpN = norm(fp)
     return $library.filter(t => {
       const dir = norm(t.path).split('/').slice(0, -1).join('/')
-      return dir === fpN || dir.startsWith(fpN + '/')
+      return dir === fpN || (recursive && dir.startsWith(fpN + '/'))
     })
   }
 
-  function analyzeFolder() {
+  function analyzeFolder(recursive) {
     if (!folderCtx) return
     const fp = folderCtx.path
     folderCtx = null
-    const tracks = tracksInFolder(fp)
+    const tracks = tracksInFolder(fp, recursive)
     if (tracks.length === 0) {
       alert(`Keine Tracks aus diesem Ordner in der Bibliothek gefunden.\nOrdner: ${fp}`)
       return
@@ -1092,8 +1171,8 @@
       alert(`Keine Tracks aus diesem Ordner in der Bibliothek gefunden.\nOrdner: ${fp}`)
       return
     }
-    if (!confirm(`${toRemove.length} Tracks aus Bibliothek ausschließen (Dateien bleiben)?\n` +
-                 `Der Ordner bleibt ausgeschlossen, bis du ihn unter Einstellungen → System wieder aufnimmst.`)) return
+    if (!confirm(`${toRemove.length} Titel aus der Bibliothek ausschließen? Die Dateien bleiben.\n\n` +
+                 `Rückgängig: Rechtsklick auf den Ordner → „Wieder in die Bibliothek aufnehmen“.`)) return
     // Das Backend merkt sich den Ordner — einzeln entfernte Titel holte der
     // Ordner-Waechter frueher nach wenigen Sekunden zurueck.
     send({ type: 'exclude_folder', folder: fp })
@@ -1183,7 +1262,7 @@
   })
 
   function removeHiddenDupes() {
-    if (!confirm(`${dupesHidden.size} schlechtere Kopien in den Papierkorb verschieben?\n\nVon jedem Song bleibt die beste Datei.`)) return
+    if (!confirm(`${dupesHidden.size} Kopien in den Papierkorb?\n\nDie mit ✓ markierte Datei jedes Songs bleibt.`)) return
     for (const p of dupesHidden) send({ type: 'library_remove_disk', path: p })
   }
 
@@ -1202,14 +1281,20 @@
   let _libHover = $state(false)
 
   function addAllToQueue() {
-    filtered.forEach(t => addToQueue(t))
+    filtered.forEach(t => { if (!t._gone) addToQueue(t) })
   }
 
-  function normalizeSelected() {
-    const paths = [...selected]
-    const lufs = ($appSettings.targetLUFS ?? -14)
-    if (!confirm(`${paths.length} Dateien auf ${lufs} LUFS normalisieren? (ändert Dateien auf der Festplatte)`)) return
-    send({ type: 'normalize_files', paths, target_lufs: lufs, target_tp: -1.5 })
+  // Dateien normalisieren: per Rechtsklick, Zielwert im Dialog waehlbar
+  // (frueher fester Knopf in der Auswahlleiste mit dem Wiedergabe-Ziel)
+  let normDlg = $state(null)     // { paths, lufs }
+  function openNormalize(track) {
+    const paths = selected.size > 1 && selected.has(track.path) ? [...selected] : [track.path]
+    normDlg = { paths, lufs: $appSettings.targetLUFS ?? -10 }
+    closeCtx()
+  }
+  function runNormalize() {
+    send({ type: 'normalize_files', paths: normDlg.paths, target_lufs: normDlg.lufs, target_tp: -1.5 })
+    normDlg = null
   }
 
   function removeSelectedFromLibrary() {
@@ -1346,17 +1431,11 @@
         <i class="ti ti-clock t-ico" aria-hidden="true"></i>
         <span class="t-name">Wiedergabe-Verlauf</span>
       </button>
-      {#if $dlHistory.length > 0}
-        <button class="t-item {navMode === 'history' ? 'active' : ''}" onclick={() => selectNav('history')}>
-          <i class="ti ti-history t-ico" aria-hidden="true"></i>
-          <span class="t-name">Download-Verlauf</span>
-          <span class="t-count">{$dlHistory.length}</span>
-        </button>
-      {/if}
-      <button class="t-item {navMode === 'dl_recent' ? 'active' : ''}"
-              onclick={() => { if (!$downloadTreeLoaded) loadDlTree(); selectNav('dl_recent') }}>
+      <button class="t-item {navMode === 'downloads' ? 'active' : ''}"
+              title="Alles, was heruntergeladen wurde, neueste zuerst"
+              onclick={() => { if (!$downloadTreeLoaded) loadDlTree(); selectNav('downloads') }}>
         <i class="ti ti-clock-down t-ico" aria-hidden="true"></i>
-        <span class="t-name">Neueste Downloads</span>
+        <span class="t-name">Downloads</span>
       </button>
       {#if globalDupes.groups.length > 0 || navMode === 'duplicates'}
         <button class="t-item {navMode === 'duplicates' ? 'active' : ''}" onclick={() => selectNav('duplicates')}
@@ -1473,7 +1552,8 @@
                   }}
                   onclick={() => selectNav('dl:' + folder.path)}
                   oncontextmenu={(e) => onFolderCtx(e, folder.path)}
-                  title={folder.name + '\nDraggen: alle Tracks zur Queue'}>
+                  class:excluded={excludedBy(folder.path)}
+                  title={excludedBy(folder.path) ? folder.name + '\nAus der Bibliothek ausgeschlossen — Rechtsklick: wieder aufnehmen' : folder.name + '\nDraggen: alle Tracks zur Queue'}>
             {#if hasSubs}
               <span class="t-toggle-ico dl-tog" onclick={(e) => { e.stopPropagation(); toggleDlFolder(folder.path) }}>
                 {isExpanded ? '−' : '+'}
@@ -1653,7 +1733,7 @@
           {@const dOpen = !!fsOpen[drive.path]}
           <button class="t-child {navMode === 'fs:' + drive.path ? 'active' : ''}"
                   onclick={() => clickFsNode(drive)}
-                  oncontextmenu={(e) => onFolderCtx(e, drive.path)}>
+                  oncontextmenu={(e) => onFolderCtx(e, drive.path)} class:excluded={excludedBy(drive.path)}>
             <span class="t-toggle-ico">{dOpen ? '−' : '+'}</span>
             <i class="ti ti-device-desktop t-ico-sm" aria-hidden="true"></i>
             <span class="t-name">{drive.name}</span>
@@ -1663,7 +1743,8 @@
               {@const cOpen = !!fsOpen[child.path]}
               <button class="t-child t-d2 {navMode === 'fs:' + child.path ? 'active' : ''}"
                       onclick={() => clickFsNode(child)} title={child.name}
-                      oncontextmenu={child.isDir ? (e) => onFolderCtx(e, child.path) : undefined}>
+                      oncontextmenu={child.isDir ? (e) => onFolderCtx(e, child.path) : undefined}
+                      class:excluded={child.isDir && excludedBy(child.path)}>
                 {#if child.isDir}
                   <span class="t-toggle-ico">{cOpen ? '−' : '+'}</span>
                   <i class="ti ti-folder t-ico-sm" aria-hidden="true"></i>
@@ -1678,7 +1759,8 @@
                   {@const gOpen = !!fsOpen[grand.path]}
                   <button class="t-child t-d3 {navMode === 'fs:' + grand.path ? 'active' : ''}"
                           onclick={() => clickFsNode(grand)} title={grand.name}
-                          oncontextmenu={grand.isDir ? (e) => onFolderCtx(e, grand.path) : undefined}>
+                          oncontextmenu={grand.isDir ? (e) => onFolderCtx(e, grand.path) : undefined}
+                          class:excluded={grand.isDir && excludedBy(grand.path)}>
                     {#if grand.isDir}
                       <span class="t-toggle-ico">{gOpen ? '−' : '+'}</span>
                       <i class="ti ti-folder t-ico-sm" aria-hidden="true"></i>
@@ -1693,7 +1775,8 @@
                       {@const ggOpen = !!fsOpen[great.path]}
                       <button class="t-child t-d4 {navMode === 'fs:' + great.path ? 'active' : ''}"
                               onclick={() => clickFsNode(great)} title={great.name}
-                              oncontextmenu={great.isDir ? (e) => onFolderCtx(e, great.path) : undefined}>
+                              oncontextmenu={great.isDir ? (e) => onFolderCtx(e, great.path) : undefined}
+                              class:excluded={great.isDir && excludedBy(great.path)}>
                         {#if great.isDir}
                           <span class="t-toggle-ico">{ggOpen ? '−' : '+'}</span>
                           <i class="ti ti-folder t-ico-sm" aria-hidden="true"></i>
@@ -1733,24 +1816,28 @@
     <!-- ── Scan footer — always visible ──────────────────────────────────── -->
     <div class="nav-footer">
       <div class="nav-sep nav-sep-footer"></div>
-      <div class="scan-row">
-        <button class="btn btn-sm" onclick={scanLibrary} title="Bibliotheksordner neu einlesen"><i class="ti ti-scan"></i> Scannen</button>
-        <button class="btn btn-sm" onclick={() => send({ type: 'analyze_library_meta' })}
-                title="LUFS, BPM und Tonart für alle Titel berechnen, die noch keinen Wert haben"><i class="ti ti-wand"></i> Analysieren</button>
-      </div>
-      {#if $analyzeProgress}
-        {@const { done, total } = $analyzeProgress}
-        {@const pct = total > 0 ? Math.round(done / total * 100) : 0}
-        <div class="analyze-progress">
-          <div class="ap-bar"><div class="ap-fill" style="width:{pct}%"></div></div>
-          <div class="ap-row">
-            <span class="ap-label">{done}/{total} analysiert</span>
-            <button class="btn btn-icon btn-sm btn-danger" onclick={() => send({ type: 'cancel_analyze' })} title="Analyse abbrechen" aria-label="Analyse abbrechen"><i class="ti ti-player-stop"></i></button>
-          </div>
+      <!-- Statuszeile: sonst ruhig, zeigt laufende Arbeit mit Fortschritt -->
+      <div class="nav-status" role="status">
+        <div class="ns-main">
+          {#if $analyzeProgress}
+            {@const { done, total } = $analyzeProgress}
+            <span class="ns-text"><i class="ti ti-wand"></i> Analyse {done} / {total}</span>
+            <div class="ap-bar"><div class="ap-fill" style="width:{total ? Math.round(done / total * 100) : 0}%"></div></div>
+          {:else if $qualityScan}
+            <span class="ns-text"><i class="ti ti-refresh spinner"></i> Höhen-Messung {$qualityScan.done} / {$qualityScan.total}</span>
+            <div class="ap-bar"><div class="ap-fill" style="width:{$qualityScan.total ? Math.round($qualityScan.done / $qualityScan.total * 100) : 0}%"></div></div>
+          {:else if $scanStatus}
+            <span class="ns-text" title={$scanStatus}>{$scanStatus}</span>
+          {:else}
+            <span class="ns-text ns-idle">{$library.length} Titel</span>
+          {/if}
         </div>
-      {:else if $scanStatus}
-        <div class="scan-status">{$scanStatus}</div>
-      {/if}
+        {#if $analyzeProgress}
+          <button class="btn btn-icon btn-sm" onclick={() => send({ type: 'cancel_analyze' })} title="Analyse abbrechen" aria-label="Analyse abbrechen"><i class="ti ti-player-stop"></i></button>
+        {/if}
+        <button class="btn btn-icon btn-sm" class:is-active={libMenu} onclick={toggleLibMenu}
+                title="Bibliothek: einlesen, analysieren, aufräumen" aria-label="Bibliothek-Menü" aria-haspopup="menu"><i class="ti ti-dots"></i></button>
+      </div>
     </div>
 
   </div>
@@ -1810,7 +1897,7 @@
       <div class="dupe-info quality-info" role="status">
         <p class="dupe-text">
           {#if qualityInfo.map.size}<b>{qualityInfo.map.size} Titel mit schlechter Qualität.</b>{:else}<b>Keine Titel mit schlechter Qualität.</b>{/if}
-          Doppelklick oder Rechtsklick → „Bessere Version suchen“ ersetzt die Datei unter gleichem Namen und Ordner.
+          Maus über eine Zeile: <b>bessere Version</b> suchen oder mit <b>passt</b> ausblenden.
           {#if $qualityScan}
             <span class="q-scan"><i class="ti ti-refresh spinner"></i> Höhen-Messung läuft: {$qualityScan.done} / {$qualityScan.total}</span>
           {/if}
@@ -1822,23 +1909,31 @@
             <button class="btn btn-sm" class:is-active={qualityFilter === k} role="radio" aria-checked={qualityFilter === k}
                     title={QUALITY_TIPS[k]} onclick={() => qualityFilter = k}>{QUALITY_LABELS[k]} <span class="q-n">{qualityInfo.counts[k]}</span></button>
           {/each}
+          {#if qualityInfo.ignored.size}
+            <button class="btn btn-sm" class:is-active={qualityFilter === 'ignored'} role="radio" aria-checked={qualityFilter === 'ignored'}
+                    title="Mit „passt“ ausgeblendet" onclick={() => qualityFilter = 'ignored'}><i class="ti ti-eye-off"></i> <span class="q-n">{qualityInfo.ignored.size}</span></button>
+          {/if}
         </div>
+        {#if qualityFilter !== 'ignored' && filtered.length}
+          <button class="btn btn-sm btn-primary" onclick={() => batchPaths = (selected.size ? filtered.filter(t => selected.has(t.path)) : filtered).map(t => t.path)}
+                  title="Für jeden Titel automatisch die beste Version suchen, Liste prüfen, dann gesammelt ersetzen">
+            <i class="ti ti-list-check"></i> {selected.size ? `${selected.size} markierte` : `Alle ${filtered.length}`} automatisch ersetzen…
+          </button>
+        {/if}
       </div>
     {/if}
     {#if navMode === 'duplicates'}
       <div class="dupe-info" role="status">
         {#if dupesGroups.length > 0}
           <p class="dupe-text">
-            <b>{dupesGroups.length} Songs liegen mehrfach vor</b>{dupeScopeLabel} ({dupesAll.size} Dateien).
-            Gleich heißt: gleicher Künstler und Titel, höchstens {DUPE_DUR_TOL} s Längenunterschied. Von jedem bleibt die
-            <span class="dupe-best" title="Verlustfrei vor hoher Bitrate. Dateien von YouTube-Konvertern zählen höchstens wie 160 kbps, auch als WAV.">beste Datei</span>,
-            die {dupesHidden.size} übrigen Kopien stehen unten gedämpft.
+            <b>{dupesGroups.length} Songs doppelt</b>{dupeScopeLabel} · {dupesAll.size} Dateien.
+            <i class="ti ti-circle-check d-keep-inline" aria-hidden="true"></i>
+            <span class="dupe-best" title="Automatisch die beste: verlustfrei vor hoher Bitrate; Dateien von YouTube-Konvertern zählen höchstens wie 160 kbps.">bleibt</span>,
+            die anderen sind Kopien. Maus über eine Zeile: <b>behalten</b> oder <b>Papierkorb</b>.
           </p>
           <div class="dupe-acts">
-            <button class="btn btn-sm" onclick={() => showDupeScan = true}
-                    title="Song für Song entscheiden, welche Datei bleibt"><i class="ti ti-scan"></i> Einzeln prüfen</button>
             <button class="btn btn-sm btn-danger" onclick={removeHiddenDupes}
-                    title="Alle schlechteren Kopien in den Papierkorb, die beste Datei jedes Songs bleibt"><i class="ti ti-trash"></i> {dupesHidden.size} Kopien in den Papierkorb</button>
+                    title="Alle Kopien in den Papierkorb, die markierte Datei jedes Songs bleibt"><i class="ti ti-trash"></i> {dupesHidden.size} Kopien löschen</button>
           </div>
         {:else}
           <p class="dupe-text">Keine doppelten Songs{dupeScopeLabel}.</p>
@@ -1854,7 +1949,9 @@
     {#if selected.size > 0}
       <div class="sel-bar">
         <span class="sel-count">{selected.size} ausgewählt</span>
-        <button class="btn btn-sm" onclick={normalizeSelected} title="Ziel: {$appSettings.targetLUFS ?? -14} LUFS">Auf {$appSettings.targetLUFS ?? -14} LUFS normalisieren</button>
+        {#if navMode === 'quality'}
+          <button class="btn btn-sm btn-primary" onclick={() => batchPaths = [...selected]}><i class="ti ti-list-check"></i> Bessere Versionen suchen ({selected.size})</button>
+        {/if}
       </div>
     {/if}
 
@@ -1862,16 +1959,21 @@
       <div class="col-header" bind:this={_colHeaderEl}>
         <div class="col-pad"></div>
         {#if navMode === 'quality'}<div class="q-col" aria-hidden="true"></div>{/if}
+        {#if navMode === 'duplicates'}<div class="d-col" aria-hidden="true"></div>{/if}
+        {#if navMode === 'downloads'}
+          <button class="dl-col dl-hdr col-btn {!dlColSort ? 'sort-active' : ''}" onclick={() => dlColSort = false}
+                  title="Nach Ladedatum, neueste zuerst">Geladen{#if !dlColSort}<i class="ti ti-chevron-down sort-ico" aria-hidden="true"></i>{/if}</button>
+        {/if}
         {#each cols as col, ci}
           <button
-            class="col-btn {sortCol === col.key ? 'sort-active' : ''}"
+            class="col-btn {ci === 0 ? 'col-first' : ''} {sortCol === col.key && sortShown ? 'sort-active' : ''}"
             style="width:{colWidths[col.key]}px;flex-shrink:0;{ci === 0 ? 'text-align:left' : ''};position:relative"
             draggable="true"
             ondragstart={(e) => onColDragStart(e, col.key)}
             ondragover={(e) => onColDragOver(e, col.key)}
             ondrop={(e) => onColDrop(e, col.key)}
             onclick={() => setSort(col.key)}>
-            <span>{col.label}</span>{#if sortCol === col.key}<i class="ti {sortAsc ? 'ti-chevron-up' : 'ti-chevron-down'} sort-ico" aria-hidden="true"></i>{/if}
+            <span>{col.label}</span>{#if sortCol === col.key && sortShown}<i class="ti {sortAsc ? 'ti-chevron-up' : 'ti-chevron-down'} sort-ico" aria-hidden="true"></i>{/if}
           </button>
           <div class="col-resize-handle"
             onmousedown={(e) => startColResize(e, col.key)}
@@ -1919,22 +2021,55 @@
             {#each _vItems as track, vi (track.path)}
               {@const qdot = qualityDot(track)}
               {@const at = getTrackArtistTitle(track)}
-              <div class="row {(track.play_count ?? 0) > 0 ? 'played' : ''} {selected.has(track.path) ? 'sel' : ''} {track.missing ? 'missing' : ''} {navMode === 'duplicates' && dupesHidden.has(track.path) ? 'dupe-copy' : ''}"
+              <div class="row {(track.play_count ?? 0) > 0 ? 'played' : ''} {selected.has(track.path) ? 'sel' : ''} {track.missing ? 'missing' : ''} {navMode === 'duplicates' && dupesHidden.has(track.path) ? 'dupe-copy' : ''} {dupeGrpStart.has(track.path) ? 'grp-start' : ''}"
                    role="row"
-                   draggable="true"
+                   draggable={!track._gone}
                    ondragstart={(e) => dragStart(e, track)}
                    onclick={(e) => handleRowClick(e, track)}
-                   ondblclick={(e) => navMode === 'quality' ? openBetterVersion(track) : onCtx(e, track)}
-                   oncontextmenu={(e) => onCtx(e, track)}>
+                   ondblclick={(e) => track._gone ? null : navMode === 'quality' ? openBetterVersion(track) : onCtx(e, track)}
+                   oncontextmenu={(e) => track._gone ? e.preventDefault() : onCtx(e, track)}>
                 <div class="col-pad">
                   {#if qdot}<span class="qdot {qdot}"></span>{/if}
                 </div>
                 {#if navMode === 'quality'}
-                  {@const reasons = qualityInfo.map.get(track.path) ?? []}
-                  <span class="q-col" role="img" aria-label={reasons.map(k => QUALITY_LABELS[k]).join(', ')}
-                        onmouseenter={(e) => showQTip(e, track)} onmouseleave={() => qTip = null}>
-                    {#if reasons.length}
-                      <i class="ti ti-alert-triangle q-warn {reasons.some(k => k !== 'video') ? 'q-bad' : ''}" aria-hidden="true"></i>
+                  {@const reasons = qualityInfo.map.get(track.path) ?? qualityInfo.ignored.get(track.path) ?? []}
+                  <span class="q-col">
+                    <span class="q-icon" role="img" aria-label={reasons.map(k => QUALITY_LABELS[k]).join(', ')}
+                          onmouseenter={(e) => showQTip(e, track)} onmouseleave={() => qTip = null}>
+                      {#if reasons.length}
+                        <i class="ti ti-alert-triangle q-warn {reasons.some(k => k !== 'video') ? 'q-bad' : ''} {track.quality_ok ? 'q-off' : ''}" aria-hidden="true"></i>
+                      {/if}
+                    </span>
+                    <button class="r-btn" title="Bessere Version suchen" aria-label="Bessere Version suchen"
+                            onclick={(e) => { e.stopPropagation(); openBetterVersion(track) }}><i class="ti ti-refresh"></i></button>
+                    {#if track.quality_ok}
+                      <button class="r-btn" title="Wieder anzeigen" aria-label="Wieder anzeigen"
+                              onclick={(e) => { e.stopPropagation(); qualityOk(track, false) }}><i class="ti ti-eye"></i></button>
+                    {:else}
+                      <button class="r-btn" title="Passt so — aus der Liste ausblenden" aria-label="Passt so"
+                              onclick={(e) => { e.stopPropagation(); qualityOk(track, true) }}><i class="ti ti-eye-off"></i></button>
+                    {/if}
+                  </span>
+                {/if}
+                {#if navMode === 'duplicates'}
+                  {@const g = dupeGroupOf.get(track.path)}
+                  <span class="d-col">
+                    {#if g?.best.path === track.path}
+                      <i class="ti ti-circle-check d-keep" title="Diese Datei bleibt" aria-label="Bleibt"></i>
+                    {:else}
+                      <button class="r-btn" title="Diese Datei behalten statt der markierten" aria-label="Behalten"
+                              onclick={(e) => { e.stopPropagation(); keepDupe(track) }}><i class="ti ti-circle-check"></i></button>
+                    {/if}
+                    <button class="r-btn r-danger" title="Diese Datei in den Papierkorb" aria-label="In den Papierkorb"
+                            onclick={(e) => { e.stopPropagation(); trashOne(track) }}><i class="ti ti-trash"></i></button>
+                  </span>
+                {/if}
+                {#if navMode === 'downloads'}
+                  <span class="dl-col" title={track._gone ? 'Datei wurde gelöscht' : ''}>
+                    <span class="dl-date">{fmtMtime(track._dlTs)}</span>
+                    {#if track._gone && track._url}
+                      <button class="r-btn" title="Neu herunterladen" aria-label="Neu herunterladen"
+                              onclick={(e) => { e.stopPropagation(); send({ type: 'download_add', url: track._url, format: 'mp3-best' }) }}><i class="ti ti-download"></i></button>
                     {/if}
                   </span>
                 {/if}
@@ -1996,7 +2131,7 @@
 </div>
 
 <!-- Click-outside / right-click-outside to close context menu -->
-<svelte:window onclick={() => { closeCtx(); folderCtx = null; playlistCtx = null; colPickerOpen = false; favOpen = false }} oncontextmenu={() => { if (!ctxMenu) return; closeCtx() }} onkeydown={libKey} />
+<svelte:window onclick={() => { closeCtx(); folderCtx = null; playlistCtx = null; colPickerOpen = false; favOpen = false; libMenu = null }} oncontextmenu={() => { if (!ctxMenu) return; closeCtx() }} onkeydown={libKey} />
 
 {#if qTip && qTip.reasons.length}
   <div class="q-tip" role="tooltip" style="left:{qTip.x}px;top:{qTip.y}px">
@@ -2005,6 +2140,30 @@
     {/each}
     <span class="q-tip-hint">Doppelklick: bessere Version suchen</span>
   </div>
+{/if}
+
+{#if titlePaths !== undefined}
+  <TitleDialog paths={titlePaths} onclose={() => titlePaths = undefined} />
+{/if}
+
+{#if normDlg}
+  <div class="dlg-overlay" onclick={() => normDlg = null} role="presentation">
+    <div class="dlg" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Normalisieren" style="width:420px">
+      <div class="dlg-title">{normDlg.paths.length === 1 ? 'Datei' : `${normDlg.paths.length} Dateien`} normalisieren</div>
+      <div class="dlg-hint">Bringt die Lautheit dauerhaft auf den Zielwert — die Dateien werden dabei neu geschrieben. Für die Wiedergabe reicht meist die Lautstärke-Angleichung in den Einstellungen.</div>
+      <label class="dlg-field">Ziel: <b>{normDlg.lufs} LUFS</b>
+        <input type="range" min="-18" max="-5" step="1" bind:value={normDlg.lufs} />
+      </label>
+      <div class="dlg-actions">
+        <button class="btn" onclick={() => normDlg = null}>Abbrechen</button>
+        <button class="btn btn-primary" onclick={runNormalize}>Normalisieren</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if batchPaths}
+  <QualityBatchDialog paths={batchPaths} onclose={() => batchPaths = null} />
 {/if}
 
 {#if showGenres}
@@ -2154,6 +2313,9 @@
     {/if}
     <button onclick={() => openBetterVersion(ctxMenu.track)}>Bessere Version suchen</button>
     <button onclick={() => openMetaEdit(ctxMenu.track)}>Metadaten bearbeiten</button>
+    <button onclick={() => { titlePaths = selected.size > 1 && selected.has(ctxMenu.track.path) ? [...selected] : [ctxMenu.track.path]; closeCtx() }}>
+      {selected.size > 1 && selected.has(ctxMenu.track.path) ? `${selected.size} Titel` : 'Titel'} aufräumen…</button>
+    <button onclick={() => openNormalize(ctxMenu.track)}>{selected.size > 1 && selected.has(ctxMenu.track.path) ? `${selected.size} Dateien` : 'Datei'} normalisieren…</button>
     <div class="ctx-sep"></div>
     {#if navMode.startsWith('playlist:')}
       {#if selected.size > 1 && selected.has(ctxMenu.track.path)}
@@ -2171,10 +2333,24 @@
   </div>
 {/if}
 
+{#if libMenu}
+  <div class="ctx-menu lib-menu" role="menu" style="left:{libMenu.x}px;bottom:{libMenu.y}px" onclick={(e) => e.stopPropagation()}>
+    <button onclick={() => { libMenu = null; scanLibrary() }}><i class="ti ti-scan"></i> Ordner neu einlesen</button>
+    <button onclick={() => { libMenu = null; send({ type: 'analyze_library_meta' }) }}
+            title="LUFS, BPM und Tonart für alle Titel, die noch keinen Wert haben"><i class="ti ti-wand"></i> Fehlende Werte analysieren</button>
+    <div class="ctx-sep"></div>
+    <button onclick={() => { libMenu = null; selectNav('quality') }}><i class="ti ti-alert-triangle"></i> Qualität prüfen</button>
+    <button onclick={() => { libMenu = null; selectNav('duplicates') }}><i class="ti ti-copy"></i> Duplikate</button>
+    <button onclick={() => { libMenu = null; showGenres = true }}><i class="ti ti-tags"></i> Genres ergänzen…</button>
+    <button onclick={() => { libMenu = null; titlePaths = null }}><i class="ti ti-clear-formatting"></i> Titel aufräumen…</button>
+  </div>
+{/if}
+
 {#if folderCtx}
   <div class="ctx-menu" style="left:{Math.min(folderCtx.x, window.innerWidth - 220)}px;top:{Math.min(folderCtx.y, window.innerHeight - 160)}px"
        onclick={(e) => e.stopPropagation()}>
-    <button onclick={analyzeFolder}>Analysieren</button>
+    <button onclick={() => analyzeFolder(false)}>Analysieren — nur dieser Ordner</button>
+    <button onclick={() => analyzeFolder(true)}>Analysieren — mit Unterordnern</button>
     <button onclick={scanFolderDupes}>Auf Duplikate scannen</button>
     <div class="ctx-sep"></div>
     {#if $favorites.some(f => f.path === folderCtx.path)}
@@ -2183,7 +2359,14 @@
       <button onclick={() => { send({ type: 'add_favorite', path: folderCtx.path, name: folderCtx.path.split(/[\\/]/).filter(Boolean).pop() ?? folderCtx.path }); folderCtx = null }}>Zu Favoriten hinzufügen</button>
     {/if}
     <div class="ctx-sep"></div>
-    <button onclick={excludeFolderFromLibrary}>Aus Bibliothek ausschließen</button>
+    {#if excludedBy(folderCtx.path)}
+      {@const ex = excludedBy(folderCtx.path)}
+      <button onclick={() => includeFolder(ex)} title={ex}>
+        {ex.toLowerCase() === folderCtx.path.toLowerCase() ? 'Wieder in die Bibliothek aufnehmen' : `Ganzen Ordner „${ex.split(/[\\/]/).filter(Boolean).pop()}“ wieder aufnehmen`}
+      </button>
+    {:else}
+      <button onclick={excludeFolderFromLibrary}>Aus Bibliothek ausschließen</button>
+    {/if}
   </div>
 {/if}
 
@@ -2343,17 +2526,15 @@
   /* Fuss: Scannen, Analysieren, Fortschritt */
   .nav-footer { flex-shrink: 0; padding: 0 var(--sp-2) var(--sp-2); }
   .nav-sep-footer { margin: 0 0 var(--sp-2); }
-  .scan-row { display: flex; gap: var(--sp-1); }
-  .scan-row .btn { flex: 1; }
-  .analyze-progress { padding-top: var(--sp-2); }
-  .ap-bar { height: 4px; background: var(--c-br1); border-radius: 2px; overflow: hidden; margin-bottom: var(--sp-1); }
+  .nav-status { display: flex; align-items: center; gap: var(--sp-1); min-height: 30px; }
+  .ns-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .ns-text { font-size: var(--fs-sm); color: var(--c-tx2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+  .ns-idle { color: var(--c-tx4); }
+  .ap-bar { height: 3px; background: var(--c-br1); border-radius: 2px; overflow: hidden; }
   .ap-fill { height: 100%; background: var(--c-accent); border-radius: 2px; transition: width .3s ease; }
-  .ap-row { display: flex; align-items: center; gap: var(--sp-2); }
-  .ap-label { flex: 1; font-size: var(--fs-sm); color: var(--c-tx3); font-variant-numeric: tabular-nums; }
-  .scan-status {
-    padding-top: var(--sp-2); font-size: var(--fs-sm); color: var(--c-tx3);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
+  .lib-menu { position: fixed; z-index: 500; min-width: 240px; }
+  .lib-menu button { display: flex; align-items: center; gap: var(--sp-2); }
+  .t-child.excluded, .t-item.excluded { opacity: .45; font-style: italic; }
 
   /* Griff zum Verbreitern und Einklappen */
   .nav-handle-wrap { position: relative; flex-shrink: 0; width: 10px; }
@@ -2396,7 +2577,26 @@
   .spinner { display: inline-block; animation: spin 1s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   /* Warn-Spalte der Qualitaets-Ansicht: Titel beginnen buendig, Grund beim Draufzeigen */
-  .q-col { width: 22px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; position: relative; }
+  .q-col { width: 70px; flex-shrink: 0; display: flex; align-items: center; gap: 2px; padding-left: 2px; }
+  .q-icon { width: 20px; display: flex; justify-content: center; }
+  .q-off { opacity: .45; }
+  .d-col { width: 56px; flex-shrink: 0; display: flex; align-items: center; gap: 2px; padding-left: 4px; }
+  .dl-col { width: 92px; flex-shrink: 0; display: flex; align-items: center; gap: 2px; padding-left: var(--sp-2); }
+  .dl-date { width: 60px; color: var(--c-tx4); font-variant-numeric: tabular-nums; font-size: var(--fs-sm); }
+  .dl-hdr { color: var(--c-tx4); font-size: var(--fs-sm); }
+  .row.missing .dl-col .r-btn { text-decoration: none; }
+  .d-keep { width: 24px; text-align: center; font-size: 16px; color: var(--c-green-tx); }
+  .d-keep-inline { color: var(--c-green-tx); vertical-align: -2px; }
+  /* Zeilen-Aktionen: erscheinen beim Drueberfahren */
+  .r-btn {
+    width: 24px; height: 22px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
+    border: none; border-radius: var(--r-s); background: none; color: var(--c-tx3); cursor: pointer;
+    font-size: 14px; opacity: 0; transition: opacity .1s;
+  }
+  .row:hover .r-btn, .r-btn:focus-visible { opacity: 1; }
+  .r-btn:hover { background: var(--c-hover); color: var(--c-tx1); }
+  .r-danger:hover { background: var(--c-red-bg); color: var(--c-red-tx); }
+  .row.grp-start { border-top: 2px solid var(--c-br3); }
   .q-warn { font-size: 15px; color: var(--c-warn-tx); cursor: help; }
   .q-warn.q-bad { color: var(--c-red-tx); }
   .q-tip {
@@ -2438,7 +2638,7 @@
     letter-spacing: .08em; text-transform: uppercase; cursor: pointer;
     justify-content: flex-end;
   }
-  .col-btn:first-of-type { justify-content: flex-start; }
+  .col-btn.col-first, .col-btn.dl-hdr { justify-content: flex-start; }
   .col-btn:hover { color: var(--c-tx1); background: var(--c-hover); }
   .col-btn.sort-active { color: var(--c-accent-tx); }
   .sort-ico { font-size: 13px; flex-shrink: 0; }

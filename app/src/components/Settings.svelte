@@ -2,6 +2,7 @@
   import { untrack } from 'svelte'
   import { theme, density } from '../lib/prefs.js'
   import KeyChip from './KeyChip.svelte'
+  import BlendSketch from './BlendSketch.svelte'
   import { settings, settingsOpen, settingsTab, appSettings, send, toolsInfo, updateProgress,
            loudnormOnDl, loudnormTarget, loudnormTp, autoMixEnabled, playMode,
            playlistFolderEnabled, dlFilenameFormat, downloadDir, remoteStatus,
@@ -10,7 +11,7 @@
            lastfmApiKey, acoustidApiKey,
            fpcalcInstalling, fpcalcInstallError,
            spotdlInstalling, spotdlInstallError, spotdlInstallText,
-           watchedFolders, watchedFolderImpact, ytdlpAutoupdate, excludedFolders, toolUpdates } from '../stores/ws.js'
+           watchedFolders, watchedFolderImpact, ytdlpAutoupdate, excludedFolders, toolUpdates, servicesTest, setupOpen } from '../stores/ws.js'
 
   let tab = $state('playback')
 
@@ -132,12 +133,24 @@
   // Services (Last.fm + AcoustID) — local edit state
   let lastfmKeyEdit   = $state('')
   let acoustidKeyEdit = $state('')
-  $effect(() => { lastfmKeyEdit   = $lastfmApiKey  })
-  $effect(() => { acoustidKeyEdit = $acoustidApiKey })
+  // Nur uebernehmen, solange nichts eingetippt wurde — sonst ueberschrieb ein
+  // Neuverbinden die Eingabe. Gespeichert wird beim Verlassen des Feldes; frueher
+  // nur per Knopf, und wer ihn uebersah, verlor den Key beim Schliessen.
+  let servicesDirty = false
+  $effect(() => { const a = $lastfmApiKey, b = $acoustidApiKey; if (!servicesDirty) { lastfmKeyEdit = a; acoustidKeyEdit = b } })
+  let testing = $state(false)
+  function testServices() {
+    saveServices()
+    testing = true
+    servicesTest.set(null)
+    send({ type: 'test_services' })
+  }
+  $effect(() => { if ($servicesTest) testing = false })
   function saveServices() {
-    lastfmApiKey.set(lastfmKeyEdit)
-    acoustidApiKey.set(acoustidKeyEdit)
-    send({ type: 'set_services', lastfm_api_key: lastfmKeyEdit, acoustid_api_key: acoustidKeyEdit })
+    servicesDirty = false
+    lastfmApiKey.set(lastfmKeyEdit.trim())
+    acoustidApiKey.set(acoustidKeyEdit.trim())
+    send({ type: 'set_services', lastfm_api_key: lastfmKeyEdit.trim(), acoustid_api_key: acoustidKeyEdit.trim() })
   }
 
   function setFilenameFormat(fmt) {
@@ -268,6 +281,23 @@
           </div>
 
           <div class="group">
+            <div class="group-title">Sanft bedienen</div>
+            <div class="row">
+              <span class="lbl">Pause ausblenden</span>
+              <input type="range" min="0" max="2000" step="100" value={$appSettings.pauseFadeMs ?? 500}
+                     oninput={(e) => appSettings.update(s => ({ ...s, pauseFadeMs: +e.target.value }))} />
+              <span class="val">{($appSettings.pauseFadeMs ?? 500) === 0 ? 'aus' : (($appSettings.pauseFadeMs ?? 500) / 1000).toFixed(1) + ' s'}</span>
+            </div>
+            <div class="row">
+              <span class="lbl">Lautstärke glätten</span>
+              <input type="range" min="0" max="1000" step="50" value={$appSettings.volumeFadeMs ?? 200}
+                     oninput={(e) => appSettings.update(s => ({ ...s, volumeFadeMs: +e.target.value }))} />
+              <span class="val">{($appSettings.volumeFadeMs ?? 200) === 0 ? 'aus' : (($appSettings.volumeFadeMs ?? 200) / 1000).toFixed(2) + ' s'}</span>
+            </div>
+            <div class="hint">Bei Pause blendet der Titel aus statt abrupt zu stoppen, beim Fortsetzen wieder ein. Lautstärke-Änderungen gleiten statt zu springen.</div>
+          </div>
+
+          <div class="group">
             <div class="group-title">Normalisierung</div>
             <div class="row">
               <span class="lbl">Lautstärke angleichen</span>
@@ -279,7 +309,8 @@
               <div class="row indent">
                 <span class="lbl">Ziel-LUFS</span>
                 <input type="range" min="-23" max="-8" step="1" value={$appSettings.targetLUFS}
-                  oninput={(e) => { const v = +e.target.value; appSettings.update(s => ({...s, targetLUFS: v})); send({type:'set_normalize_volume', value: $appSettings.normalizeVolume, target_lufs: v}) }} />
+                  oninput={(e) => { const v = +e.target.value; appSettings.update(s => ({...s, targetLUFS: v})) }}
+                  onchange={(e) => send({type:'set_normalize_volume', value: $appSettings.normalizeVolume, target_lufs: +e.target.value})} />
                 <span class="val">{$appSettings.targetLUFS} LUFS</span>
               </div>
             {/if}
@@ -327,7 +358,8 @@
             <div class="row" style="margin-top:8px">
               <span class="lbl">Dauer</span>
               <input type="range" min="0" max="15" step="1" value={$settings.crossfade_s}
-                oninput={(e) => send({ type: 'set_crossfade', seconds: +e.target.value })} />
+                onchange={(e) => send({ type: 'set_crossfade', seconds: +e.target.value })}
+                oninput={(e) => settings.update(s => ({ ...s, crossfade_s: +e.target.value }))} />
               <span class="val">{$settings.crossfade_s === 0 ? 'aus' : $settings.crossfade_s + 's'}</span>
             </div>
           </div>
@@ -348,6 +380,7 @@
               {:else if $appSettings.cfCurve === 'linear'}Gleichmäßiger Abfall — direkter, teils hörbar
               {:else}Starke S-Kurve — lange stille Mitte, harte Ein- und Ausgänge{/if}
             </div>
+            <BlendSketch kind="curve" value={$appSettings.cfCurve ?? 'cosine'} />
           </div>
 
           <div class="group">
@@ -384,6 +417,7 @@
                 Sehr stark — springt direkt zum Beat-Einsatz (ganzes Intro)
               {/if}
             </div>
+            <BlendSketch kind="intro" value={$appSettings.introAggressiveness ?? 3} dimmed={!$appSettings.smartFade} />
 
             <!-- OUTRO -->
             <div class="row {$appSettings.smartFade ? '' : 'dimmed'}" style="margin-top:8px">
@@ -409,6 +443,7 @@
                 Sehr stark — startet ~2× Blendzeit früher, lange Überlappung
               {/if}
             </div>
+            <BlendSketch kind="outro" value={$appSettings.outroAggressiveness ?? 3} dimmed={!$appSettings.smartFade} />
           </div>
 
           <div class="group">
@@ -426,6 +461,7 @@
                 Crossfade startet zum fixen Zeitpunkt ohne Beat-Ausrichtung.
               {/if}
             </div>
+            <BlendSketch kind="beat" value={$appSettings.beatAlignCf} />
           </div>
 
         <!-- ── DOWNLOAD ────────────────────────────────────────────────── -->
@@ -479,13 +515,13 @@
               <div class="row indent">
                 <span class="lbl">Ziel-LUFS</span>
                 <input type="range" min="-23" max="-6" step="1" value={$loudnormTarget}
-                  oninput={(e) => { loudnormTarget.set(+e.target.value); sendLoudnorm() }} />
+                  oninput={(e) => loudnormTarget.set(+e.target.value)} onchange={sendLoudnorm} />
                 <span class="val">{$loudnormTarget} LUFS</span>
               </div>
               <div class="row indent">
                 <span class="lbl">True Peak</span>
                 <input type="range" min="-9" max="-0.5" step="0.5" value={$loudnormTp}
-                  oninput={(e) => { loudnormTp.set(+e.target.value); sendLoudnorm() }} />
+                  oninput={(e) => loudnormTp.set(+e.target.value)} onchange={sendLoudnorm} />
                 <span class="val">{$loudnormTp} dBTP</span>
               </div>
             {/if}
@@ -540,12 +576,12 @@
             <div class="row" style="margin-top:8px">
               <span class="lbl">Client-ID</span>
               <input class="field field-sm" type="text" placeholder="optional"
-                     bind:value={spotifyCidEdit} />
+                     bind:value={spotifyCidEdit} onchange={saveSpotifyCreds} />
             </div>
             <div class="row">
               <span class="lbl">Client-Secret</span>
               <input class="field field-sm" type="password" placeholder="optional"
-                     bind:value={spotifyCsecEdit} />
+                     bind:value={spotifyCsecEdit} onchange={saveSpotifyCreds} />
             </div>
             <div class="row">
               <span class="lbl"></span>
@@ -565,15 +601,17 @@
             <div class="row" style="margin-top:8px">
               <span class="lbl">API-Key</span>
               <input class="field field-sm" type="text" placeholder="32-stelliger Hex-Key"
-                     bind:value={lastfmKeyEdit} />
+                     bind:value={lastfmKeyEdit} oninput={() => servicesDirty = true} onchange={saveServices} />
             </div>
+            {#if $servicesTest?.lastfm}<div class="row"><span class="lbl"></span><span class="val {$servicesTest.lastfm.ok ? 'st-ok' : 'st-err'}">{$servicesTest.lastfm.ok ? '✓' : '✗'} {$servicesTest.lastfm.text}</span></div>{/if}
           </div>
 
           <div class="group">
             <div class="group-title">AcoustID — Fingerprint-Erkennung</div>
             <div class="hint">
               Erkennt Tracks anhand des Audioinhalts (via AcoustID + MusicBrainz).
-              Braucht <strong>Chromaprint (fpcalc)</strong> und einen kostenlosen API-Key von <strong>acoustid.org/api-key</strong>.
+              Braucht <strong>Chromaprint (fpcalc)</strong> und einen kostenlosen <strong>Application-Key</strong>:
+              acoustid.org → anmelden → <strong>„Register your application“</strong>. Der Key von deiner Benutzerseite funktioniert hier nicht.
             </div>
             <div class="row" style="margin-top:8px">
               <span class="lbl">fpcalc</span>
@@ -596,15 +634,21 @@
             {/if}
             <div class="row">
               <span class="lbl">API-Key</span>
-              <input class="field field-sm" type="text" placeholder="AcoustID API-Key"
-                     bind:value={acoustidKeyEdit} />
+              <input class="field field-sm" type="text" placeholder="AcoustID Application-Key"
+                     bind:value={acoustidKeyEdit} oninput={() => servicesDirty = true} onchange={saveServices} />
             </div>
+            {#if $servicesTest?.acoustid}<div class="row"><span class="lbl"></span><span class="val {$servicesTest.acoustid.ok ? 'st-ok' : 'st-err'}">{$servicesTest.acoustid.ok ? '✓' : '✗'} {$servicesTest.acoustid.text}</span></div>{/if}
           </div>
 
           <div class="row" style="padding:0 4px">
             <span class="lbl"></span>
-            <button class="btn btn-sm" onclick={saveServices}>Speichern</button>
+            <button class="btn btn-sm btn-primary" onclick={testServices} disabled={testing}>
+              <i class="ti {testing ? 'ti-refresh spin' : 'ti-plug'}"></i> {testing ? 'Teste…' : 'Speichern und Verbindung testen'}
+            </button>
           </div>
+          {#if $servicesTest?.spotify}
+            <div class="row" style="padding:0 4px"><span class="lbl">Spotify</span><span class="val {$servicesTest.spotify.ok ? 'st-ok' : 'st-err'}">{$servicesTest.spotify.ok ? '✓' : '✗'} {$servicesTest.spotify.text}</span></div>
+          {/if}
 
         <!-- ── DARSTELLUNG ─────────────────────────────────────────────── -->
         {:else if tab === 'look'}
@@ -869,6 +913,15 @@
         {:else if tab === 'info'}
 
           <div class="group">
+            <div class="group-title">Einrichtung</div>
+            <div class="row">
+              <span class="lbl">Assistent</span>
+              <button class="btn btn-sm" onclick={() => { settingsOpen.set(false); setupOpen.set(true) }}><i class="ti ti-wand"></i> Einrichtung starten</button>
+            </div>
+            <div class="hint">Führt in sechs Schritten durch Aussehen, Musikordner, Downloads, Übergänge, Anzeige und Dienste.</div>
+          </div>
+
+          <div class="group">
             <div class="group-title">Tastenkürzel</div>
             <table class="shortcuts">
               <tbody>
@@ -904,7 +957,7 @@
 <style>
   .overlay {
     position: fixed; inset: 0; z-index: 1000;
-    background: rgba(0,0,0,.6); backdrop-filter: blur(3px);
+    background: rgba(0,0,0,.66);   /* ohne backdrop-filter, siehe ui.css .dlg-overlay */
     display: flex; align-items: center; justify-content: center;
   }
   .panel {
@@ -1058,4 +1111,6 @@
   .shortcuts td:first-child {
     font-weight: 600; color: var(--c-tx1); white-space: nowrap;
   }
+  .spin { display: inline-block; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>

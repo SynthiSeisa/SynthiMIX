@@ -89,3 +89,27 @@ class YtmSearchTest(BackendTest):
         letzte = ws.of_type("wish_results")[-1]
         self.assertTrue(letzte["final"])
         self.assertEqual(letzte["results"][0]["title"], "Avicii - Wake Me Up")
+
+
+class LatestSearchTest(BackendTest):
+
+    def test_neue_suche_bricht_die_alte_ab(self):
+        import asyncio
+        done = []
+
+        async def suche(name, dauer):
+            await asyncio.sleep(dauer)
+            done.append(name)
+
+        async def los():
+            ws = object()
+            a = main._start_search(ws, "wish", suche("alt", 0.2))
+            await asyncio.sleep(0.01)
+            b = main._start_search(ws, "wish", suche("neu", 0.01))
+            await asyncio.sleep(0.3)
+            return a.cancelled(), b.done()
+
+        cancelled, finished = self.run_async(los())
+        self.assertTrue(cancelled)
+        self.assertTrue(finished)
+        self.assertEqual(done, ["neu"])

@@ -37,9 +37,32 @@
     if (!_volDragging) {
       volume = $settings.volume
       const el = cur()
-      if (el && !cfActive && !cfRafActive) el.volume = volume / 100
+      if (el && !cfActive && !cfRafActive && !el.paused) rampVolume(el, volume / 100, untrack(() => $appSettings.volumeFadeMs ?? 200))
+      else if (el && !cfActive && !cfRafActive) el.volume = volume / 100
     }
   })
+
+  // ── Sanfte Lautstaerke-Aenderungen ─────────────────────────────────────────
+  // setInterval statt requestAnimationFrame, damit es auch minimiert laeuft.
+  // Je Element hoechstens eine Rampe; eine neue ersetzt die alte.
+  const _ramps = new Map()   // el -> { iv, done }
+  function stopRamp(el) {
+    const r = _ramps.get(el)
+    if (r) { clearInterval(r.iv); _ramps.delete(el) }
+  }
+  function rampVolume(el, to, ms, done) {
+    if (!el) return
+    stopRamp(el)
+    to = Math.max(0, Math.min(1, to))
+    if (!ms || ms <= 0 || Math.abs(el.volume - to) < 0.005) { el.volume = to; done?.(); return }
+    const from = el.volume, t0 = performance.now()
+    const iv = setInterval(() => {
+      const t = Math.min(1, (performance.now() - t0) / ms)
+      el.volume = from + (to - from) * t
+      if (t >= 1) { stopRamp(el); done?.() }
+    }, 15)
+    _ramps.set(el, { iv })
+  }
 
   $effect(() => {
     if (!elA || !elB || audioCtx) return
@@ -383,7 +406,7 @@
     if (url === loadedUrl) return
 
     if (cfTimer) { clearInterval(cfTimer); cfTimer = null }
-    if (cfRaf)   { cancelAnimationFrame(cfRaf); cfRaf = null }
+    if (cfRaf)   { clearTimeout(cfRaf); cfRaf = null }
     cfCancelled = true
     cfActive = false; cfNextIdx = -1
 
@@ -426,6 +449,7 @@
         }, 0)
       }
 
+      stopRamp(c); stopRamp(a)      // der Uebergang steuert jetzt die Lautstaerke
       const fadeMs = cf * 1000
       const t0     = performance.now()
       const vOld   = c.volume
@@ -434,10 +458,13 @@
         const t = Math.min(1, (performance.now() - t0) / fadeMs)
         const [fv, tv] = _fade(t, vOld, v)
         c.volume = fv; a.volume = tv
-        if (t < 1) cfRaf = requestAnimationFrame(rafTick)
+        // setTimeout statt requestAnimationFrame: rAF steht still, wenn das
+        // Fenster minimiert oder verdeckt ist — der Uebergang blieb dann haengen
+        // und beide Titel spielten weiter
+        if (t < 1) cfRaf = setTimeout(rafTick, 16)
         else { cfRaf = null; cfRafActive = false; _silenceAndStop(c) }
       }
-      cfRaf = requestAnimationFrame(rafTick)
+      cfRaf = setTimeout(rafTick, 16)
     } else {
       // Silence the alt deck immediately in case a crossfade was mid-flight
       const oldAlt = untrack(alt)
@@ -472,7 +499,15 @@
     const el = cur()
     if (!el) return
     if (playing) {
-      if (el.paused) el.play().catch(() => {})
+      const fadeMs = untrack(() => $appSettings.pauseFadeMs ?? 500)
+      const target = untrack(() => volume) / 100
+      if (_ramps.has(el)) {
+        // Wieder an, bevor das Ausblenden fertig war: zurueck auf volle Lautstaerke
+        rampVolume(el, target, fadeMs)
+      } else if (el.paused) {
+        if (fadeMs > 0 && el.src && el.currentTime > 0.2) { el.volume = 0; el.play().catch(() => {}); rampVolume(el, target, fadeMs) }
+        else { el.volume = target; el.play().catch(() => {}) }
+      }
       const iv = setInterval(() => {
         const e = untrack(cur); if (!e) return
         posMs = (e.currentTime ?? 0) * 1000
@@ -484,17 +519,24 @@
     } else {
       // Mark all pending canplay listeners as cancelled
       cfCancelled = true
-      el.pause()
-      // Stop crossfade timer and kill the crossfading-in element unconditionally
+      // Laufende Uebergaenge abbrechen und das zweite Deck sofort stoppen —
+      // egal ob es gerade ein- oder ausblendet. Frueher lief nach einem Stopp
+      // mitten im Mix gelegentlich der andere Titel weiter.
       if (cfTimer) { clearInterval(cfTimer); cfTimer = null }
-      if (cfRaf)   { cancelAnimationFrame(cfRaf); cfRaf = null }
+      if (cfRaf)   { clearTimeout(cfRaf); cfRaf = null }
+      cfRafActive = false
       if (cfActive) { cfActive = false; cfNextIdx = -1 }
       const a = alt()
       if (a) {
+        stopRamp(a)
         try { a.pause() } catch {}
         a.removeAttribute('src')
         try { a.load() } catch {}  // flush queued canplay/loadeddata events
       }
+      // Den laufenden Titel kurz ausblenden statt hart abzuschneiden
+      const fadeMs = untrack(() => $appSettings.pauseFadeMs ?? 500)
+      if (!el.paused && fadeMs > 0) rampVolume(el, 0, fadeMs, () => { try { el.pause() } catch {} })
+      else { stopRamp(el); el.pause() }
     }
   })
 
@@ -612,6 +654,7 @@
     let elapsed = 0
     const cfCurveSnap = get(appSettings).cfCurve ?? 'cosine'
 
+    stopRamp(cur()); stopRamp(inactive)
     cfTimer = setInterval(() => {
       elapsed += 50
       const t      = Math.min(1, elapsed / cfMs)
@@ -770,7 +813,7 @@
     if (cfRaf !== null) {
       // Manueller Mix in die kaputte Datei: der alte Titel spielt noch und
       // bekommt die volle Lautstaerke zurueck, dann weiter zum naechsten.
-      cancelAnimationFrame(cfRaf); cfRaf = null; cfRafActive = false
+      clearTimeout(cfRaf); cfRaf = null; cfRafActive = false
       const old = alt()
       which = which === 'A' ? 'B' : 'A'
       if (old) { old.volume = volume / 100; loadedUrl = old.getAttribute('src') ?? '' }
@@ -810,7 +853,9 @@
 
   function setVolume(v) {
     volume = +v
-    const el = cur(); if (el) el.volume = volume / 100
+    const el = cur()
+    if (el && !cfActive && !cfRafActive) rampVolume(el, volume / 100, get(appSettings).volumeFadeMs ?? 200)
+    else if (el) el.volume = volume / 100
     send({ type: 'set_volume', value: volume })
   }
 

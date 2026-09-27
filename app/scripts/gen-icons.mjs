@@ -76,6 +76,13 @@ const ICONS = [
   ['player-play',     'outline'],
   ['player-play-filled',  'filled'],
   ['player-pause-filled', 'filled'],
+  ['eye',             'outline'],
+  ['eye-off',         'outline'],
+  ['list-check',      'outline'],
+  ['clear-formatting','outline'],
+  ['circle-check',    'outline'],
+  ['folder-off',      'outline'],
+  ['arrow-back-up',   'outline'],
 ]
 
 function maskUrl(name, variant) {

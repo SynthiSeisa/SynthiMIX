@@ -113,7 +113,30 @@ _exe_dir  = Path(sys.executable).parent if _frozen else Path(__file__).parent.pa
 _meipass  = Path(sys._MEIPASS) if _frozen and hasattr(sys, '_MEIPASS') else None
 
 # Kein Console-Fenster bei subprocess-Aufrufen auf Windows (wichtig im gepackten Modus)
-_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+# Alle Hilfsprogramme (yt-dlp, ffmpeg, fpcalc) ohne Fenster und mit niedrigerer
+# Prioritaet: Suchen, Analysen und Downloads duerfen der laufenden Musik keine
+# Rechenzeit wegnehmen. Vorher stockte die Wiedergabe, wenn Gaeste Wuensche
+# suchten (bis zu sechs yt-dlp-Prozesse je Suche, mehrere Suchen gleichzeitig).
+_NO_WINDOW = (subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS) if sys.platform == "win32" else 0
+
+# Nur die jeweils letzte Suche einer Verbindung laeuft weiter; eine neue
+# Eingabe bricht die vorige ab (samt ihren yt-dlp-Prozessen).
+_latest_search: dict = {}
+
+
+def _start_search(ws, kind: str, coro):
+    key = (id(ws), kind)
+    old = _latest_search.get(key)
+    if old is not None and not old.done():
+        old.cancel()
+    task = asyncio.create_task(coro)
+    _latest_search[key] = task
+
+    def _done(t, key=key):
+        if _latest_search.get(key) is t:
+            _latest_search.pop(key, None)
+    task.add_done_callback(_done)
+    return task
 
 def _find_tool(name: str, *extra_dirs: Path) -> str:
     candidates = [
@@ -361,6 +384,8 @@ def load_library():
             "play_count":   int(t.get("play_count", 0)),
             # Obere Grenzfrequenz (Qualitaetspruefung); fehlt = noch nicht gemessen
             **({"cutoff_khz": float(t["cutoff_khz"])} if t.get("cutoff_khz") is not None else {}),
+            # "Passt so" in der Qualitaetsansicht
+            **({"quality_ok": True} if t.get("quality_ok") else {}),
             **({"unanalyzable": True} if t.get("unanalyzable") else {}),
             **({"missing": True} if t.get("missing") else {}),
         })
@@ -475,12 +500,22 @@ def load_history():
 def save_history():
     _save_json(HISTORY_FILE, _state["history"][-500:])  # keep last 500
 
+def _history_payload() -> dict:
+    """Download-Verlauf fuer die Oberflaeche. Geloeschte Dateien bleiben drin,
+    werden aber markiert, damit sie ausgegraut erscheinen."""
+    items = []
+    for h in _state["history"][:500]:
+        p = h.get("path") or ""
+        items.append({**h, "gone": bool(p) and not os.path.exists(p)})
+    return {"type": "history", "items": items}
+
 def _append_history(url: str, title: str, path: str, bitrate_kbps: int):
     _state["history"] = [h for h in _state["history"] if h.get("url") != url]
     from datetime import date
     _state["history"].insert(0, {
         "url": url, "title": title, "path": path,
-        "date": date.today().isoformat(), "bitrate_kbps": bitrate_kbps
+        "date": date.today().isoformat(), "ts": int(time.time()),
+        "bitrate_kbps": bitrate_kbps
     })
     save_history()
 
@@ -963,6 +998,10 @@ def _detect_key_sync(path: str) -> str | None:
 
 _analyze_running = False
 _analyze_cancel  = False
+# Auftraege, die waehrend einer laufenden Analyse kamen (None = alle Titel).
+# Frueher wurden sie still verworfen — "Analysieren" am Ordner tat dann nichts,
+# und der Zaehler zeigte die andere, groessere Analyse.
+_analyze_pending: list = []
 _unanalyzable_paths: set[str] = set()   # Pfade die dauerhaft nicht analysierbar sind
 
 async def _analyze_library_meta_task(only_paths: list[str] | None = None):
@@ -973,6 +1012,9 @@ async def _analyze_library_meta_task(only_paths: list[str] | None = None):
     """
     global _analyze_running, _analyze_cancel
     if _analyze_running:
+        _analyze_pending.append(only_paths)
+        n = "alle Titel" if only_paths is None else f"{len(only_paths)} Titel"
+        await broadcast({"type": "scan_status", "text": f"Analyse ({n}) eingereiht — startet nach der laufenden"})
         return
     _analyze_running = True
     _analyze_cancel  = False
@@ -1034,7 +1076,11 @@ async def _analyze_library_meta_task(only_paths: list[str] | None = None):
         await broadcast({"type": "analyze_progress", "done": done, "total": total, "finished": True})
     finally:
         _analyze_running = False
+        if _analyze_cancel:
+            _analyze_pending.clear()
         _analyze_cancel  = False
+        if _analyze_pending:
+            asyncio.create_task(_analyze_library_meta_task(_analyze_pending.pop(0)))
 
 async def _update_track_meta(path: str, title: str, artist: str):
     """Rewrite ID3/metadata tags in-place using ffmpeg, then update library cache."""
@@ -1423,6 +1469,359 @@ async def _quality_replace(path: str, url: str, ws: WebSocket):
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+# ── Qualitaet: viele Titel auf einmal ersetzen ───────────────────────────────
+_qbatch_cancel = False
+_QBATCH_PARALLEL = 2
+
+
+def _auto_candidate(lt: dict, results: list[dict]) -> tuple[dict | None, bool]:
+    """Besten Ersatz fuer einen Bibliothekstitel waehlen, ohne Rueckfrage:
+    gleicher Song und gleiche Fassung (Remix/Edit/VIP), keine Live-Aufnahmen
+    oder Musikvideos, hoechstens 30 s Laengenunterschied. Studio-Version vor
+    YouTube-Upload, dann die kleinste Laengenabweichung. Zweiter Wert: sicher?
+    Ohne bekannten Kuenstler ("Miracle") nie — gleichnamige Songs gibt es viele."""
+    title = lt.get("title", "")
+    a_want, s_want = _dupe_parts(title, lt.get("artist") or lt.get("album_artist") or "")
+    if len(s_want) < 2:
+        return None, False
+    version = set(s_want.split()) & _VERSION_WORDS
+    vdur = lt.get("duration_sec") or 0
+    best = None
+    for r in results:
+        dur = r.get("duration") or 0
+        rt = r.get("title", "")
+        if not dur or LIVE_RE.search(rt) or _MV_TITLE_RE.search(rt):
+            continue
+        ra, rs = _dupe_parts(rt, r.get("artist") or r.get("uploader") or "")
+        if (set(rs.split()) & _VERSION_WORDS) != version:
+            continue
+        sim = SequenceMatcher(None, s_want, rs).ratio()
+        if sim < 0.8:
+            continue
+        diff = abs(dur - vdur) if vdur else 0
+        if vdur and diff > 30:
+            continue
+        artist_ok = not a_want or not ra or a_want in ra or ra in a_want \
+            or SequenceMatcher(None, a_want, ra).ratio() >= 0.6
+        # Kuenstler-Tag ist oft der YouTube-Kanal: dann muessen Titel und Laenge sehr genau passen
+        if not artist_ok and not (sim >= 0.95 and vdur and diff <= 3):
+            continue
+        sure = bool(a_want and ra and artist_ok) and sim >= 0.9
+        key = (0 if r.get("kind") == "song" else 1, diff)
+        if best is None or key < best[0]:
+            best = (key, r, sure)
+    return (best[1], best[2]) if best else (None, False)
+
+
+async def _quality_batch(paths: list[str], ws: WebSocket):
+    """Fuer viele Titel je einen Ersatz vorschlagen (Liste zum Pruefen)."""
+    global _qbatch_cancel
+    _qbatch_cancel = False
+
+    async def send(t, **kw):
+        try: await ws.send_text(json.dumps({"type": t, **kw}))
+        except Exception: pass
+
+    by_path = {x.get("path"): x for x in _state["library"]}
+    sem = asyncio.Semaphore(_QBATCH_PARALLEL)
+    total, done = len(paths), 0
+    await send("quality_batch_progress", phase="search", done=0, total=total)
+
+    async def one(path):
+        nonlocal done
+        lt = by_path.get(path)
+        if lt is None or _qbatch_cancel:
+            return
+        async with sem:
+            if _qbatch_cancel:
+                return
+            cand, sure = None, False
+            try:
+                songs, videos = await _songs_and_videos(_song_query(lt.get("title", "")), 4, 6)
+                if songs:
+                    await _ytm_fill_details(songs)
+                cand, sure = _auto_candidate(lt, _merge_songs_first(songs, videos))
+            except Exception as e:
+                print(f"[quality] Sammelsuche {Path(path).name}: {e}", flush=True)
+            done += 1
+            await send("quality_batch_item", path=path, title=lt.get("title", ""),
+                       duration=lt.get("duration_sec") or 0,
+                       candidate=_public([cand])[0] if cand else None, sure=sure)
+            await send("quality_batch_progress", phase="search", done=done, total=total)
+
+    await asyncio.gather(*(one(p) for p in paths))
+    await send("quality_batch_done", cancelled=_qbatch_cancel)
+
+
+class _ForwardWS:
+    """Leitet Nachrichten weiter und merkt sich den letzten Ersetzen-Status."""
+    def __init__(self, ws):
+        self.ws, self.state, self.text = ws, "", ""
+
+    async def send_text(self, text):
+        try:
+            m = json.loads(text)
+            if m.get("type") == "quality_replace_status":
+                self.state, self.text = m.get("state", ""), m.get("text", "")
+        except Exception:
+            pass
+        try: await self.ws.send_text(text)
+        except Exception: pass
+
+
+async def _quality_batch_replace(items: list, ws: WebSocket):
+    """Nacheinander ersetzen, abbrechbar. Jeder Titel wie beim Einzel-Ersetzen:
+    gleicher Name und Pfad, Tags bleiben, alte Datei in den Papierkorb."""
+    global _qbatch_cancel
+    _qbatch_cancel = False
+
+    async def send(t, **kw):
+        try: await ws.send_text(json.dumps({"type": t, **kw}))
+        except Exception: pass
+
+    ok, failed, total = 0, [], len(items)
+    for n, it in enumerate(items):
+        if _qbatch_cancel:
+            break
+        path, url = it.get("path", ""), it.get("url", "")
+        title = next((x.get("title", "") for x in _state["library"] if x.get("path") == path), path)
+        await send("quality_batch_progress", phase="replace", done=n, total=total, current=title)
+        fw = _ForwardWS(ws)
+        await _quality_replace(path, url, fw)
+        if fw.state == "done":
+            ok += 1
+        else:
+            failed.append({"title": title, "text": fw.text})
+    await send("quality_batch_replaced", ok=ok, failed=failed[:30], failed_count=len(failed),
+               cancelled=_qbatch_cancel)
+
+
+# ── Titel aufraeumen ─────────────────────────────────────────────────────────
+# Video-Zusaetze, Kanal-/Label-Angaben und Genre-Klammern raus, "Kuenstler -
+# Titel" auf Titel- und Kuenstler-Tag verteilen. Remix, Edit, VIP, Bootleg,
+# feat., Acapella und "Original Mix" bleiben — das sind echte Angaben.
+# Geschrieben werden nur Titel- und Kuenstler-Tag, nie der Dateiname
+# (rekordbox wuerde die Datei sonst nicht mehr finden).
+_title_cancel = False
+_TITLE_NOISE_WORDS = (r"official|offizielle[sr]?|oficial|video|videoclip|musikvideo|lyrics?|audio|visuali[sz]er|"
+                      r"\bhd\b|\bhq\b|\b4k\b|free\s+(?:dl|download)|out\s+now|explicit|\bclean\b|premiere|exclusive|"
+                      r"records|recordings|release|\bncs\b|monstercat|\bukf\b|liquicity|audius")
+_TITLE_NOISE_BRACKET_RE = re.compile(r"\s*[\(\[\{【][^\)\]\}】]*(?:" + _TITLE_NOISE_WORDS + r")[^\)\]\}】]*[\)\]\}】]", re.IGNORECASE)
+_TITLE_NOISE_BARE_RE = re.compile(
+    r"\s*[-–—]?\s*\b(?:official\s+(?:hd\s+)?(?:music\s+)?video(?:\s+hd)?|official\s+audio|official\s+lyric\s+video|"
+    r"lyric\s+video|offizielles\s+(?:musik)?video|free\s+(?:dl|download))\b", re.IGNORECASE)
+_TITLE_KEEP_RE = re.compile(r"remix|mix\b|edit|vip|bootleg|flip|rework|feat|ft\.|acapella|a\s*capella|instrumental|extended|cover|version|live", re.IGNORECASE)
+_EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]+")
+# yt-dlp ersetzt in Dateinamen verbotene Zeichen durch aehnlich aussehende
+_YTDLP_CHARS = str.maketrans({"⧸": "/", "⧹": "\\", "＂": '"', "：": ":", "？": "?", "＊": "*", "＜": "<", "＞": ">", "｜": "|"})
+_TITLE_TRAIL_RE = re.compile(r"(?:\s+(?:audio|official|hd|hq|4k|lyrics?|video))+\s*$", re.IGNORECASE)
+
+
+def _clean_title_local(title: str, artist: str) -> tuple[str, str]:
+    """(Kuenstler, Titel) nach den lokalen Regeln."""
+    t = (title or "").translate(_YTDLP_CHARS)
+    artist = (artist or "").translate(_YTDLP_CHARS)
+    t = t.split(" | ")[0]                                     # "Song | Kanal/Serie"
+    if t.count("_") >= 2 and t.count(" ") < t.count("_"):
+        t = t.replace("_", " ")
+    t = _EMOJI_RE.sub("", t)
+    t = re.sub(r"^\s*\[[^\]]*\]\s*", lambda m: "" if _genre_map(m.group(0)) or re.search(_TITLE_NOISE_WORDS, m.group(0), re.I) else m.group(0), t)
+    t = _TITLE_NOISE_BRACKET_RE.sub("", t)
+    # Klammern, die nur ein Genre nennen: "(Rock)", "(Drum & Bass)"
+    def _genre_only(m):
+        inner = m.group(1)
+        if _TITLE_KEEP_RE.search(inner) or len(inner.split()) > 3:
+            return m.group(0)
+        return "" if _genre_map(inner) else m.group(0)
+    t = re.sub(r"\s*[\(\[]([^\)\]]+)[\)\]]", _genre_only, t)
+    t = _TITLE_NOISE_BARE_RE.sub("", t)
+    t = _TITLE_TRAIL_RE.sub("", t)                             # "... AUDIO", "... HD"
+    t = re.sub(r"\b[Ff][Tt]\.?\s", "feat. ", t)
+    t = re.sub(r"\s+", " ", t).strip(" -–—|")
+    new_artist = artist or ""
+    m = re.match(r"^['‘’\"“”](.+?)['‘’\"“”]\s+by\s+(.+)$", t, re.IGNORECASE)   # "'Song' by Artist"
+    if m:
+        t, new_artist = m.group(1).strip(), m.group(2).strip()
+    else:
+        m = re.match(r"^(.+?)\s+[-–—]\s+(.+)$", t)
+        if m:
+            new_artist, t = m.group(1).strip(), m.group(2).strip()
+    t = re.sub(r"^['‘’\"“”](.+)['‘’\"“”]$", r"\1", t.strip())        # Anfuehrungszeichen um den Titel
+    t = re.sub(r"^['‘’\"“”]([^'‘’\"“”]+)['‘’\"“”](\s*\(.*)$", r"\1\2", t)
+    return new_artist.strip(" -"), t.strip(" -")
+
+
+def _title_candidates(only: set | None) -> list[dict]:
+    out = []
+    for lt in _state["library"]:
+        if lt.get("missing") or not lt.get("path"):
+            continue
+        if only is not None and lt["path"] not in only:
+            continue
+        if _GENRE_SKIP_RE.search(os.path.basename(os.path.dirname(lt["path"]))) or \
+                re.search(r"_(bass|drums|vocals|other|instrumental)$", lt.get("title") or "", re.I):
+            continue       # Stems
+        out.append(lt)
+    return out
+
+
+def _lfm_track_info_sync(api_key: str, artist: str, title: str) -> tuple[str, str] | None:
+    from urllib.parse import urlencode
+    d = _http_json("https://ws.audioscrobbler.com/2.0/?" + urlencode(
+        {"method": "track.getInfo", "artist": artist, "track": title, "api_key": api_key,
+         "format": "json", "autocorrect": 1}))
+    tr = d.get("track") or {}
+    a = (tr.get("artist") or {}).get("name") if isinstance(tr.get("artist"), dict) else tr.get("artist")
+    return (a or "", tr.get("name") or "") if tr.get("name") else None
+
+
+def _net_accept(local: str, net: str) -> bool:
+    """Netz-Schreibweise nur uebernehmen, wenn es derselbe Text ist (andere
+    Gross-/Kleinschreibung, Satzzeichen, kleine Tippfehler)."""
+    a, b = _dupe_norm(local), _dupe_norm(net)
+    return bool(a and b) and (a == b or SequenceMatcher(None, a, b).ratio() >= 0.9)
+
+
+async def _title_suggest(ws: WebSocket, online: bool = False, only: set | None = None):
+    global _title_cancel
+    _title_cancel = False
+
+    async def send(t, **kw):
+        try: await ws.send_text(json.dumps({"type": t, **kw}))
+        except Exception: pass
+
+    cands = _title_candidates(only)
+    lfm_key = (_state.get("lastfm_api_key") or "").strip()
+    cache = _load_json(_genre_cache_file(), {})
+    loop = asyncio.get_running_loop()
+    items = []
+    total = len(cands) if online and lfm_key else 0
+    await send("title_progress", done=0, total=total)
+    for n, lt in enumerate(cands, 1):
+        if _title_cancel:
+            break
+        old_t, old_a = lt.get("title") or "", lt.get("artist") or ""
+        new_a, new_t = _clean_title_local(old_t, old_a)
+        source = "Regeln"
+        if total and new_a and new_t:
+            k = f"ti|{new_a.lower()}|{new_t.lower()}"
+            if k not in cache:
+                cache[k] = await loop.run_in_executor(None, _lfm_track_info_sync, lfm_key, new_a, new_t)
+                await asyncio.sleep(0.2)
+            got = cache[k]
+            if got:
+                na, nt = got
+                changed = False
+                if na and na != new_a and _net_accept(new_a, na):
+                    new_a, changed = na, True
+                if nt and nt != new_t and _net_accept(new_t, nt) and not (" - " in nt and "(" in new_t):
+                    new_t, changed = nt, True
+                if changed:
+                    source = "Last.fm"
+            if n % 20 == 0:
+                _save_json(_genre_cache_file(), cache)
+                await send("title_progress", done=n, total=total)
+        if new_t and (new_t != old_t or (new_a or "") != old_a):
+            # Unsicher: der "Kuenstler" sieht nach Titel aus ("Titel - Kuenstler" vertauscht)
+            sure = not re.search(r"[\(\[]|\bfeat\b|\bremix\b|\bedit\b|\bmix\b", new_a or "", re.I)
+            items.append({"path": lt["path"], "old_title": old_t, "old_artist": old_a,
+                          "title": new_t, "artist": new_a, "source": source, "sure": sure})
+    if total:
+        _save_json(_genre_cache_file(), cache)
+    await send("title_suggestions", items=items, total=len(cands), cancelled=_title_cancel,
+               has_lastfm=bool(lfm_key))
+
+
+def _write_title_sync(path: str, title: str, artist: str) -> bool:
+    """Nur Titel- und Kuenstler-Tag aendern, alle anderen Tags bleiben."""
+    import mutagen
+    ext = Path(path).suffix.lower()
+    try:
+        if ext == ".mp3":
+            from mutagen.id3 import ID3, TIT2, TPE1, ID3NoHeaderError
+            try:
+                tags = ID3(path)
+            except ID3NoHeaderError:
+                tags = ID3()
+            tags.setall("TIT2", [TIT2(encoding=3, text=title)])
+            tags.setall("TPE1", [TPE1(encoding=3, text=artist)]) if artist else None
+            v = tags.version[1] if tags.version and tags.version[1] in (3, 4) else 3
+            tags.save(path, v2_version=v)
+            return True
+        f = mutagen.File(path)
+        if f is None:
+            return False
+        if f.tags is None:
+            f.add_tags()
+        if ext in (".wav", ".aif", ".aiff"):
+            from mutagen.id3 import TIT2, TPE1
+            f.tags.setall("TIT2", [TIT2(encoding=3, text=title)])
+            if artist:
+                f.tags.setall("TPE1", [TPE1(encoding=3, text=artist)])
+        elif ext in (".m4a", ".mp4", ".aac"):
+            f.tags["\xa9nam"] = [title]
+            if artist:
+                f.tags["\xa9ART"] = [artist]
+        else:
+            f.tags["title"] = [title]
+            if artist:
+                f.tags["artist"] = [artist]
+        f.save()
+        return True
+    except Exception as e:
+        print(f"[title] {Path(path).name}: {e}", flush=True)
+        return False
+
+
+async def _title_apply(items: list, ws: WebSocket):
+    global _title_cancel
+    _title_cancel = False
+
+    async def send(t, **kw):
+        try: await ws.send_text(json.dumps({"type": t, **kw}))
+        except Exception: pass
+
+    by_path = {lt.get("path"): lt for lt in _state["library"]}
+    ci = _state.get("current_idx", -1)
+    q = _state.get("queue", [])
+    loaded = q[ci].get("path") if 0 <= ci < len(q) else None
+    loop = asyncio.get_running_loop()
+    ok, failed, skipped, cancelled = 0, 0, 0, False
+    for n, it in enumerate(items, 1):
+        if _title_cancel:
+            cancelled = True
+            break
+        path, title, artist = it.get("path"), (it.get("title") or "").strip(), (it.get("artist") or "").strip()
+        lt = by_path.get(path)
+        if not lt or not title:
+            continue
+        if path == loaded:
+            skipped += 1
+            continue
+        if os.path.exists(path) and await loop.run_in_executor(None, _write_title_sync, path, title, artist):
+            lt["title"] = title
+            if artist:
+                lt["artist"] = artist
+            try:
+                lt["mtime"] = int(os.path.getmtime(path))
+            except OSError:
+                pass
+            for qi in _state["queue"]:
+                if qi.get("path") == path:
+                    qi["title"] = title
+            ok += 1
+        else:
+            failed += 1
+        if n % 10 == 0:
+            await send("title_apply_progress", done=n, total=len(items))
+            await asyncio.sleep(0)
+    save_library()
+    save_queue()
+    await push_library()
+    await push_queue()
+    await send("title_applied", ok=ok, failed_count=failed, skipped=skipped, cancelled=cancelled)
+
+
 # ── Genres: vereinheitlichen und fehlende ergaenzen ─────────────────────────
 # Grobe Hauptgenres, damit die Navigation uebersichtlich bleibt. Quellen fuer
 # fehlende Genres, in dieser Reihenfolge: Ordner-Regeln (die eigene Sortierung),
@@ -1729,7 +2128,11 @@ def _write_genre_sync(path: str, genre: str) -> bool:
 
 async def _genre_apply(items: list, ws: WebSocket):
     """Genres in Dateien und Bibliothek schreiben. Der gerade geladene Titel
-    wird uebersprungen (die Datei ist im Player offen)."""
+    wird uebersprungen (die Datei ist im Player offen). Abbrechbar: was schon
+    geschrieben ist, bleibt."""
+    global _genre_cancel
+    _genre_cancel = False
+
     async def send(t, **kw):
         try: await ws.send_text(json.dumps({"type": t, **kw}))
         except Exception: pass
@@ -1741,7 +2144,11 @@ async def _genre_apply(items: list, ws: WebSocket):
     loop = asyncio.get_running_loop()
     ok, failed, skipped = 0, [], 0
     total = len(items)
+    cancelled = False
     for n, it in enumerate(items, 1):
+        if _genre_cancel:
+            cancelled = True
+            break
         path, genre = it.get("path"), it.get("genre")
         lt = by_path.get(path)
         if not lt or genre not in GENRES:
@@ -1758,11 +2165,13 @@ async def _genre_apply(items: list, ws: WebSocket):
             ok += 1
         else:
             failed.append(lt.get("title") or path)
-        if n % 25 == 0:
+        if n % 10 == 0:
             await send("genre_apply_progress", done=n, total=total)
+            await asyncio.sleep(0)       # Abbrechen-Nachricht durchlassen
     save_library()
     await push_library()
-    await send("genre_applied", ok=ok, failed=failed[:20], failed_count=len(failed), skipped=skipped)
+    await send("genre_applied", ok=ok, failed=failed[:20], failed_count=len(failed), skipped=skipped,
+               cancelled=cancelled)
 
 
 # ── waveform ─────────────────────────────────────────────────────────────────
@@ -2611,6 +3020,69 @@ async def _install_spotdl(ws):
     await _send("spotdl_install_done", version=version)
 
 # ── AcoustID fingerprinting ───────────────────────────────────────────────────
+async def _test_services() -> dict:
+    """Jeden Dienst mit einer kleinen Abfrage pruefen und in Worten melden, was
+    los ist. Vorher fielen falsche oder nicht gespeicherte Keys erst auf, wenn
+    Radio oder Trackerkennung still nichts taten."""
+    loop = asyncio.get_running_loop()
+    out: dict = {}
+
+    def _get(url, headers=None):
+        import urllib.request as _req, urllib.error as _err
+        try:
+            with _req.urlopen(_req.Request(url, headers={"User-Agent": "SynthiMIX/1.5", **(headers or {})}), timeout=10) as r:
+                return json.loads(r.read().decode("utf-8", errors="replace"))
+        except _err.HTTPError as e:
+            try:
+                return json.loads(e.read().decode("utf-8", errors="replace") or "{}") or {"_http": e.code}
+            except Exception:
+                return {"_http": e.code}
+        except Exception as e:
+            return {"_net": str(e)}
+
+    from urllib.parse import urlencode
+    key = (_state.get("lastfm_api_key") or "").strip()
+    if not key:
+        out["lastfm"] = {"ok": False, "text": "Kein Key eingetragen."}
+    else:
+        d = await loop.run_in_executor(None, _get, "https://ws.audioscrobbler.com/2.0/?" + urlencode(
+            {"method": "artist.getTopTags", "artist": "Hybrid Minds", "api_key": key, "format": "json"}))
+        if d.get("_net"):
+            out["lastfm"] = {"ok": False, "text": "Keine Verbindung zu Last.fm."}
+        elif d.get("error"):
+            out["lastfm"] = {"ok": False, "text": f"Last.fm lehnt den Key ab: {d.get('message', d.get('error'))}"}
+        else:
+            out["lastfm"] = {"ok": True, "text": "Verbunden."}
+
+    key = (_state.get("acoustid_api_key") or "").strip()
+    if not key:
+        out["acoustid"] = {"ok": False, "text": "Kein Key eingetragen."}
+    else:
+        d = await loop.run_in_executor(None, _get, "https://api.acoustid.org/v2/lookup?" + urlencode(
+            {"client": key, "trackid": "9ff43b6a-4f16-427c-93c2-92307ca505e0"}))
+        if d.get("_net"):
+            out["acoustid"] = {"ok": False, "text": "Keine Verbindung zu AcoustID."}
+        elif d.get("status") == "ok":
+            out["acoustid"] = {"ok": True, "text": "Verbunden."}
+        else:
+            msg = (d.get("error") or {}).get("message", "") if isinstance(d.get("error"), dict) else str(d.get("error", ""))
+            out["acoustid"] = {"ok": False, "text": (
+                "Key ungültig. AcoustID braucht einen Application-Key (acoustid.org → „Register your "
+                "application“), nicht den Key von deiner Benutzerseite.") if "invalid" in msg.lower()
+                else f"AcoustID meldet: {msg or 'Fehler'}"}
+
+    out["fpcalc"] = {"ok": bool(_find_fpcalc()),
+                     "text": "Gefunden." if _find_fpcalc() else "Nicht installiert — „Installieren“ klicken."}
+
+    cid, sec = (_state.get("spotify_client_id") or "").strip(), (_state.get("spotify_client_secret") or "").strip()
+    if not (cid and sec):
+        out["spotify"] = {"ok": False, "text": "Client-ID oder Secret fehlt (Tab Download)."}
+    else:
+        ok = await loop.run_in_executor(None, _Spotify(cid, sec)._auth)
+        out["spotify"] = {"ok": bool(ok), "text": "Verbunden." if ok else "Spotify lehnt Client-ID/Secret ab."}
+    return out
+
+
 async def _acoustid_identify(path: str) -> dict:
     import urllib.request as _req, urllib.parse as _parse
     api_key = _state.get('acoustid_api_key', '').strip()
@@ -2935,7 +3407,7 @@ async def handle_message(ws: WebSocket, msg: dict):
             _state["wishes"] = [x for x in _state["wishes"] if x.get("id") != wid]
             # Merken, damit der Gast sieht, wann sein Titel kommt
             _wish_outcomes[wid] = {"state": "angenommen", "title": w.get("title", ""),
-                                   "path": w["path"]}
+                                   "path": w["path"], "at": time.time()}
             save_wishes()
             await push_wishes()
 
@@ -3214,7 +3686,7 @@ async def handle_message(ws: WebSocket, msg: dict):
     elif t == "search":
         query = msg.get("query", "").strip()
         if query:
-            asyncio.create_task(do_search(query, ws))
+            _start_search(ws, "search", do_search(query, ws))
 
     elif t == "download_add":
         url    = msg.get("url", "").strip()
@@ -3246,6 +3718,10 @@ async def handle_message(ws: WebSocket, msg: dict):
         if "lastfm_api_key"  in msg: _state["lastfm_api_key"]  = str(msg["lastfm_api_key"]).strip()
         if "acoustid_api_key" in msg: _state["acoustid_api_key"] = str(msg["acoustid_api_key"]).strip()
         save_settings()
+
+    elif t == "test_services":
+        res = await _test_services()
+        await ws.send_text(json.dumps({"type": "services_test", **res}))
 
     elif t == "set_radio":
         _state["radio_enabled"] = bool(msg.get("enabled", False))
@@ -3621,6 +4097,18 @@ async def handle_message(ws: WebSocket, msg: dict):
                 seen[key] = lt["path"]
         await ws.send_text(json.dumps({"type": "duplicates", "paths": dupes}))
 
+    elif t == "title_suggest":
+        paths = msg.get("paths")
+        asyncio.create_task(_title_suggest(ws, online=bool(msg.get("online", False)),
+                                           only=set(paths) if isinstance(paths, list) and paths else None))
+
+    elif t == "title_apply":
+        asyncio.create_task(_title_apply(msg.get("items") or [], ws))
+
+    elif t == "title_cancel":
+        global _title_cancel
+        _title_cancel = True
+
     elif t == "genre_suggest":
         if "folder_rules" in msg:
             _genre_rules_save(msg.get("folder_rules") or {})
@@ -3632,6 +4120,27 @@ async def handle_message(ws: WebSocket, msg: dict):
     elif t == "genre_cancel":
         global _genre_cancel
         _genre_cancel = True
+
+    elif t == "quality_ok":
+        path = msg.get("path", "")
+        lt = next((x for x in _state["library"] if x.get("path") == path), None)
+        if lt is not None:
+            # False statt entfernen: das Frontend fuehrt Eintraege zusammen
+            lt["quality_ok"] = bool(msg.get("ok", True))
+            schedule_save()
+            await broadcast({"type": "track_meta_update", "track": lt})
+
+    elif t == "quality_batch":
+        paths = [str(x) for x in (msg.get("paths") or [])]
+        if paths:
+            asyncio.create_task(_quality_batch(paths, ws))
+
+    elif t == "quality_batch_replace":
+        asyncio.create_task(_quality_batch_replace(msg.get("items") or [], ws))
+
+    elif t == "quality_batch_cancel":
+        global _qbatch_cancel
+        _qbatch_cancel = True
 
     elif t == "quality_candidates":
         path = msg.get("path", "")
@@ -3677,7 +4186,7 @@ async def handle_message(ws: WebSocket, msg: dict):
             asyncio.create_task(_broadcast_remote_state())
 
     elif t == "get_history":
-        await ws.send_text(json.dumps({"type": "history", "items": _state["history"][:100]}))
+        await ws.send_text(json.dumps(_history_payload()))
 
     elif t == "clear_play_history":
         for lt in _state["library"]:
@@ -4378,8 +4887,18 @@ def _normalise_yt_url(raw: str) -> str:
         return f"https://www.youtube.com/watch?v={raw}"
     return raw
 
+def _kill_quietly(proc):
+    """Prozess einer abgebrochenen Suche beenden (sonst liefe yt-dlp weiter)."""
+    if proc is not None and proc.returncode is None:
+        try:
+            proc.kill()
+        except (ProcessLookupError, OSError):
+            pass
+
+
 async def _run_search_cmd(cmd: list) -> list[dict]:
     results = []
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
@@ -4407,8 +4926,11 @@ async def _run_search_cmd(cmd: list) -> list[dict]:
             except Exception:
                 pass
         await proc.wait()
+    except asyncio.CancelledError:
+        _kill_quietly(proc)
+        raise
     except Exception:
-        pass
+        _kill_quietly(proc)
     return results
 
 _VIDEO_TITLE_RE = re.compile(
@@ -4522,12 +5044,69 @@ def _video_id(url: str) -> str:
     return m.group(1) if m else ""
 
 
+_YTM_API = "https://music.youtube.com/youtubei/v1/search?prettyPrint=false"
+_YTM_SONGS_PARAM = "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D"      # Filter "Songs"
+
+
+def _ytm_api_search_sync(query: str, n: int) -> list[dict] | None:
+    """Song-Suche direkt ueber die Web-Schnittstelle von YouTube Music: eine
+    Anfrage (~0,7 s) liefert Titel, Kuenstler, Album und Laenge. yt-dlp braucht
+    dafuer eine Abfrage je Treffer (~5 s). None = Schnittstelle nicht nutzbar,
+    dann uebernimmt der yt-dlp-Weg."""
+    import urllib.request as _req
+    body = {"context": {"client": {"clientName": "WEB_REMIX", "clientVersion": "1.20250101.01.00",
+                                   "hl": "en", "gl": "DE"}},
+            "query": query, "params": _YTM_SONGS_PARAM}
+    try:
+        req = _req.Request(_YTM_API, data=json.dumps(body).encode(), headers={
+            "Content-Type": "application/json", "User-Agent": "Mozilla/5.0",
+            "Origin": "https://music.youtube.com"})
+        with _req.urlopen(req, timeout=8) as r:
+            d = json.loads(r.read().decode("utf-8", errors="replace"))
+        tabs = d["contents"]["tabbedSearchResultsRenderer"]["tabs"]
+        sections = tabs[0]["tabRenderer"]["content"]["sectionListRenderer"]["contents"]
+    except Exception:
+        return None
+
+    def runs(col):
+        return (((col or {}).get("musicResponsiveListItemFlexColumnRenderer") or {}).get("text") or {}).get("runs") or []
+
+    out = []
+    for sec in sections:
+        for it in (sec.get("musicShelfRenderer") or {}).get("contents", []):
+            r = it.get("musicResponsiveListItemRenderer") or {}
+            vid = (r.get("playlistItemData") or {}).get("videoId")
+            cols = r.get("flexColumns") or []
+            if not vid or len(cols) < 2:
+                continue
+            title = "".join(x.get("text", "") for x in runs(cols[0])).strip()
+            parts = [p.strip() for p in "".join(x.get("text", "") for x in runs(cols[1])).split("•")]
+            dur = 0
+            if parts and re.fullmatch(r"\d+:\d{2}(?::\d{2})?", parts[-1]):
+                for x in parts[-1].split(":"):
+                    dur = dur * 60 + int(x)
+            artist = parts[0] if parts else ""
+            out.append({"url": f"https://music.youtube.com/watch?v={vid}", "title": title,
+                        "artist": artist, "uploader": artist, "duration": dur,
+                        "album": parts[1] if len(parts) > 2 else "",
+                        "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg",
+                        "kind": "song", "_score": 100 + _score_result({"title": title, "uploader": artist})})
+            if len(out) >= n:
+                return out
+    return out
+
+
 async def _ytm_fill_details(songs: list[dict]) -> list[dict]:
-    """Laenge, Kuenstler und Songtitel je Treffer nachladen (parallel)."""
+    """Laenge, Kuenstler und Songtitel je Treffer nachladen (parallel).
+    Treffer aus der schnellen Suche haben beides schon."""
+    songs_todo = [r for r in songs if not (r.get("duration") and r.get("artist"))]
+    if not songs_todo:
+        return songs
     sem = asyncio.Semaphore(_YTM_DETAIL_PARALLEL)
 
     async def one(r):
         async with sem:
+            pr = None
             try:
                 pr = await asyncio.create_subprocess_exec(
                     *_yt("--skip-download", "-j", "--no-playlist", "--quiet", "--no-warnings", r["url"]),
@@ -4535,7 +5114,11 @@ async def _ytm_fill_details(songs: list[dict]) -> list[dict]:
                     creationflags=_NO_WINDOW)
                 out, _ = await asyncio.wait_for(pr.communicate(), timeout=30)
                 item = json.loads(out.decode("utf-8", errors="replace").strip().splitlines()[0])
+            except asyncio.CancelledError:
+                _kill_quietly(pr)
+                raise
             except Exception:
+                _kill_quietly(pr)
                 return
             # YouTube Music fuehrt teils auch Komponisten als Kuenstler — hoechstens zwei zeigen
             names = item.get("artists") or [a.strip() for a in (item.get("artist") or "").split(",") if a.strip()]
@@ -4546,13 +5129,17 @@ async def _ytm_fill_details(songs: list[dict]) -> list[dict]:
             r["duration"] = item.get("duration") or r.get("duration") or 0
             r["abr"]      = item.get("abr") or r.get("abr") or 0
 
-    await asyncio.gather(*(one(r) for r in songs))
+    await asyncio.gather(*(one(r) for r in songs_todo))
     return songs
 
 
 async def _ytm_songs(query: str, n: int = 8, details: bool = True) -> list[dict]:
-    """Studio-Versionen von YouTube Music. details=False ist schnell (~2 s),
-    liefert aber nur Titel, Link und Vorschaubild."""
+    """Studio-Versionen von YouTube Music. Zuerst ueber die schnelle
+    Schnittstelle (alles in einer Anfrage); faellt die aus, per yt-dlp —
+    details=False ist dort schnell (~2 s), liefert aber nur Titel und Link."""
+    fast = await asyncio.get_running_loop().run_in_executor(None, _ytm_api_search_sync, query, n)
+    if fast:
+        return fast
     songs = await _run_search_cmd(_yt(
         "--flat-playlist", "-j", "--quiet", "--no-warnings",
         "--playlist-items", f"1-{n}", _ytm_search_url(query)))
@@ -4796,8 +5383,10 @@ async def do_search(query: str, ws: WebSocket):
             pass
 
     songs, videos = await _songs_and_videos(query, 6, 10)
-    if not songs:
-        await send(videos, True)
+    complete = all(r.get("duration") and r.get("artist") for r in songs)
+    if not songs or complete:          # schnelle Suche: alles schon da
+        songs = [r for r in songs if not _is_unwanted_result(r) and not LIVE_RE.search(r.get("title", ""))]
+        await send(_merge_songs_first(songs, videos), True)
         return
     # Erst zeigen, dann Laenge und Kuenstler der Songs nachliefern
     await send(_merge_songs_first(songs, videos), False)
@@ -5142,7 +5731,7 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
                     probe = await asyncio.get_running_loop().run_in_executor(None, _probe_sync, entry_path)
                     _append_history(entry["url"], cur.get("title", ""), entry_path,
                                      probe.get("bitrate_kbps", 0))
-                    await broadcast({"type": "history", "items": _state["history"][:100]})
+                    await broadcast(_history_payload())
 
             if entry_path:
                 final_path = entry_path
@@ -5317,7 +5906,7 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
         loop = asyncio.get_running_loop()
         probe = await loop.run_in_executor(None, _probe_sync, hdr["path"])
         _append_history(url, hdr.get("title", ""), hdr["path"], probe.get("bitrate_kbps", 0))
-        await broadcast({"type": "history", "items": _state["history"][:100]})
+        await broadcast(_history_payload())
         # Einzelne Downloads durchlaufen kein _done() — ohne das hier fehlten
         # sie in der Bibliothek, bis irgendwann ein Scan lief.
         await _auto_add_to_library(hdr["path"])
@@ -5387,6 +5976,7 @@ _REMOTE_HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>SynthiMIX Remote</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg viewBox='0 0 40 40' xmlns='http://www.w3.org/2000/svg'%3E%3Ccircle cx='20' cy='20' r='19' fill='%230d1a2e'/%3E%3Crect x='5' y='16' width='4' height='9' rx='1.5' fill='%23e07800'/%3E%3Crect x='11' y='10' width='4' height='15' rx='1.5' fill='%23e07800'/%3E%3Crect x='17' y='13' width='4' height='12' rx='1.5' fill='%23f59332'/%3E%3Crect x='23' y='7' width='4' height='18' rx='1.5' fill='%23e07800'/%3E%3Crect x='29' y='11' width='4' height='14' rx='1.5' fill='%23f59332'/%3E%3Cline x1='20' y1='29' x2='20' y2='35' stroke='%233b82f6' stroke-width='2' stroke-linecap='round'/%3E%3Cpolyline points='16,32 20,36 24,32' fill='none' stroke='%233b82f6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <link rel="manifest" href="/manifest.json?k=__KEY__">
 <meta name="theme-color" content="#0d1625">
 <meta name="mobile-web-app-capable" content="yes">
@@ -5491,7 +6081,8 @@ input[type=range]{height:var(--tap);accent-color:var(--accent);width:100%}
 .q-wrap{max-height:52vh;overflow-y:auto;-webkit-overflow-scrolling:touch;border-radius:var(--r-m);border:1px solid var(--br1)}
 .qi{display:flex;align-items:center;gap:6px;min-height:56px;padding:6px 8px 6px 2px;border-bottom:1px solid var(--br1);user-select:none;background:var(--bg)}
 .qi.cur{background:var(--act-bg);box-shadow:inset 4px 0 0 var(--accent)}
-.dh{color:var(--tx4);font-size:22px;width:40px;height:var(--tap);display:flex;align-items:center;justify-content:center;flex-shrink:0;touch-action:none;cursor:grab}
+.ghost{background:var(--surf);border:1px solid var(--accent);border-radius:var(--r-m);box-shadow:0 8px 24px rgba(0,0,0,.4);color:var(--tx1);opacity:.96}
+.dh{color:var(--tx4);font-size:22px;width:44px;height:var(--tap);user-select:none;-webkit-user-select:none;display:flex;align-items:center;justify-content:center;flex-shrink:0;touch-action:none;cursor:grab}
 .qi-info{flex:1;min-width:0;cursor:pointer}
 .qi-t{font-size:var(--fs-body);color:var(--tx1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .qi-t.a{color:var(--accent-tx);font-weight:700}
@@ -5632,7 +6223,7 @@ function conn(){
   ws.onerror=function(){ws.close()}
   ws.onmessage=function(e){
     var m=JSON.parse(e.data)
-    if(m.type==='state'){st=m;render();updPos(m)}
+    if(m.type==='state'){st=m;if(dg.on)dg.pend=true;else render();updPos(m)}
     else if(m.type==='pos'){updPos(m)}
     else if(m.type==='search_results'){showRes(m.results||[])}
     else if(m.type==='yt_results'){showYtRes(m.results||[])}
@@ -5715,42 +6306,48 @@ function updDl(m){
     }
   }
 }
-/* ── Touch drag-to-reorder ─────────────────────────────────────────────── */
-var dg={on:false,idx:-1,ghost:null,gy0:0,gy1:0,dropAt:-1,scInt:null,timer:null}
+/* ── Ziehen zum Umsortieren: Finger und Maus (Pointer-Events) ────────────
+   Startet sofort am Griff (frueher erst nach 0,16 s Stillhalten — wer gleich
+   zog, brach es unbemerkt ab). Status-Updates warten, bis losgelassen wird,
+   sonst zeichnete render() die Liste mitten im Ziehen neu. */
+var dg={on:false,idx:-1,ghost:null,gy0:0,gy1:0,dropAt:-1,scInt:null,pend:false,el:null,pid:null}
 function dhStart(e,i){
   e.preventDefault()
-  var t=e.touches[0]
-  dg.idx=i;dg.gy0=t.clientY;dg.on=false
-  dg.timer=setTimeout(function(){dhAct(i)},160)
+  dg.idx=i;dg.gy0=e.clientY;dg.el=e.currentTarget;dg.pid=e.pointerId
+  try{dg.el.setPointerCapture(e.pointerId)}catch(x){}
+  dg.el.onpointermove=dhMove;dg.el.onpointerup=dhEnd;dg.el.onpointercancel=dhEnd
+  dhAct(i)
 }
 function dhAct(i){
   dg.on=true
   var rows=document.querySelectorAll('.qi'),src=rows[i];if(!src)return
   var rect=src.getBoundingClientRect()
   var g=document.createElement('div')
-  g.style.cssText='position:fixed;left:0;right:0;top:'+rect.top+'px;height:'+rect.height+'px;background:#1e3050;border:1px solid #3b82f6;border-radius:4px;z-index:999;pointer-events:none;display:flex;align-items:center;padding:0 50px 0 14px;opacity:.92;font-size:13px;color:#c8d8f0;overflow:hidden'
+  g.className='ghost'
+  g.style.cssText='position:fixed;left:8px;right:8px;top:'+rect.top+'px;height:'+rect.height+'px;z-index:999;pointer-events:none;display:flex;align-items:center;padding:0 14px;overflow:hidden'
   var info=src.querySelector('.qi-info');if(info)g.innerHTML=info.outerHTML
   document.body.appendChild(g)
   dg.ghost=g;dg.gy1=rect.top;dg.dropAt=i
-  src.style.opacity='.2';showLine(i)
+  src.style.opacity='.25';showLine(i)
+  if(navigator.vibrate)try{navigator.vibrate(15)}catch(x){}
 }
 function dhMove(e){
-  var t=e.touches[0]
-  if(!dg.on){if(Math.abs(t.clientY-dg.gy0)>10){clearTimeout(dg.timer);dg.timer=null}return}
+  if(!dg.on)return
   e.preventDefault()
-  var dy=t.clientY-dg.gy0
+  var y=e.clientY,dy=y-dg.gy0
   if(dg.ghost)dg.ghost.style.top=(dg.gy1+dy)+'px'
   var rows=document.querySelectorAll('.qi'),drop=0
-  for(var i=0;i<rows.length;i++){var r=rows[i].getBoundingClientRect();if(t.clientY>r.top+r.height/2)drop=i+1}
+  for(var i=0;i<rows.length;i++){var r=rows[i].getBoundingClientRect();if(y>r.top+r.height/2)drop=i+1}
   if(drop!==dg.dropAt){dg.dropAt=drop;showLine(drop)}
   clearInterval(dg.scInt);dg.scInt=null
   var qw=document.getElementById('qw'),qr=qw.getBoundingClientRect()
-  if(t.clientY<qr.top+65)dg.scInt=setInterval(function(){qw.scrollTop-=8},20)
-  else if(t.clientY>qr.bottom-65)dg.scInt=setInterval(function(){qw.scrollTop+=8},20)
+  if(y<qr.top+60)dg.scInt=setInterval(function(){qw.scrollTop-=8},20)
+  else if(y>qr.bottom-60)dg.scInt=setInterval(function(){qw.scrollTop+=8},20)
 }
 function dhEnd(e){
-  clearTimeout(dg.timer);clearInterval(dg.scInt);dg.timer=null;dg.scInt=null
-  if(!dg.on){dg.on=false;return}
+  clearInterval(dg.scInt);dg.scInt=null
+  if(dg.el){try{dg.el.releasePointerCapture(dg.pid)}catch(x){};dg.el.onpointermove=dg.el.onpointerup=dg.el.onpointercancel=null;dg.el=null}
+  if(!dg.on)return
   dg.on=false
   if(dg.ghost){dg.ghost.remove();dg.ghost=null}
   hideLine()
@@ -5758,6 +6355,7 @@ function dhEnd(e){
   for(var i=0;i<rows.length;i++)rows[i].style.opacity=''
   var from=dg.idx,to=dg.dropAt>from?dg.dropAt-1:dg.dropAt
   if(to>=0&&from!==to)send({type:'queue_move',from:from,to:to})
+  if(dg.pend){dg.pend=false;render()}
 }
 function showLine(i){
   var dl=document.getElementById('dl')
@@ -5799,7 +6397,7 @@ function render(){
   document.getElementById('ql').innerHTML=q.length?q.map(function(t,i){
     var a=i===ci,p=t.played&&!a
     var etaAbs=etas[i]!=null?absTime(etas[i]):'';
-    var row='<div class="qi'+(a?' cur':'')+'" data-i="'+i+'"><div class=dh ontouchstart="dhStart(event,'+i+')" ontouchmove="dhMove(event)" ontouchend="dhEnd(event)">☰</div><div class=qi-info onclick="toggleRow('+i+')"><div class="qi-t'+(a?' a':p?' p':'')+'">'+esc(t.title||'–')+'</div><div class=qi-d>'+fmt(t.duration_sec)+keyChip(t.key,t.key_src,t.bpm,t.compat)+(etaAbs?'<span class=qi-eta> · '+etaAbs+'</span>':'')+'</div></div></div>'
+    var row='<div class="qi'+(a?' cur':'')+'" data-i="'+i+'"><div class=dh onpointerdown="dhStart(event,'+i+')" title="Ziehen zum Verschieben">☰</div><div class=qi-info onclick="toggleRow('+i+')"><div class="qi-t'+(a?' a':p?' p':'')+'">'+esc(t.title||'–')+'</div><div class=qi-d>'+fmt(t.duration_sec)+keyChip(t.key,t.key_src,t.bpm,t.compat)+(etaAbs?'<span class=qi-eta> · '+etaAbs+'</span>':'')+'</div></div></div>'
     if(_openPath&&t.path===_openPath){
       row+='<div class=qa>'
       if(!a)row+='<button onclick="mixNow('+i+')">&#8646; Jetzt mischen</button>'
@@ -5988,6 +6586,15 @@ def _guest_wish_status(wid: int) -> dict | None:
             return {**base, "state": "played", "at": q[i].get("played_at", 0)}
         if i > ci:
             return {**base, "state": "queued", "in_sec": round(_queue_eta_sec(i))}
+        if i < 0:
+            # Nicht mehr in der Warteschlange: lief er (und wurde danach automatisch
+            # entfernt) oder hat ihn der DJ wieder herausgenommen?
+            since = out.get("at", 0)
+            hit = next((h for h in _state.get("play_log", [])
+                        if h.get("path") == out.get("path") and (h.get("played_at") or 0) >= since - 1), None)
+            if hit:
+                return {**base, "state": "played", "at": hit.get("played_at", 0)}
+            return {**base, "state": "rejected"}
         return {**base, "state": "accepted"}
     w = next((x for x in _state.get("wishes", []) if x.get("id") == wid), None)
     if w:
@@ -6119,6 +6726,7 @@ _WISH_HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Musikwunsch</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg viewBox='0 0 40 40' xmlns='http://www.w3.org/2000/svg'%3E%3Ccircle cx='20' cy='20' r='19' fill='%230d1a2e'/%3E%3Crect x='5' y='16' width='4' height='9' rx='1.5' fill='%23e07800'/%3E%3Crect x='11' y='10' width='4' height='15' rx='1.5' fill='%23e07800'/%3E%3Crect x='17' y='13' width='4' height='12' rx='1.5' fill='%23f59332'/%3E%3Crect x='23' y='7' width='4' height='18' rx='1.5' fill='%23e07800'/%3E%3Crect x='29' y='11' width='4' height='14' rx='1.5' fill='%23f59332'/%3E%3Cline x1='20' y1='29' x2='20' y2='35' stroke='%233b82f6' stroke-width='2' stroke-linecap='round'/%3E%3Cpolyline points='16,32 20,36 24,32' fill='none' stroke='%233b82f6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <meta name="theme-color" content="#0d1625">
 <style>
 /* Grundsystem von SynthiMIX (App.svelte / lib/ui.css) als eigene Variablen —
@@ -6167,7 +6775,11 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--accent-tx);outl
 .np-l{display:flex;align-items:center;gap:8px;font-size:var(--fs-sm);font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--green-tx)}
 .np-l::before{content:"";width:8px;height:8px;border-radius:50%;background:currentColor}
 .np-t{font-size:var(--fs-lg);font-weight:700;color:var(--tx1);margin-top:4px;word-break:break-word}
-.np-n{font-size:var(--fs-sm);color:var(--tx3);margin-top:6px;line-height:1.5}
+.np-n{font-size:var(--fs-sm);color:var(--tx3);margin-top:8px;line-height:1.5}
+.np-h{font-size:var(--fs-sm);font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--tx3);margin-bottom:2px}
+.np-list{margin:0;padding-left:20px;color:var(--tx1);font-size:var(--fs-body)}
+.np-list li{padding:2px 0;word-break:break-word}
+.np-list span{color:var(--tx3)}
 
 .wrap{padding:16px}
 .inp{width:100%;min-height:52px;border-radius:var(--r-l);border:2px solid var(--br3);background:var(--surf);
@@ -6218,7 +6830,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--accent-tx);outl
   <div class="sub-2">Titel suchen, auf W&#252;nschen tippen &#8212; der DJ sieht deinen Wunsch sofort.</div>
 </header>
 <div class="np" id="np">
-  <div class="np-l">L&#228;uft gerade</div>
+  <div class="np-l" id="npL">L&#228;uft gerade</div>
   <div class="np-t" id="npT"></div>
   <div class="np-n" id="npN"></div>
 </div>
@@ -6239,9 +6851,12 @@ setInterval(info,15000)
 document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible'){conn();info()}})
 function showInfo(m){
   var np=document.getElementById('np')
-  if(m.now){np.style.display='block';document.getElementById('npT').textContent=m.now.title+(m.now.artist&&m.now.title.indexOf(m.now.artist)<0?' · '+m.now.artist:'')}
-  else np.style.display='none'
-  document.getElementById('npN').innerHTML=(m.next||[]).length?'Danach: '+m.next.map(function(t){return esc(t.title)}).join(' &middot; '):''
+  var nx=m.next||[]
+  np.style.display=(m.now||nx.length)?'block':'none'
+  document.getElementById('npL').style.display=m.now?'':'none'
+  document.getElementById('npT').textContent=m.now?m.now.title+(m.now.artist&&m.now.title.indexOf(m.now.artist)<0?' · '+m.now.artist:''):''
+  document.getElementById('npN').innerHTML=nx.length?'<div class=np-h>Danach</div><ol class=np-list>'+nx.map(function(t){
+    return '<li>'+esc(t.title)+(t.artist&&t.title.indexOf(t.artist)<0?' <span>· '+esc(t.artist)+'</span>':'')+'</li>'}).join('')+'</ol>':''
   var mine=m.mine||[],box=document.getElementById('mine')
   box.style.display=mine.length?'block':'none'
   document.getElementById('mineL').innerHTML=mine.map(function(w){
@@ -6336,7 +6951,7 @@ async def wish_ws(websocket: WebSocket):
             if t == "wish_search":
                 q = (msg.get("query") or "").strip()
                 if q:
-                    asyncio.create_task(_do_wish_search(q, websocket))
+                    _start_search(websocket, "wish", _do_wish_search(q, websocket))
 
             elif t == "wish_info":
                 ids = [int(i) for i in (msg.get("ids") or [])[:20] if str(i).isdigit()]
@@ -6420,6 +7035,9 @@ def _wish_library_hits(query: str, limit: int = 5) -> list[dict]:
                 break
     return hits
 
+_WISH_SKIP_RE = re.compile(r"\b(instrumental|karaoke|acapella|a\s*cappella|sped\s*up|slowed|nightcore|8d\s*audio|backing\s*track)\b", re.IGNORECASE)
+
+
 async def _do_wish_search(query: str, ws: WebSocket):
     # Erst die eigene Sammlung: sofort spielbar, kein Download, keine
     # YouTube-Kopie in schlechter Qualitaet. Die Treffer gehen gleich raus,
@@ -6449,12 +7067,15 @@ async def _do_wish_search(query: str, ws: WebSocket):
                         "status": _wish_title_status(title)})
         return out[:max(3, 8 - len(lib_hits))]
 
-    songs, videos = await _songs_and_videos(query, 4, 8)
-    if songs:
-        await _send(lib_hits + online(_merge_songs_first(songs, videos)), False)
+    # Nur Song-Versionen von YouTube Music — keine beliebigen YouTube-Videos,
+    # keine Instrumentals, Karaoke- oder Live-Fassungen
+    songs = await _ytm_songs(query, 10, details=False)
+    if songs and not all(r.get("duration") for r in songs):
+        await _send(lib_hits + online(songs), False)
         await _ytm_fill_details(songs)
-        songs = [r for r in songs if not _is_unwanted_result(r) and not LIVE_RE.search(r.get("title", ""))]
-    await _send(lib_hits + online(_merge_songs_first(songs, videos)), True)
+    songs = [r for r in songs if not _is_unwanted_result(r) and not LIVE_RE.search(r.get("title", ""))
+             and not _WISH_SKIP_RE.search(r.get("title", ""))]
+    await _send(lib_hits + online(songs), True)
 
 @remote_app.get("/manifest.json")
 async def remote_manifest(k: str = ""):
@@ -6562,7 +7183,7 @@ async def remote_ws_endpoint(websocket: WebSocket):
             elif t == "yt_search_remote":
                 query = msg.get("query", "").strip()
                 if query:
-                    asyncio.create_task(_do_yt_search_remote(query, websocket))
+                    _start_search(websocket, "remote", _do_yt_search_remote(query, websocket))
             elif t == "yt_dl_queue":
                 url = msg.get("url", "")
                 title = msg.get("title", "")
@@ -6602,6 +7223,10 @@ async def _do_yt_search_remote(query: str, ws: WebSocket):
             pass
 
     songs, videos = await _songs_and_videos(query, 4, 8)
+    if songs and all(r.get("duration") and r.get("artist") for r in songs):
+        songs = [r for r in songs if not _is_unwanted_result(r) and not LIVE_RE.search(r.get("title", ""))]
+        await send(_merge_songs_first(songs, videos))
+        return
     await send(_merge_songs_first(songs, videos))
     if songs:
         await _ytm_fill_details(songs)

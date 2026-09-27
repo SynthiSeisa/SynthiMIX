@@ -204,10 +204,11 @@
     <div class="foot">
       {#if st.applied}
         <div class="notice ok"><i class="ti ti-check"></i>
-          {st.applied.ok} Genres gesetzt.{#if st.applied.skipped} {st.applied.skipped} übersprungen (läuft gerade).{/if}{#if st.applied.failed_count} {st.applied.failed_count} ließen sich nicht schreiben.{/if}
+          {st.applied.ok} Genres gesetzt{st.applied.cancelled ? ', dann abgebrochen' : ''}.{#if st.applied.skipped} {st.applied.skipped} übersprungen (läuft gerade).{/if}{#if st.applied.failed_count} {st.applied.failed_count} ließen sich nicht schreiben.{/if}
         </div>
       {:else if st.applying}
-        <div class="notice info"><i class="ti ti-refresh spin"></i> Schreibe Genres: {st.applying.done} / {st.applying.total}</div>
+        <div class="notice info apply-row"><i class="ti ti-refresh spin"></i> Schreibe Genres: {st.applying.done} / {st.applying.total}
+          <button class="btn btn-sm" onclick={() => send({ type: 'genre_cancel' })}><i class="ti ti-player-stop"></i> Abbrechen</button></div>
       {:else}
         <div class="dlg-hint">Orange Quelle = unsicher (nur Künstler), nicht vorausgewählt. Ein Klick auf „ändern“ setzt ein anderes Genre.</div>
       {/if}
@@ -262,4 +263,6 @@
   .it-edit { --h: 24px; }
   .foot { display: flex; flex-direction: column; gap: var(--sp-3); padding: var(--sp-3) var(--sp-5) var(--sp-4); border-top: 1px solid var(--c-br1); }
   .foot .dlg-actions { margin: 0; }
+  .apply-row { display: flex; align-items: center; gap: var(--sp-2); }
+  .apply-row .btn { margin-left: auto; }
 </style>

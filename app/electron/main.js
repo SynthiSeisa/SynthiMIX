@@ -134,13 +134,28 @@ function registerMediaKeys() {
   })
 }
 
+// Release-Notes kommen vom GitHub-Feed als HTML — fuer das Update-Fenster in
+// schlichten Text wandeln (Ueberschriften, Aufzaehlungen, Absaetze bleiben)
+function notesToText(n) {
+  if (!n) return ''
+  if (Array.isArray(n)) n = n.map(x => x.note || '').join('\n')
+  // Zeilenumbrueche im Quelltext sind nur Umbruch der Markdown-Datei → Leerzeichen
+  return String(n)
+    .replace(/\r?\n/g, ' ').replace(/<br\s*\/?>/gi, ' ')
+    .replace(/<h\d[^>]*>/gi, '\n\n').replace(/<\/h\d>/gi, '\n')
+    .replace(/<li[^>]*>/gi, '\n• ').replace(/<p[^>]*>/gi, '\n\n').replace(/<\/(p|ul|ol)>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/[ \t]{2,}/g, ' ').replace(/[ \t]*\n[ \t]*/g, '\n').replace(/\n{3,}/g, '\n\n').trim()
+}
+
 function setupAutoUpdater() {
   autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true
 
   autoUpdater.on('update-available', (info) => {
     const size = info.files?.[0]?.size ?? null
-    mainWindow?.webContents.send('update-available', info.version, size)
+    mainWindow?.webContents.send('update-available', info.version, size, notesToText(info.releaseNotes))
   })
   autoUpdater.on('download-progress', (p) => {
     mainWindow?.webContents.send('update-progress', Math.round(p.percent))

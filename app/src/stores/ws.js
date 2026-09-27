@@ -63,6 +63,11 @@ export const dupeChoices         = writable([])     // [{url, format, video, mat
 export const revealPath          = writable(null)   // Bibliothek springt zu diesem Titel
 // Genres ergaenzen: {busy, progress:{done,total}, suggestions, applying:{done,total}, applied}
 export const genreState          = writable({})
+// Sammel-Ersetzen: {phase, done, total, current, items:{[path]: {title, duration, candidate, sure}}, finished, result}
+export const qualityBatch        = writable({})
+export const servicesTest        = writable(null)   // {lastfm, acoustid, fpcalc, spotify: {ok, text}}
+export const titleState          = writable({})
+export const setupOpen           = writable(false)  // Einrichtungs-Assistent     // Titel aufraeumen: {busy, progress, suggestions, applying, applied}
 // Qualitaetspruefung: Fortschritt der Bandbreiten-Messung, Kandidaten und Ersetzen
 export const qualityScan         = writable(null)   // null | {done, total}
 export const qualityCandidates   = writable(null)   // {path, query, results, final}
@@ -99,6 +104,8 @@ const APP_SETTINGS_DEFAULTS = {
   introSkipSec:       0,
   beatAlignCf:        true,
   keyNotation:        'musical',   // Tonart als 'musical' (F♯m) oder 'camelot' (11A)
+  pauseFadeMs:        500,   // Aus-/Einblenden bei Pause und Fortsetzen
+  volumeFadeMs:       200,   // Lautstaerke-Aenderungen glaetten
   // Was die Warteschlange je Zeile zeigt (Titel und Dauer immer)
   qShowKey:           false,
   qShowBpm:           false,
@@ -182,8 +189,9 @@ function connect() {
             folders: dt.folders.map(f => ({ ...f, tracks: f.tracks.filter(t => !del.has(t.path)) })),
             files: dt.files.filter(f => !del.has(f.path))
           }))
-          // Also remove from download history so history view updates immediately
-          dlHistory.update(h => h.filter(e => !del.has(e.path)))
+          // Download-Verlauf neu holen: geloeschte Dateien bleiben dort sichtbar
+          // (ausgegraut), das Backend prueft, ob die Datei noch existiert
+          send({ type: 'get_history' })
         }
         break
       }
@@ -306,6 +314,15 @@ function connect() {
       case 'video_check_done':        videoCheckPending.update(n => Math.max(0, n - 1)); break
       case 'video_choice':            videoChoices.update(l => [...l, msg]); break
       case 'dupe_choice':             dupeChoices.update(l => [...l, msg]); break
+      case 'quality_batch_progress':  qualityBatch.update(s => ({ ...s, phase: msg.phase, done: msg.done, total: msg.total, current: msg.current ?? '' })); break
+      case 'quality_batch_item':      qualityBatch.update(s => ({ ...s, items: { ...(s.items ?? {}), [msg.path]: msg } })); break
+      case 'quality_batch_done':      qualityBatch.update(s => ({ ...s, phase: 'review', cancelled: msg.cancelled })); break
+      case 'quality_batch_replaced':  qualityBatch.update(s => ({ ...s, phase: 'finished', result: msg })); break
+      case 'services_test':           servicesTest.set(msg); break
+      case 'title_progress':          titleState.update(s => ({ ...s, progress: { done: msg.done, total: msg.total } })); break
+      case 'title_suggestions':       titleState.update(s => ({ ...s, busy: false, progress: null, suggestions: msg })); break
+      case 'title_apply_progress':    titleState.update(s => ({ ...s, applying: { done: msg.done, total: msg.total } })); break
+      case 'title_applied':           titleState.update(s => ({ ...s, applying: null, applied: msg })); break
       case 'genre_progress':          genreState.update(s => ({ ...s, progress: { done: msg.done, total: msg.total } })); break
       case 'genre_suggestions':       genreState.update(s => ({ ...s, busy: false, progress: null, suggestions: msg })); break
       case 'genre_apply_progress':    genreState.update(s => ({ ...s, applying: { done: msg.done, total: msg.total } })); break

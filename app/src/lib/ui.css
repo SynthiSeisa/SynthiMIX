@@ -183,7 +183,9 @@ input[type="checkbox"], input[type="radio"], input[type="range"] { accent-color:
 /* ── Dialoge ─────────────────────────────────────────────────────────────── */
 .dlg-overlay {
   position: fixed; inset: 0; z-index: 2000;
-  background: rgba(0, 0, 0, .55); backdrop-filter: blur(2px);
+  /* Kein backdrop-filter: dahinter laeuft die App weiter (Wellenform,
+     Restzeit), die Unschaerfe musste bei jedem Bild neu gerechnet werden */
+  background: rgba(0, 0, 0, .62);
   display: flex; align-items: center; justify-content: center;
 }
 .dlg {

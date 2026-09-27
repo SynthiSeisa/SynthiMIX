@@ -99,12 +99,14 @@
   ]
 
   // ── Auto-Update ───────────────────────────────────────────────────────────
+  const APP_VERSION = __APP_VERSION__
   let updateVersion     = $state(null)
   let updateSize        = $state(null)
   let updateProgress    = $state(null)
   let updateDownloading = $state(false)
   let updateReady       = $state(false)
   let updateDismissed   = $state(false)
+  let updateNotes       = $state('')     // Release-Notes der neuen Version (Text)
 
   function formatSize(bytes) {
     if (!bytes) return ''
@@ -113,7 +115,7 @@
   }
 
   $effect(() => {
-    win.onUpdateAvailable?.((v, size) => { updateVersion = v; updateSize = size; updateDismissed = false })
+    win.onUpdateAvailable?.((v, size, notes) => { updateVersion = v; updateSize = size; updateNotes = notes ?? ''; updateDismissed = false })
     win.onUpdateProgress?.((p) => { updateProgress = p })
     win.onUpdateDownloaded?.(() => { updateReady = true; updateDownloading = false; updateProgress = null })
     win.onUpdateError?.((msg) => { console.warn('[updater]', msg) })
@@ -133,16 +135,20 @@
       <polyline points="16,32 20,36 24,32" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
     <span class="app-name"><span class="nm-synthi">Synthi</span><span class="nm-mix">MIX</span></span>
-    <span class="version">v1.4.0</span>
+    <span class="version">v{APP_VERSION}</span>
   </div>
   <div class="tb-actions" style="-webkit-app-region:no-drag">
 
     {#if updateReady && updateDismissed}
-      <button class="btn btn-primary btn-sm" onclick={() => win.installUpdate?.()} title="Update installieren und neu starten">
+      <button class="btn btn-primary btn-sm" onclick={() => updateDismissed = false} title="Neuerungen ansehen und installieren">
         &#8593; v{updateVersion} installieren
       </button>
     {:else if updateProgress !== null && updateDismissed}
-      <span class="upd-chip">&#8595; {updateProgress}%</span>
+      <button class="upd-chip" onclick={() => updateDismissed = false} title="Download-Fortschritt anzeigen">&#8595; {updateProgress}%</button>
+    {:else if updateVersion && updateDismissed}
+      <button class="btn btn-sm upd-avail" onclick={() => updateDismissed = false} title="Neuerungen ansehen und herunterladen">
+        &#8593; v{updateVersion} verfügbar
+      </button>
     {/if}
 
     <div class="pop-wrap">
@@ -250,6 +256,12 @@
           <div class="upd-sub">SynthiMIX <strong>v{updateVersion}</strong> ist bereit zum Herunterladen{updateSize ? ` (${formatSize(updateSize)})` : ''}.</div>
         {/if}
       </div>
+      {#if updateNotes}
+        <div class="upd-notes" aria-label="Neuerungen">
+          <div class="upd-notes-h">Was ist neu in v{updateVersion}</div>
+          <div class="upd-notes-t">{updateNotes}</div>
+        </div>
+      {/if}
       <div class="upd-actions">
         {#if updateReady}
           <button class="btn" onclick={() => updateDismissed = true}>Später</button>
@@ -303,6 +315,7 @@
     background: var(--c-accent); box-shadow: 0 0 0 2px var(--c-bg2);
   }
   .upd-chip {
+    font-family: inherit; cursor: pointer;
     font-size: var(--fs-sm); font-weight: 600; padding: 3px 8px; border-radius: var(--r-s);
     color: var(--c-green-tx); border: 1px solid var(--c-green-br); background: var(--c-green-bg);
     font-variant-numeric: tabular-nums;
@@ -393,6 +406,11 @@
     box-shadow: 0 20px 60px rgba(0,0,0,.6);
     display: flex; flex-direction: column; gap: var(--sp-4);
   }
+  .upd-notes { text-align: left; border: 1px solid var(--c-br2); border-radius: var(--r-m); background: var(--c-bg2);
+               max-height: 260px; overflow-y: auto; padding: var(--sp-2) var(--sp-3); }
+  .upd-notes-h { font-size: var(--fs-cap); font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--c-tx4); margin-bottom: 4px; }
+  .upd-notes-t { white-space: pre-wrap; font-size: var(--fs-sm); line-height: 1.5; color: var(--c-tx2); }
+  .upd-avail { color: var(--c-accent-tx); border-color: var(--c-accent); }
   .upd-icon { font-size: 32px; color: var(--c-green-tx); text-align: center; line-height: 1; }
   .upd-body { text-align: center; }
   .upd-title { font-size: var(--fs-h); font-weight: 700; color: var(--c-tx1); margin-bottom: var(--sp-2); }

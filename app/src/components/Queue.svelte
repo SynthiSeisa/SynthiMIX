@@ -289,13 +289,29 @@
 
   let qListEl = $state(null)
 
-  function scrollToCurrent() {
-    qListEl?.querySelector('.row.active')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  // Der laufende Titel steht oben in der Liste und wird verfolgt. Solange man
+  // selbst scrollt, zieht oder markiert, bleibt die Liste stehen und kehrt erst
+  // nach einer Pause zum laufenden Titel zurueck.
+  const FOLLOW_IDLE_MS = 12000
+  let _lastUserAct = 0
+  function userActed() { _lastUserAct = Date.now() }
+  function scrollToCurrent(force = false) {
+    if (!qListEl) return
+    if (!force && (dragFrom !== null || Date.now() - _lastUserAct < FOLLOW_IDLE_MS)) return
+    const row = qListEl.querySelector('.row.active')
+    if (!row) return
+    const top = row.offsetTop - qListEl.offsetTop
+    if (Math.abs(qListEl.scrollTop - top) > 4) qListEl.scrollTo({ top, behavior: 'smooth' })
   }
 
   $effect(() => {
     const _ = $playerState.current_idx
-    setTimeout(scrollToCurrent, 80)
+    setTimeout(() => scrollToCurrent(), 80)
+  })
+  // Nach eigenem Scrollen zurueckkehren, sobald Ruhe ist
+  $effect(() => {
+    const iv = setInterval(() => scrollToCurrent(), 3000)
+    return () => clearInterval(iv)
   })
 
   function qKeydown(e) {
@@ -397,12 +413,15 @@
     return `~${String(then.getHours()).padStart(2,'0')}:${String(then.getMinutes()).padStart(2,'0')}`
   }
 
+  const LOUD_LUFS = -4
+
   function qualityClass(track) {
     const br   = track.bitrate_kbps ?? 0
     const lufs = track.lufs ?? -99
     const hasLufs = lufs > -90
     if (br > 0 && br < 128) return 'q-bad'       // low bitrate → red
-    if (hasLufs && lufs > -9)  return 'q-loud'   // too loud (clipping risk) → orange
+    // Heutige EDM-/DnB-Master liegen bei -6 bis -8 LUFS — das ist normal
+    if (hasLufs && lufs > LOUD_LUFS) return 'q-loud'   // uebersteuert → orange
     if (hasLufs && lufs < -18) return 'q-quiet'  // too quiet → orange
     if (hasLufs) return 'q-good'                  // normal range → green
     return ''
@@ -413,7 +432,7 @@
     const lufs = track.lufs ?? -99
     if (br > 0 && br < 128) return `Niedrige Bitrate (${br} kbps)`
     if (lufs > -90) {
-      if (lufs > -9)  return `Zu laut (${lufs.toFixed(1)} LUFS)`
+      if (lufs > LOUD_LUFS) return `Sehr laut, evtl. übersteuert (${lufs.toFixed(1)} LUFS)`
       if (lufs < -18) return `Zu leise (${lufs.toFixed(1)} LUFS)`
       return `Gut (${lufs.toFixed(1)} LUFS)`
     }
@@ -484,7 +503,7 @@
               <button onclick={shuffleSelected}>Nur markierte mischen ({qSelected.size})</button>
             {/if}
             {#if $playerState.current_idx >= 0}
-              <button onclick={() => { scrollToCurrent(); showMenu = false }}>Zum laufenden Titel springen</button>
+              <button onclick={() => { scrollToCurrent(true); showMenu = false }}>Zum laufenden Titel springen</button>
             {/if}
             <div class="ctx-sep"></div>
             <button onclick={markAllUnplayed}>Alle als ungespielt markieren</button>
@@ -534,7 +553,7 @@
   {/if}
 
   <!-- Track list -->
-  <div class="queue-list" bind:this={qListEl}>
+  <div class="queue-list" bind:this={qListEl} onwheel={userActed} ontouchmove={userActed} onpointerdown={userActed} onkeydown={userActed}>
     {#if $queue.length === 0}
       <div class="empty">Queue leer · Tracks aus der Bibliothek hierher ziehen</div>
     {:else}
@@ -736,7 +755,11 @@
   .row:hover .remove, .row:hover .drag-handle, .row.q-sel .remove { opacity: 1; }
 
   /* Gespielt: gedaempfte, aber lesbare Schrift statt halber Deckkraft */
-  .row.played .title, .row.played .idx { color: var(--c-tx5); }
+  /* Gespielt: deutlich zurueckgenommen, Farben der Tonart grau; beim Drueberfahren wieder lesbar */
+  .row.played { opacity: .5; }
+  .row.played:hover, .row.played.q-sel { opacity: .9; }
+  .row.played .title, .row.played .idx { color: var(--c-tx4); }
+  .row.played .key, .row.played .pc { filter: grayscale(1); }
 
   /* Laufend: Flaeche, Kante, groesser — aus zwei Metern erkennbar */
   .row.active {
