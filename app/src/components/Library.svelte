@@ -743,6 +743,29 @@
   function qualityOk(track, ok) { send({ type: 'quality_ok', path: track.path, ok }) }
   let qualityFilter = $state('all')
 
+  // ── Ordner, in denen Kopien erlaubt sind ─────────────────────────────────
+  // Eine Kopie dort gilt nicht als Duplikat des Originals woanders (z. B.
+  // Event-Ordner "Hochzeit" mit Titeln aus den Genre-Ordnern). Zwei Kopien im
+  // selben erlaubten Ordner werden weiter gemeldet.
+  const _normDir = (p) => (p ?? '').replace(/\//g, '\\').replace(/\\$/, '').toLowerCase()
+  const allowDirs = $derived(($appSettings.dupeAllowFolders ?? []).map(_normDir))
+  function allowedZone(path) {
+    const pn = _normDir(path)
+    return allowDirs.find(f => pn.startsWith(f + '\\')) ?? ''
+  }
+  function allowedFolderOf(path) {
+    const pn = _normDir(path)
+    return ($appSettings.dupeAllowFolders ?? []).find(f => pn === _normDir(f) || pn.startsWith(_normDir(f) + '\\')) ?? null
+  }
+  function setDupeAllowed(folder, on) {
+    folderCtx = null; closeCtx()
+    appSettings.update(s => {
+      const cur = s.dupeAllowFolders ?? []
+      const rest = cur.filter(f => _normDir(f) !== _normDir(folder))
+      return { ...s, dupeAllowFolders: on ? [...rest, folder] : rest }
+    })
+  }
+
   function findDupes(tracks) {
     const byKey = new Map()  // normalized key → track[]
 
@@ -768,7 +791,20 @@
         if (Math.abs((t.duration_sec ?? 0) - (c[0].duration_sec ?? 0)) <= DUPE_DUR_TOL) c.push(t)
         else clusters.push([t])
       }
-      for (const group of clusters) {
+      // Erlaubte Ordner bilden je eine eigene Zone
+      const zoned = []
+      for (const c of clusters) {
+        if (c.length < 2) continue
+        if (!allowDirs.length) { zoned.push(c); continue }
+        const byZone = new Map()
+        for (const t of c) {
+          const z = allowedZone(t.path)
+          if (!byZone.has(z)) byZone.set(z, [])
+          byZone.get(z).push(t)
+        }
+        zoned.push(...byZone.values())
+      }
+      for (const group of zoned) {
         if (group.length < 2) continue
         const sorted = [...group].sort((a, b) =>
           dupeQuality(b) - dupeQuality(a) ||
@@ -908,15 +944,16 @@
     { key: 'lufs',         label: 'LUFS'             },
     { key: 'bpm',          label: 'BPM'              },
     { key: 'key',          label: 'Tonart'           },
+    { key: 'energy',       label: 'Energie'          },
     { key: 'bitrate',      label: 'kbps'             },
     { key: 'comment',      label: 'Kanal'            },
     { key: 'mtime',        label: 'Geändert'         },
   ]
-  const COL_DEFAULTS  = { title: 220, artist: 140, album: 130, genre: 100, album_artist: 120, folder: 110, ext: 60, duration: 64, lufs: 60, bpm: 56, key: 64, bitrate: 60, comment: 110, mtime: 84 }
+  const COL_DEFAULTS  = { title: 220, artist: 140, album: 130, genre: 100, album_artist: 120, folder: 110, ext: 60, duration: 64, lufs: 60, bpm: 56, key: 64, energy: 64, bitrate: 60, comment: 110, mtime: 84 }
   // Mindestbreiten, damit Spaltenkoepfe (11px, Grossbuchstaben) und Tonart-Chips
   // nicht abgeschnitten werden — gilt auch fuer frueher gespeicherte, schmalere Breiten
-  const COL_MIN = { ext: 60, duration: 64, lufs: 58, bpm: 52, key: 64, bitrate: 56, mtime: 80 }
-  const COL_VIS_DEF   = { title: true, artist: true, album: false, genre: false, album_artist: false, folder: false, ext: false, duration: true, lufs: true, bpm: true, key: true, bitrate: true, comment: false, mtime: false }
+  const COL_MIN = { ext: 60, duration: 64, lufs: 58, bpm: 52, key: 64, energy: 64, bitrate: 56, mtime: 80 }
+  const COL_VIS_DEF   = { title: true, artist: true, album: false, genre: false, album_artist: false, folder: false, ext: false, duration: true, lufs: true, bpm: true, key: true, energy: false, bitrate: true, comment: false, mtime: false }
   const COL_ORDER_DEF = ALL_COL_DEFS.map(c => c.key)
 
   function _loadColState() {
@@ -1119,6 +1156,14 @@
     if (libMenu) { libMenu = null; return }
     const r = e.currentTarget.getBoundingClientRect()
     libMenu = { x: r.left, y: window.innerHeight - r.top + 4 }
+  }
+
+  // Kontextmenues ganz ins Fenster schieben — sie sind je nach Eintraegen
+  // unterschiedlich hoch, eine feste Annahme schnitt das Ordner-Menue unten ab
+  function fitMenu(node) {
+    const r = node.getBoundingClientRect()
+    if (r.bottom > window.innerHeight - 8) node.style.top = Math.max(8, window.innerHeight - r.height - 8) + 'px'
+    if (r.right > window.innerWidth - 8) node.style.left = Math.max(8, window.innerWidth - r.width - 8) + 'px'
   }
 
   function onFolderCtx(e, path) {
@@ -1938,6 +1983,18 @@
         {:else}
           <p class="dupe-text">Keine doppelten Songs{dupeScopeLabel}.</p>
         {/if}
+        {#if ($appSettings.dupeAllowFolders ?? []).length}
+          <div class="allow-list">
+            <span class="allow-lbl" title="Kopien in diesen Ordnern zählen nicht als Duplikat. Ändern: Rechtsklick auf einen Ordner.">Doppelte erlaubt in:</span>
+            {#each $appSettings.dupeAllowFolders as f (f)}
+              <span class="allow-chip" title={f}>
+                <i class="ti ti-copy-check" aria-hidden="true"></i>{f.split(/[\\/]/).filter(Boolean).pop()}
+                <button class="allow-x" aria-label="Wieder als Duplikat melden" title="Wieder als Duplikat melden"
+                        onclick={() => setDupeAllowed(f, false)}><i class="ti ti-x"></i></button>
+              </span>
+            {/each}
+          </div>
+        {/if}
       </div>
     {/if}
     {#if $normalizeProgress}
@@ -2109,6 +2166,8 @@
                     <span class="cell num" style="width:{colWidths.bitrate}px">{track.bitrate_kbps || ''}</span>
                   {:else if col.key === 'comment'}
                     <span class="cell c-comment" style="width:{colWidths.comment}px" title={track.comment || ''}>{track.comment || ''}</span>
+                  {:else if col.key === 'energy'}
+                    <span class="cell num" style="width:{colWidths.energy}px" title={track.energy ? 'Energie-Level von Mixed In Key' : ''}>{track.energy || ''}</span>
                   {:else if col.key === 'mtime'}
                     <span class="cell num" style="width:{colWidths.mtime}px">{fmtMtime(track.mtime)}</span>
                   {/if}
@@ -2294,7 +2353,7 @@
 {/if}
 
 {#if ctxMenu}
-  <div class="ctx-menu" style="left:{Math.min(ctxMenu.x, window.innerWidth - 210)}px;top:{Math.min(ctxMenu.y, window.innerHeight - 220)}px">
+  <div class="ctx-menu" use:fitMenu style="left:{Math.min(ctxMenu.x, window.innerWidth - 210)}px;top:{Math.min(ctxMenu.y, window.innerHeight - 220)}px">
     <button onclick={() => { playNow(ctxMenu.track); ctxMenu = null }}>Jetzt abspielen</button>
     <button class="ctx-mix" onclick={() => { mixNow(ctxMenu.track); ctxMenu = null }}>Jetzt mischen</button>
     <button onclick={() => { playNext(ctxMenu.track); ctxMenu = null }}>Als Nächstes einfügen</button>
@@ -2316,6 +2375,10 @@
     <button onclick={() => { titlePaths = selected.size > 1 && selected.has(ctxMenu.track.path) ? [...selected] : [ctxMenu.track.path]; closeCtx() }}>
       {selected.size > 1 && selected.has(ctxMenu.track.path) ? `${selected.size} Titel` : 'Titel'} aufräumen…</button>
     <button onclick={() => openNormalize(ctxMenu.track)}>{selected.size > 1 && selected.has(ctxMenu.track.path) ? `${selected.size} Dateien` : 'Datei'} normalisieren…</button>
+    {#if navMode === 'duplicates'}
+      {@const dir = ctxMenu.track.path.replace(/[\\/][^\\/]*$/, '')}
+      <button onclick={() => setDupeAllowed(dir, true)} title={dir}>Doppelte im Ordner „{dir.split(/[\\/]/).filter(Boolean).pop()}“ erlauben</button>
+    {/if}
     <div class="ctx-sep"></div>
     {#if navMode.startsWith('playlist:')}
       {#if selected.size > 1 && selected.has(ctxMenu.track.path)}
@@ -2347,7 +2410,7 @@
 {/if}
 
 {#if folderCtx}
-  <div class="ctx-menu" style="left:{Math.min(folderCtx.x, window.innerWidth - 220)}px;top:{Math.min(folderCtx.y, window.innerHeight - 160)}px"
+  <div class="ctx-menu" use:fitMenu style="left:{Math.min(folderCtx.x, window.innerWidth - 220)}px;top:{Math.min(folderCtx.y, window.innerHeight - 160)}px"
        onclick={(e) => e.stopPropagation()}>
     <button onclick={() => analyzeFolder(false)}>Analysieren — nur dieser Ordner</button>
     <button onclick={() => analyzeFolder(true)}>Analysieren — mit Unterordnern</button>
@@ -2359,6 +2422,18 @@
       <button onclick={() => { send({ type: 'add_favorite', path: folderCtx.path, name: folderCtx.path.split(/[\\/]/).filter(Boolean).pop() ?? folderCtx.path }); folderCtx = null }}>Zu Favoriten hinzufügen</button>
     {/if}
     <div class="ctx-sep"></div>
+    {#if allowedFolderOf(folderCtx.path)}
+      {@const af = allowedFolderOf(folderCtx.path)}
+      <button onclick={() => setDupeAllowed(af, false)} title={af}>
+        <i class="ti ti-copy" aria-hidden="true"></i>
+        {_normDir(af) === _normDir(folderCtx.path) ? 'Doppelte hier wieder melden' : `Doppelte in „${af.split(/[\\/]/).filter(Boolean).pop()}“ wieder melden`}
+      </button>
+    {:else}
+      <button onclick={() => setDupeAllowed(folderCtx.path, true)}
+              title="Kopien in diesem Ordner (samt Unterordnern) gelten nicht als Duplikat, z. B. für Event- oder Playlist-Ordner">
+        <i class="ti ti-copy-check" aria-hidden="true"></i> Doppelte hier erlauben
+      </button>
+    {/if}
     {#if excludedBy(folderCtx.path)}
       {@const ex = excludedBy(folderCtx.path)}
       <button onclick={() => includeFolder(ex)} title={ex}>
@@ -2371,7 +2446,7 @@
 {/if}
 
 {#if playlistCtx}
-  <div class="ctx-menu" style="left:{Math.min(playlistCtx.x, window.innerWidth - 220)}px;top:{Math.min(playlistCtx.y, window.innerHeight - 120)}px"
+  <div class="ctx-menu" use:fitMenu style="left:{Math.min(playlistCtx.x, window.innerWidth - 220)}px;top:{Math.min(playlistCtx.y, window.innerHeight - 120)}px"
        onclick={(e) => e.stopPropagation()}>
     <button onclick={() => {
       const pl = $playlists.find(p => p.path === playlistCtx.path)
@@ -2610,6 +2685,14 @@
   .q-tip-hint { margin-top: 2px; font-size: var(--fs-cap); color: var(--c-tx4); }
   .dupe-best { text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }
   .dupe-acts { display: flex; gap: var(--sp-2); flex-shrink: 0; }
+  .allow-list { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--fs-sm); color: var(--c-tx3); }
+  .allow-chip {
+    display: inline-flex; align-items: center; gap: 4px; padding: 1px 2px 1px 8px;
+    border: 1px solid var(--c-br2); border-radius: 999px; color: var(--c-tx2); max-width: 220px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .allow-x { border: none; background: none; color: var(--c-tx4); cursor: pointer; padding: 0 4px; font-size: 12px; border-radius: 999px; }
+  .allow-x:hover { color: var(--c-tx1); background: var(--c-hover); }
 
   .norm-progress, .sel-bar {
     display: flex; align-items: center; gap: var(--sp-2); flex-shrink: 0;

@@ -2,7 +2,7 @@
   import { get } from 'svelte/store'
   import { keyCompat } from '../lib/keys.js'
   import KeyChip from './KeyChip.svelte'
-  import { queue, playerState, library, playlists, playMode, send, automixStatus, introSkipPaths, settings, appSettings, skipNextCrossfade, autoRemovePlayed, livePositionMs, selectionOwner, radioEnabled, radioStatus, lastfmApiKey } from '../stores/ws.js'
+  import { queue, playerState, library, playlists, playMode, send, automixStatus, introSkipPaths, settings, appSettings, skipNextCrossfade, autoRemovePlayed, livePositionMs, selectionOwner, radioEnabled, radioStatus, lastfmApiKey, harmonicResult } from '../stores/ws.js'
 
   // Tonart kommt aus der Bibliothek: Queue-Eintraege entstehen an vielen Stellen
   // und tragen sie nicht selbst mit.
@@ -292,6 +292,22 @@
   // Der laufende Titel steht oben in der Liste und wird verfolgt. Solange man
   // selbst scrollt, zieht oder markiert, bleibt die Liste stehen und kehrt erst
   // nach einer Pause zum laufenden Titel zurueck.
+  // Rueckmeldung von "Harmonisch sortieren"
+  let harmonicNote = $state('')
+  let _harmTimer = null
+  $effect(() => {
+    const r = $harmonicResult
+    if (!r) return
+    clearTimeout(_harmTimer)
+    if (r.count < 2) harmonicNote = 'Nichts zu sortieren — es kommen keine ungespielten Titel mehr'
+    else {
+      harmonicNote = `Harmonisch sortiert: ${r.count} Titel` +
+        (r.boosts ? `, ${r.boosts} Energie-Schub${r.boosts > 1 ? 'e' : ''}` : '') +
+        (r.unknown_keys ? ` · ${r.unknown_keys} ohne Tonart` : '')
+    }
+    _harmTimer = setTimeout(() => harmonicNote = '', 9000)
+  })
+
   const FOLLOW_IDLE_MS = 12000
   let _lastUserAct = 0
   function userActed() { _lastUserAct = Date.now() }
@@ -497,6 +513,10 @@
                 {/each}
               {/if}
             {/if}
+            <button onclick={() => { send({ type: 'queue_harmonic' }); showMenu = false }}
+                    title="Kommende Titel so ordnen, dass die Tonarten zueinander passen und das Tempo nah bleibt — alle 4–6 Titel mit einem Energie-Schub">
+              <i class="ti ti-wave-sine dd-check"></i> Harmonisch sortieren
+            </button>
             <button onclick={() => { shuffleQueue(); showMenu = false }}>Einmalig mischen</button>
             <button onclick={shuffleUnplayed}>Nur ungespielte mischen</button>
             {#if qSelected.size > 1}
@@ -530,8 +550,11 @@
   </div>
 
   <!-- Restzeit und Ende: eigene Zeile, damit beides gross lesbar bleibt -->
-  {#if remainingStr || totalDurStr || $automixStatus || $radioStatus}
+  {#if remainingStr || totalDurStr || $automixStatus || $radioStatus || harmonicNote}
     <div class="queue-sub">
+      {#if harmonicNote}
+        <span class="am-status harm-note" role="status">{harmonicNote}</span>
+      {/if}
       {#if remainingStr}
         <span class="queue-dur" title="Restzeit ab jetzt">{remainingStr}</span>
         <span class="queue-end">Ende ~{endClock}</span>
@@ -597,7 +620,7 @@
           {#if showKey && keyOf(track)}
             {@const k = keyOf(track)}
             {@const uebergang = i > 0 ? keyCompat(keyOf($queue[i - 1])?.key, k.key) : null}
-            <span class="key"><KeyChip key={k.key} src={k.key_src} compat={uebergang} hint="Übergang vom vorherigen Titel: " /></span>
+            <span class="key">{#if track.energy_boost}<i class="ti ti-trending-up boost" title="Energie-Schub: Tonart oder Tempo gehen hier bewusst nach oben"></i>{/if}<KeyChip key={k.key} src={k.key_src} compat={uebergang} hint="Übergang vom vorherigen Titel: " /></span>
           {/if}
           <span class="dur">{fmt(track.duration_sec)}</span>
           <!-- Startzeit-Spalte immer ausgeben (auch leer), damit die Dauer buendig bleibt -->
@@ -795,7 +818,9 @@
   }
 
   .pc { flex-shrink: 0; font-size: var(--fs-cap); font-weight: 600; color: var(--c-accent-tx); font-variant-numeric: tabular-nums; }
-  .key { flex-shrink: 0; font-size: var(--fs-sm); }
+  .key { flex-shrink: 0; font-size: var(--fs-sm); display: inline-flex; align-items: center; gap: 2px; }
+  .boost { color: var(--c-accent-tx); font-size: 13px; }
+  .harm-note { color: var(--c-accent-tx); }
   .bpm { flex-shrink: 0; min-width: 28px; text-align: right; font-size: var(--fs-sm); color: var(--c-tx3); font-variant-numeric: tabular-nums; }
   .dur {
     flex-shrink: 0; min-width: 38px; text-align: right;

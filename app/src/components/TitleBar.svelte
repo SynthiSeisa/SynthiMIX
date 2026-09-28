@@ -1,11 +1,10 @@
 <script>
-  import { settingsOpen, openSettings, send, backendLogs, notes, wishes, toolUpdates } from '../stores/ws.js'
+  import { settingsOpen, openSettings, send, backendLogs, notes, wishes, toolUpdates, wishesOpen } from '../stores/ws.js'
   import WishesDialog from './WishesDialog.svelte'
   import { theme } from '../lib/prefs.js'
   const win = window.electron ?? {}
 
   // ── Musikwuensche ─────────────────────────────────────────────────────────
-  let wishesOpen = $state(false)
   // Nur was noch Aufmerksamkeit braucht — Fehler zaehlen mit, damit sie
   // nicht unbemerkt liegenbleiben.
   const offeneWuensche = $derived($wishes.length)
@@ -14,12 +13,14 @@
   // Nur ein Punkt am Zahnrad — beim Auflegen soll kein Fenster aufgehen.
   // Der Klick fuehrt direkt auf den Tab, in dem der Hinweis steht.
   const updTab = $derived(
-    $toolUpdates.ytdlp?.available || $toolUpdates.ytdlp_updated ? 'system'
+    $toolUpdates.ytdlp?.available || $toolUpdates.ytdlp_updated || $toolUpdates.spotdl_updated || $toolUpdates.ffmpeg_updated ? 'system'
     : $toolUpdates.spotdl?.available ? 'download' : null)
   const updTitle = $derived(
     $toolUpdates.ytdlp?.available ? `Neue yt-dlp-Version ${$toolUpdates.ytdlp.latest}`
     : $toolUpdates.spotdl?.available ? `Neue spotdl-Version ${$toolUpdates.spotdl.latest}`
     : $toolUpdates.ytdlp_updated ? `yt-dlp wurde auf ${$toolUpdates.ytdlp_updated.to} aktualisiert`
+    : $toolUpdates.spotdl_updated ? `spotdl wurde auf ${$toolUpdates.spotdl_updated.to} aktualisiert`
+    : $toolUpdates.ffmpeg_updated ? 'ffmpeg wurde aktualisiert'
     : '')
 
   // ── Theme ────────────────────────────────────────────────────────────────
@@ -135,7 +136,7 @@
       <polyline points="16,32 20,36 24,32" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
     <span class="app-name"><span class="nm-synthi">Synthi</span><span class="nm-mix">MIX</span></span>
-    <span class="version">v{APP_VERSION}</span>
+    <button class="version" onclick={() => openSettings('info')} title="Was ist neu? — Änderungen aller Versionen">v{APP_VERSION}</button>
   </div>
   <div class="tb-actions" style="-webkit-app-region:no-drag">
 
@@ -222,7 +223,7 @@
             title={isDark ? 'Helles Theme' : 'Dunkles Theme'} aria-label="Theme umschalten">
       <i class="ti {isDark ? 'ti-sun' : 'ti-moon'}"></i>
     </button>
-    <button class="btn btn-icon btn-sm has-badge" onclick={() => wishesOpen = !wishesOpen}
+    <button class="btn btn-icon btn-sm has-badge" onclick={() => wishesOpen.update(v => !v)}
             title="Musikw&#252;nsche der G&#228;ste" aria-label="Musikwünsche">
       <i class="ti ti-music"></i>{#if offeneWuensche}<span class="badge">{offeneWuensche}</span>{/if}
     </button>
@@ -277,8 +278,8 @@
   </div>
 {/if}
 
-{#if wishesOpen}
-  <WishesDialog onclose={() => wishesOpen = false} />
+{#if $wishesOpen}
+  <WishesDialog onclose={() => wishesOpen.set(false)} />
 {/if}
 
 <style>
@@ -296,7 +297,12 @@
   .app-name { font-size: var(--fs-body); font-weight: 700; letter-spacing: .06em; }
   .nm-synthi { color: var(--c-accent-tx); }
   .nm-mix    { color: var(--c-blue-tx); }
-  .version   { font-size: var(--fs-cap); color: var(--c-tx5); font-variant-numeric: tabular-nums; }
+  .version   {
+    font-size: var(--fs-cap); color: var(--c-tx5); font-variant-numeric: tabular-nums;
+    border: none; background: none; padding: 2px 4px; border-radius: var(--r-s); cursor: pointer;
+    -webkit-app-region: no-drag;
+  }
+  .version:hover { color: var(--c-tx2); background: var(--c-hover); text-decoration: underline; text-underline-offset: 3px; }
 
   .tb-actions { display: flex; align-items: center; gap: 2px; margin-left: auto; -webkit-app-region: no-drag; }
   .tb-sep { width: 1px; height: 18px; background: var(--c-br2); margin: 0 var(--sp-1); }

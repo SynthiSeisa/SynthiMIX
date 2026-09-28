@@ -156,6 +156,48 @@ FFPROBE = _find_tool("ffprobe.exe",
     Path(__file__).parent.parent / "bin",
     Path(os.environ.get("FFMPEG_PATH", "")))
 
+# Aktualisierte ffmpeg-Versionen liegen je in einem eigenen Ordner
+# tools/ffmpeg-<Builddatum>/ im Datenordner. So muss nie eine Exe ersetzt
+# werden, die gerade laeuft (Analysen nutzen ffmpeg staendig).
+FFMPEG_TOOLS_DIR = BASE_DIR / "tools"
+
+def _ffmpeg_build_date(ver: str) -> str:
+    """Builddatum aus der Versionszeile ("N-125258-g…-20260624" → "20260624")."""
+    m = re.search(r"(20\d{2})(\d{2})(\d{2})\b", ver or "")
+    return m.group(0) if m else ""
+
+def _ffmpeg_local_builds() -> list[tuple[str, Path]]:
+    out = []
+    try:
+        for d in FFMPEG_TOOLS_DIR.glob("ffmpeg-*"):
+            if (d / "ffmpeg.exe").exists() and (d / "ffprobe.exe").exists():
+                out.append((d.name.split("-", 1)[1], d))
+    except Exception:
+        pass
+    return sorted(out)
+
+def _use_newest_ffmpeg():
+    """Beim Start: die neueste eigene Kopie nehmen und aeltere wegraeumen."""
+    global FFMPEG, FFPROBE
+    builds = _ffmpeg_local_builds()
+    if not builds:
+        return
+    date, d = builds[-1]
+    # Bringt ein App-Update selbst einen neueren Build mit, gilt der
+    try:
+        r = subprocess.run([FFMPEG, "-version"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=10, creationflags=_NO_WINDOW)
+        mitgeliefert = _ffmpeg_build_date(r.stdout)
+    except Exception:
+        mitgeliefert = ""
+    if mitgeliefert and mitgeliefert >= date:
+        return
+    FFMPEG, FFPROBE = str(d / "ffmpeg.exe"), str(d / "ffprobe.exe")
+    for _, old in builds[:-1]:
+        shutil.rmtree(old, ignore_errors=True)
+
+_use_newest_ffmpeg()
+
 # ── app ──────────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(application: FastAPI):
@@ -170,7 +212,7 @@ async def lifespan(application: FastAPI):
     asyncio.create_task(_watcher_loop())
     asyncio.create_task(_auto_scan_loop())
     asyncio.create_task(_ytdlp_autoupdate_loop())
-    asyncio.create_task(_refresh_tag_meta_task())
+    asyncio.create_task(_refresh_tag_meta_loop())
     asyncio.create_task(_quality_scan_loop())
     print(f"[backend] ready on ws://127.0.0.1:{_BACKEND_PORT}/ws", flush=True)
     yield
@@ -384,6 +426,12 @@ def load_library():
             "play_count":   int(t.get("play_count", 0)),
             # Obere Grenzfrequenz (Qualitaetspruefung); fehlt = noch nicht gemessen
             **({"cutoff_khz": float(t["cutoff_khz"])} if t.get("cutoff_khz") is not None else {}),
+            # Mixed In Key: Energie-Level 1-10 und Cue-Punkte (ms)
+            **({"energy": int(t["energy"])} if t.get("energy") else {}),
+            **({"mik_cues": [int(c) for c in t["mik_cues"]][:16]} if t.get("mik_cues") else {}),
+            # Taktraster fuer Beat-Sync (genaues Tempo, erster Schlag, Verlaesslichkeit)
+            **({"bpm_f": float(t["bpm_f"]), "beat_off": float(t.get("beat_off", 0)),
+                "beat_conf": float(t.get("beat_conf", 0))} if t.get("bpm_f") else {}),
             # "Passt so" in der Qualitaetsansicht
             **({"quality_ok": True} if t.get("quality_ok") else {}),
             **({"unanalyzable": True} if t.get("unanalyzable") else {}),
@@ -443,6 +491,7 @@ def load_settings():
     _state["remote_key"]              = str(raw.get("remote_key", ""))
     _state["ytdlp_autoupdate"]        = bool(raw.get("ytdlp_autoupdate", True))
     _state["ytdlp_last_check"]        = int(raw.get("ytdlp_last_check", 0))
+    _state["ffmpeg_last_check"]       = int(raw.get("ffmpeg_last_check", 0))
     _state["tool_updates"]            = dict(raw.get("tool_updates", {}) or {})
     _state["normalize_volume"]        = bool(raw.get("normalize_volume", True))
     _state["target_lufs"]             = float(raw.get("target_lufs", -10.0))
@@ -477,6 +526,7 @@ def save_settings():
         "remote_key":              _state.get("remote_key", ""),
         "ytdlp_autoupdate":        _state.get("ytdlp_autoupdate", True),
         "ytdlp_last_check":        _state.get("ytdlp_last_check", 0),
+        "ffmpeg_last_check":       _state.get("ffmpeg_last_check", 0),
         "tool_updates":            _state.get("tool_updates", {}),
         "normalize_volume":        _state.get("normalize_volume", True),
         "target_lufs":             _state.get("target_lufs", -10.0),
@@ -712,6 +762,122 @@ def _key_compat(a, b) -> int:
         return 2
     return 0
 
+# ── Harmonisch sortieren (Warteschlange) ──────────────────────────────────────
+def _energy(t: dict) -> float:
+    """Energie fuer die Sortierung: der Energie-Level von Mixed In Key (1-10),
+    sonst grob aus Tempo und Lautheit (schneller und lauter = mehr Energie).
+    Beide Skalen liegen etwa im selben Bereich (-3 … +4)."""
+    if t.get("energy"):
+        return (int(t["energy"]) - 5) * 0.8
+    bpm = float(t.get("bpm_f") or t.get("bpm") or 0) or 120.0
+    lufs = float(t.get("lufs", -99) or -99)
+    if lufs <= -90:
+        lufs = -9.0
+    return (bpm - 120.0) / 20.0 + (lufs + 9.0) / 3.0
+
+def _tempo_gap(a: float, b: float) -> float:
+    """Relativer Tempo-Abstand, halbes/doppeltes Tempo zaehlt als gleich."""
+    if not a or not b:
+        return -1.0
+    return min(abs(a * m / b - 1.0) for m in (0.5, 1.0, 2.0))
+
+def _key_step(a, b) -> str:
+    """Art des Tonart-Schritts von a nach b im Camelot-Rad."""
+    ca, cb = _key_to_camelot(a), _key_to_camelot(b)
+    if not ca or not cb:
+        return "unknown"
+    if ca == cb:
+        return "same"
+    d = (cb[0] - ca[0]) % 12
+    if ca[0] == cb[0]:
+        return "relative"
+    if ca[1] == cb[1]:
+        if d == 1:
+            return "up1"
+        if d == 11:
+            return "down1"
+        if d == 2:
+            return "up2"          # Energie-Schub: ein Ganzton hoeher
+        if d == 7:
+            return "up7"          # Energie-Schub: ein Halbton hoeher
+    return "clash"
+
+_KEY_SCORE = {"same": 3.0, "relative": 2.6, "up1": 2.7, "down1": 2.5,
+              "up2": 1.2, "up7": 0.8, "unknown": 1.2, "clash": 0.0}
+_BOOST_KEY_SCORE = {"up2": 3.6, "up7": 3.3}
+
+def _harmonic_order(start: dict | None, tracks: list[dict], rng=None) -> tuple[list[dict], set[int]]:
+    """Reihenfolge fuer einen harmonischen Mix mit gelegentlichen Energie-Schueben.
+
+    Gierig vom laufenden Titel aus: jeweils der Titel, dessen Tonart am besten
+    passt (Camelot gleich, +-1, Paralleltonart), dessen Tempo nah liegt und der
+    die Energie haelt oder leicht hebt. Alle 4-6 Titel ist ein Schub faellig:
+    dann zaehlen +2 / +7 im Camelot-Rad und deutlich mehr Energie besonders —
+    so wie DJs zwischendurch "hochschalten".
+    Liefert die neue Reihenfolge und die Positionen der Schuebe.
+    """
+    rng = rng or random.Random(len(tracks))
+    rest = list(tracks)
+    out: list[dict] = []
+    boosts: set[int] = set()
+    prev = start
+    since = 0
+    due_at = rng.randint(4, 6)
+    # Je Titel einmal vorrechnen: Tonart im Camelot-Rad, Tempo, Energie
+    pre: dict[int, tuple] = {}
+    for x in ([start] if start else []) + list(tracks):
+        pre[id(x)] = (_key_to_camelot(x.get("key")), float(x.get("bpm_f") or x.get("bpm") or 0), _energy(x))
+
+    def step_of(ca, cb):
+        if not ca or not cb:
+            return "unknown"
+        if ca == cb:
+            return "same"
+        if ca[0] == cb[0]:
+            return "relative"
+        if ca[1] == cb[1]:
+            return {1: "up1", 11: "down1", 2: "up2", 7: "up7"}.get((cb[0] - ca[0]) % 12, "clash")
+        return "clash"
+
+    def score(a, c, boost_due):
+        (ka, ba, ea), (kc, bc, ec) = pre[id(a)], pre[id(c)]
+        step = step_of(ka, kc)
+        sc = (_BOOST_KEY_SCORE.get(step) if boost_due and step in _BOOST_KEY_SCORE
+              else _KEY_SCORE[step])
+        gap = _tempo_gap(ba, bc)
+        sc -= 0.3 if gap < 0 else min(3.0, gap * 25)
+        de = ec - ea
+        if boost_due:
+            sc += max(0.0, min(2.0, de))
+        else:
+            sc -= abs(de - 0.15) * 0.5
+        return sc, step, de
+
+    while rest:
+        boost_due = since >= due_at
+        best, best_s, best_step, best_de = None, -1e9, "", 0.0
+        # Ein Schritt voraus: nicht in eine Tonart laufen, aus der nichts mehr
+        # passt (bei sehr langen Listen zu teuer, dann ohne)
+        look = 1 < len(rest) <= 150
+        for c in rest:
+            if prev is None:
+                sc, step, de = -abs(pre[id(c)][2]), "start", 0.0
+            else:
+                sc, step, de = score(prev, c, boost_due)
+            if look:
+                sc += 0.5 * max(score(c, d, False)[0] for d in rest if d is not c)
+            if sc > best_s:
+                best, best_s, best_step, best_de = c, sc, step, de
+        rest.remove(best)
+        out.append(best)
+        since += 1
+        if boost_due and (best_step in _BOOST_KEY_SCORE or best_de >= 0.6):
+            boosts.add(len(out) - 1)
+            since = 0
+            due_at = rng.randint(4, 6)
+        prev = best
+    return out, boosts
+
 def _make_library_entry(path: str, probe: dict, **overrides) -> dict:
     """Bibliothekseintrag aus einem _probe_sync-Ergebnis.
 
@@ -740,9 +906,71 @@ def _make_library_entry(path: str, probe: dict, **overrides) -> dict:
         "comment":      probe.get("comment", "") or "",
         "mtime":        int(os.path.getmtime(path)) if os.path.exists(path) else 0,
         "play_count":   0,
+        **({"energy": probe["energy"]} if probe.get("energy") else {}),
+        **({"mik_cues": probe["mik_cues"]} if probe.get("mik_cues") else {}),
     }
     entry.update(overrides)
     return entry
+
+def _mik_json(raw) -> dict:
+    """GEOB-Inhalt von Mixed In Key: JSON, manchmal base64-verpackt."""
+    if isinstance(raw, (bytes, bytearray)):
+        for cand in (bytes(raw),):
+            try:
+                return json.loads(cand.decode("utf-8", errors="replace").strip("\x00 "))
+            except Exception:
+                pass
+            try:
+                return json.loads(base64.b64decode(cand).decode("utf-8", errors="replace"))
+            except Exception:
+                pass
+    return {}
+
+def _read_mik_sync(path: str, mf=None) -> dict:
+    """Energie-Level (1-10) und Cue-Punkte von Mixed In Key aus den Tags.
+
+    MIK schreibt in MP3s TXXX:EnergyLevel plus GEOB-Frames "Energy", "Key" und
+    "CuePoints" (JSON, Zeiten in ms). Die Cues liegen auf Phrasen-Anfaengen,
+    der erste auf dem ersten Taktschlag — daraus wird das Taktraster genau.
+    """
+    out: dict = {}
+    try:
+        if mf is None:
+            import mutagen
+            mf = mutagen.File(path)
+        tags = getattr(mf, "tags", None) or {}
+    except Exception:
+        return out
+    energy = 0
+    try:
+        if hasattr(tags, "getall"):                       # ID3
+            for fr in tags.getall("TXXX"):
+                if (fr.desc or "").lower() in ("energylevel", "energy"):
+                    energy = int(float(str(fr.text[0]).strip() or 0))
+            for fr in tags.getall("GEOB"):
+                d = (fr.desc or "").lower()
+                if d == "energy" and not energy:
+                    energy = int(_mik_json(fr.data).get("energyLevel") or 0)
+                elif d == "cuepoints":
+                    cues = [float(c.get("time", -1)) for c in _mik_json(fr.data).get("cues", [])]
+                    cues = sorted(c for c in cues if c >= 0)
+                    if cues:
+                        out["mik_cues"] = [int(round(c)) for c in cues[:16]]
+        else:                                             # MP4 / Vorbis
+            for k in ("----:com.apple.iTunes:EnergyLevel", "----:com.mixedinkey.mixedinkey:energy",
+                      "energylevel", "ENERGYLEVEL"):
+                v = tags.get(k) if hasattr(tags, "get") else None
+                if v:
+                    v = v[0] if isinstance(v, list) else v
+                    if isinstance(v, (bytes, bytearray)):
+                        v = v.decode("utf-8", errors="replace")
+                    energy = int(float(str(v).strip() or 0))
+                    break
+    except Exception:
+        pass
+    if 1 <= energy <= 10:
+        out["energy"] = energy
+    return out
 
 def _probe_sync(path: str) -> dict:
     result = {"duration_sec": 0.0, "bitrate_kbps": 0, "bpm": 0,
@@ -769,6 +997,7 @@ def _probe_sync(path: str) -> dict:
         result["key"]          = _parse_key(tags.get("tkey") or tags.get("initialkey")
                                             or tags.get("key")) or ""
         if result["duration_sec"] > 0:
+            result.update(_read_mik_sync(path))
             return result
     except Exception:
         pass
@@ -808,7 +1037,15 @@ def _probe_sync(path: str) -> dict:
 
 # Erhoehen, wenn Bibliothekseintraege neue Tag-Felder bekommen: der Bestand wird
 # dann beim naechsten Start einmal nachgelesen (siehe _refresh_tag_meta_task).
-_TAG_META_REV = 2      # 2: Tonart dazu
+_TAG_META_REV = 4      # 2: Tonart, 3: Energie und Cues von Mixed In Key, 4: BPM aus dem Tag
+
+def _tag_bpm(raw) -> int:
+    """BPM-Tag ("174", "173.98", "128,00") als ganze Zahl, 0 wenn leer/unsinnig."""
+    try:
+        v = float(str(raw or "").strip().replace(",", ".") or 0)
+    except ValueError:
+        return 0
+    return int(round(v)) if 40 <= v <= 250 else 0
 
 def _read_tags_sync(path: str) -> dict | None:
     """Nur Kuenstler, Album und Genre aus den Tags lesen.
@@ -825,6 +1062,7 @@ def _read_tags_sync(path: str) -> dict | None:
     if mf is None:
         return None
     tags = mf.tags or {}
+    mik = _read_mik_sync(path, mf)
     def _t(*keys):
         for k in keys:
             try:
@@ -849,7 +1087,19 @@ def _read_tags_sync(path: str) -> dict | None:
         "album":        _t('TALB', 'album', '\xa9alb'),
         "genre":        _t('TCON', 'genre', '\xa9gen'),
         "key":          _parse_key(_t('TKEY', 'initialkey', '----:com.apple.iTunes:initialkey')) or "",
+        "bpm":          _tag_bpm(_t('TBPM', 'bpm', 'tmpo')),
+        **mik,
     }
+
+async def _refresh_tag_meta_loop():
+    """Beim Start und danach alle 5 Minuten: geaenderte Dateien nachlesen.
+    So kommt eine Analyse mit Mixed In Key an, ohne SynthiMIX neu zu starten."""
+    while True:
+        try:
+            await _refresh_tag_meta_task()
+        except Exception as e:
+            print(f"[library] Tag-Abgleich fehlgeschlagen: {e}", flush=True)
+        await asyncio.sleep(300)
 
 async def _refresh_tag_meta_task():
     """Tag-Felder der Bibliothek mit den Dateien abgleichen.
@@ -863,7 +1113,7 @@ async def _refresh_tag_meta_task():
       Tags ueberschreiben nichts.
     Eine Tonart aus dem Tag schlaegt immer eine eigene Schaetzung.
     """
-    FIELDS = ("artist", "album_artist", "album", "genre", "key")
+    FIELDS = ("artist", "album_artist", "album", "genre", "key", "energy", "mik_cues", "bpm")
     snapshot = [(lt["path"], int(lt.get("mtime", 0) or 0), lt.get("meta_rev", 0),
                  {k: lt.get(k, "") for k in FIELDS}, lt.get("key_src", ""))
                 for lt in _state["library"] if lt.get("path")]
@@ -886,6 +1136,14 @@ async def _refresh_tag_meta_task():
                 v = tags.get(k)
                 if v and (changed_on_disk or not current.get(k)) and v != current.get(k):
                     upd[k] = v
+            for k in ("energy", "mik_cues"):             # Mixed In Key gilt immer
+                if tags.get(k) and tags[k] != current.get(k):
+                    upd[k] = tags[k]
+            # BPM aus dem Tag (Mixed In Key, rekordbox) schlaegt die eigene
+            # grobe Schaetzung. Das Taktraster wird dann neu gemessen.
+            if tags.get("bpm") and tags["bpm"] != current.get("bpm"):
+                upd["bpm"] = tags["bpm"]
+                upd["_regrid"] = True
             tag_key = tags.get("key")
             if tag_key and (tag_key != current.get("key") or key_src != "tag"):
                 upd["key"] = tag_key
@@ -905,9 +1163,19 @@ async def _refresh_tag_meta_task():
         upd = updates.get(lt.get("path"))
         if upd is None:
             continue
+        if upd.pop("_regrid", False):
+            for k in ("bpm_f", "beat_off", "beat_conf"):
+                lt.pop(k, None)
+            _beatgrid_cache.pop(lt.get("path"), None)
         if any(k not in ("meta_rev", "mtime") for k in upd):
             ergaenzt += 1
         lt.update(upd)
+        # Titel in der Warteschlange mitziehen (Tonart/BPM im Player)
+        for qt in _state.get("queue", []):
+            if qt.get("path") == lt.get("path"):
+                for k in ("bpm", "key", "energy"):
+                    if k in upd:
+                        qt[k] = upd[k]
 
     save_library()
     await push_library()
@@ -1205,6 +1473,167 @@ _QUALITY_PARALLEL    = 2
 _QUALITY_RESCAN_SEC  = 600     # neue Titel werden spaeter nachgemessen
 
 
+# ── Taktraster (Beat-Sync beim Uebergang) ────────────────────────────────────
+_beatgrid_cache: dict = {}    # Pfad -> Raster, auch fuer Titel ausserhalb der Bibliothek
+
+def _beatgrid_sync(path: str, bpm_hint: float = 0.0) -> dict | None:
+    """Genaues Tempo und Lage des ersten Schlags.
+
+    Tiefpass (Bassdrum), Anstiege der Lautstaerke als Huellkurve, dann ein
+    Kammfilter ueber den ganzen Titel: fuer Tempi nahe der Schaetzung und jede
+    Phase wird aufsummiert, wie viel Anstieg genau auf den Schlaegen liegt.
+    Kandidaten sind die BPM aus den Tags und eine eigene Schaetzung, jeweils
+    auch halbes/doppeltes Tempo; es gewinnt das Raster mit der deutlichsten
+    Spitze. beat_conf (0..1) sagt, wie klar das Raster ist — unter ~0.4
+    (Live-Schlagzeug, freies Tempo) legt der Player die Schlaege nicht
+    uebereinander.
+    """
+    if not _numpy_ok():
+        return None
+    import numpy as np
+    sr, hop = 11025, 64            # 5,8 ms Aufloesung
+    try:
+        r = subprocess.run([FFMPEG, "-nostdin", "-v", "error", "-i", path,
+                            "-af", "lowpass=f=180,aformat=channel_layouts=mono",
+                            "-ac", "1", "-ar", str(sr), "-f", "s16le", "-acodec", "pcm_s16le", "-"],
+                           capture_output=True, timeout=120, creationflags=_NO_WINDOW)
+    except Exception:
+        return None
+    x = np.frombuffer(r.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+    if x.size < sr * 20:
+        return None
+    n = x.size // hop
+    fr = x[:n * hop].reshape(n, hop)
+    env = np.log1p(200 * np.sqrt((fr * fr).mean(axis=1) + 1e-12))
+    onset = np.maximum(0.0, np.diff(env, prepend=env[0]))
+    k = 32                          # langsame Pegelaenderungen raus
+    if onset.size > k:
+        onset = np.maximum(0.0, onset - np.convolve(onset, np.ones(k) / k, mode="same"))
+    fps = sr / hop
+
+    def comb(bpms):
+        best = (-1.0, 0.0, 0.0, 0.0)            # Summe, bpm, Phase (Frames), Mittel
+        for bpm in bpms:
+            period = fps * 60.0 / bpm
+            nb = int((n - 1) / period)
+            if nb < 8:
+                continue
+            phases = np.arange(int(math.ceil(period)), dtype=np.float64)
+            idx = np.minimum(np.rint(phases[:, None] + np.arange(nb)[None, :] * period).astype(np.int64), n - 1)
+            sums = onset[idx].sum(axis=1)
+            j = int(np.argmax(sums))
+            if sums[j] > best[0]:
+                best = (float(sums[j]), float(bpm), float(j), float(sums.mean()))
+        return best
+
+    def conf_of(b):
+        return 0.0 if b[0] <= 0 else (b[0] - b[3]) / b[0]
+
+    m = min(onset.size, int(fps * 120))
+    seg = onset[:m] - onset[:m].mean()
+    spec = np.fft.rfft(seg, 2 * m)
+    ac = np.fft.irfft(spec * np.conj(spec))[:m]
+    lo, hi = int(fps * 60 / 180), int(fps * 60 / 70)
+    if hi <= lo + 1 or hi >= m:
+        return None
+    auto = fps * 60 / (lo + int(np.argmax(ac[lo:hi])))
+    centers: list[float] = []
+    for c0 in ([float(bpm_hint)] if bpm_hint and bpm_hint > 0 else []) + [auto]:
+        for c in (c0, c0 * 2, c0 / 2):
+            if 60 <= c <= 200 and all(abs(c - d) > 1.5 for d in centers):
+                centers.append(c)
+    results = [comb(np.arange(c - 1.5, c + 1.5001, 0.05)) for c in centers]
+    results = [r_ for r_ in results if r_[1] > 0]
+    if not results:
+        return None
+    # Halbes Tempo wirkt im Kamm immer etwas "deutlicher" (weniger Schlaege,
+    # hoehere Spitze). Deshalb: fast gleich gut (85 %) reicht fuer das Tempo
+    # aus den Tags, sonst fuer das doppelte Tempo.
+    top = max(conf_of(r_) for r_ in results)
+    good = [r_ for r_ in results if conf_of(r_) >= 0.85 * top]
+    tagged = [r_ for r_ in good if bpm_hint and abs(r_[1] - bpm_hint) <= 2]
+    coarse = tagged[0] if tagged else max(good, key=lambda r_: r_[1])
+    fine = comb(np.arange(coarse[1] - 0.06, coarse[1] + 0.0601, 0.005))
+    period = fps * 60.0 / fine[1]
+    return {"bpm_f": round(fine[1], 3),
+            "beat_off": round((fine[2] % period) / fps, 4),
+            "beat_conf": round(max(0.0, min(1.0, conf_of(fine))), 3)}
+
+def _grid_from_mik(g: dict, cues_ms: list) -> dict:
+    """Gemessenes Raster mit den Cue-Punkten von Mixed In Key verfeinern.
+
+    Die Cues liegen auf Taktanfaengen (Phrasen); der Abstand erster–letzter
+    Cue liefert das Tempo auf Tausendstel genau. Passt das nicht zur eigenen
+    Messung (mehr als 0,5 % Abweichung), bleibt die Messung.
+    Die Lage der Schlaege kommt bewusst weiter aus der eigenen Messung: die
+    MIK-Cues liegen systematisch 40-60 ms daneben (anderer MP3-Decoder,
+    gemessen an 12 Titeln 09/2026). Gemischt mit gemessenen Titeln wuerden
+    die Schlaege sonst genau um diesen Versatz stolpern.
+    """
+    cues = sorted(c / 1000.0 for c in cues_ms if c >= 0)
+    bpm = float(g.get("bpm_f") or 0)
+    if len(cues) < 2 or bpm <= 0:
+        return g
+    span = cues[-1] - cues[0]
+    beat = 60.0 / bpm
+    nb = round(span / beat)
+    if nb < 8:
+        return g
+    bpm_mik = 60.0 * nb / span
+    if abs(bpm_mik - bpm) / bpm > 0.005:
+        return g
+    beat = 60.0 / bpm_mik
+    return {**g, "bpm_f": round(bpm_mik, 3), "beat_off": round(float(g.get("beat_off") or 0) % beat, 4),
+            "beat_conf": max(float(g.get("beat_conf") or 0), 0.6), "grid_src": "mik"}
+
+_CHANGELOG_API  = "https://api.github.com/repos/SynthiSeisa/SynthiMIX/releases?per_page=40"
+_CHANGELOG_FILE = BASE_DIR / "changelog_cache.json"
+
+def _changelog_sync() -> list[dict]:
+    """Release-Notes aller Versionen von GitHub; offline die zuletzt geladenen."""
+    try:
+        req = _urllib_req.Request(_CHANGELOG_API, headers={"User-Agent": "SynthiMIX",
+                                                            "Accept": "application/vnd.github+json"})
+        with _urllib_req.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8", errors="replace"))
+        items = [{"tag": x.get("tag_name", ""), "name": x.get("name") or x.get("tag_name", ""),
+                  "date": (x.get("published_at") or "")[:10], "body": x.get("body") or ""}
+                 for x in data if not x.get("draft") and not x.get("prerelease")]
+        if items:
+            _save_json(_CHANGELOG_FILE, items)
+            return items
+    except Exception as e:
+        print(f"[changelog] offline oder Fehler: {e}", flush=True)
+    cached = _load_json(_CHANGELOG_FILE, [])
+    return cached if isinstance(cached, list) else []
+
+async def _send_beatgrid(ws, path: str):
+    """Raster aus der Bibliothek/dem Cache oder frisch messen und schicken."""
+    lt = next((x for x in _state.get("library", []) if x.get("path") == path), None)
+    g = None
+    if lt and lt.get("bpm_f"):
+        g = {"bpm_f": lt["bpm_f"], "beat_off": lt.get("beat_off", 0), "beat_conf": lt.get("beat_conf", 0)}
+    elif path in _beatgrid_cache:
+        g = _beatgrid_cache[path]
+    elif os.path.isfile(path):
+        hint = (lt or {}).get("bpm") or 0
+        if not hint:
+            q = next((x for x in _state.get("queue", []) if x.get("path") == path), None)
+            hint = (q or {}).get("bpm") or 0
+        loop = asyncio.get_running_loop()
+        g = await loop.run_in_executor(None, _beatgrid_sync, path, float(hint or 0))
+        if g and lt and lt.get("mik_cues"):
+            g = _grid_from_mik(g, lt["mik_cues"])
+        if g:
+            _beatgrid_cache[path] = g
+            if lt is not None:
+                lt.update(g)
+                save_library()
+    try:
+        await ws.send_text(json.dumps({"type": "beatgrid", "path": path, **(g or {"bpm_f": 0})}))
+    except Exception:
+        pass
+
 def _cutoff_khz_sync(path: str, duration: float = 0) -> float:
     """Obere Grenzfrequenz in kHz aus 10 s ab 40 % der Laenge. 0 = nicht messbar."""
     if not _numpy_ok():
@@ -1451,6 +1880,9 @@ async def _quality_replace(path: str, url: str, ws: WebSocket):
         lt["mtime"]        = int(os.path.getmtime(path))
         lt["meta_rev"]     = _TAG_META_REV
         lt.pop("unanalyzable", None)
+        for k in ("bpm_f", "beat_off", "beat_conf"):   # neue Datei, neues Raster
+            lt.pop(k, None)
+        _beatgrid_cache.pop(path, None)
         _unanalyzable_paths.discard(path)
         lt["cutoff_khz"]   = await loop.run_in_executor(None, _cutoff_khz_sync, path, dur)
         for item in _state["queue"]:
@@ -2961,6 +3393,10 @@ def _spotify_download_active() -> bool:
 
 async def _install_spotdl(ws):
     async def _send(t, **kw):
+        if ws is None:                       # automatische Aktualisierung
+            if kw.get("text"):
+                print(f"[spotdl] {kw['text']}", flush=True)
+            return
         try: await ws.send_text(json.dumps({"type": t, **kw}))
         except Exception: pass
 
@@ -3605,6 +4041,15 @@ async def handle_message(ws: WebSocket, msg: dict):
         data = await compute_waveform(path)
         await ws.send_text(json.dumps({"type": "waveform", "path": path, "data": data}))
 
+    elif t == "get_changelog":
+        items = await asyncio.get_running_loop().run_in_executor(None, _changelog_sync)
+        await ws.send_text(json.dumps({"type": "changelog", "items": items}))
+
+    elif t == "get_beatgrid":
+        path = msg.get("path", "")
+        if path:
+            asyncio.create_task(_send_beatgrid(ws, path))
+
     elif t == "get_waveform_next":
         path = msg.get("path", "")
         data = await compute_waveform(path)
@@ -3901,6 +4346,39 @@ async def handle_message(ws: WebSocket, msg: dict):
         _state["auto_remove_played"] = bool(msg.get("enabled", False))
         save_settings()
         await broadcast({"type": "auto_remove_played", "enabled": _state["auto_remove_played"]})
+
+    elif t == "queue_harmonic":
+        # Nur was noch kommt (ungespielt, nach dem laufenden Titel) umsortieren
+        q   = _state["queue"]
+        ci  = _state["current_idx"]
+        lib = {lt.get("path"): lt for lt in _state.get("library", [])}
+        def info(qt):
+            lt = lib.get(qt.get("path"), {})
+            return {**qt, "key": lt.get("key") or qt.get("key") or "",
+                    "energy": lt.get("energy") or qt.get("energy") or 0,
+                    "bpm": lt.get("bpm") or qt.get("bpm") or 0,
+                    "bpm_f": lt.get("bpm_f") or 0,
+                    "lufs": lt.get("lufs", qt.get("lufs", -99))}
+        future = [(i, q[i]) for i in range(ci + 1, len(q)) if not q[i].get("played")]
+        boosts: set[int] = set()
+        if len(future) > 1:
+            idxs, items = zip(*future)
+            infos = [info(qt) for qt in items]
+            back = {id(x): qt for x, qt in zip(infos, items)}
+            start = info(q[ci]) if 0 <= ci < len(q) else None
+            order, boosts = await asyncio.get_running_loop().run_in_executor(None, _harmonic_order, start, infos)
+            for n, (i, x) in enumerate(zip(idxs, order)):
+                qt = back[id(x)]
+                if n in boosts:
+                    qt["energy_boost"] = True
+                else:
+                    qt.pop("energy_boost", None)
+                q[i] = qt
+            save_queue()
+            await push_queue()
+        unknown = sum(1 for _, qt in future if not _key_to_camelot(info(qt).get("key")))
+        await ws.send_text(json.dumps({"type": "harmonic_result", "count": len(future),
+                                       "boosts": len(boosts), "unknown_keys": unknown}))
 
     elif t == "queue_shuffle_unplayed":
         q   = _state["queue"]
@@ -4252,10 +4730,12 @@ async def handle_message(ws: WebSocket, msg: dict):
         asyncio.create_task(_update_ytdlp(ws))
 
     elif t == "check_tool_updates":
-        asyncio.create_task(_tools_check_once())
+        asyncio.create_task(_tools_check_once(force=True))
 
     elif t == "dismiss_ytdlp_updated":
-        _state.setdefault("tool_updates", {}).pop("ytdlp_updated", None)
+        # Ein OK fuer alle Hinweise "wurde aktualisiert"
+        for k in ("ytdlp_updated", "spotdl_updated", "ffmpeg_updated"):
+            _state.setdefault("tool_updates", {}).pop(k, None)
         save_settings()
         await broadcast({"type": "tool_updates", "items": _state["tool_updates"]})
 
@@ -4478,6 +4958,101 @@ def _scan_folders() -> list[str]:
             return folders
     return folders + [dl]
 
+_FFMPEG_API   = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest"
+_FFMPEG_ASSET = "ffmpeg-master-latest-win64-gpl.zip"
+_FFMPEG_MAX_AGE_DAYS = 60      # erst ab diesem Rueckstand neu laden (~200 MB)
+
+def _ffmpeg_version_sync(exe: str | None = None) -> str:
+    try:
+        r = subprocess.run([exe or FFMPEG, "-version"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=10, creationflags=_NO_WINDOW)
+        first = (r.stdout or "").splitlines()[0] if r.stdout else ""
+        m = re.search(r"version\s+(\S+)", first)
+        return m.group(1) if m else ""
+    except Exception:
+        return ""
+
+def _ffmpeg_latest_sync() -> dict:
+    """Neuester Build bei BtbN: {date, url, size} oder {}."""
+    try:
+        req = _urllib_req.Request(_FFMPEG_API, headers={"User-Agent": "SynthiMIX",
+                                                         "Accept": "application/vnd.github+json"})
+        with _urllib_req.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read())
+        for a in data.get("assets", []):
+            if a.get("name") == _FFMPEG_ASSET:
+                date = (a.get("updated_at") or data.get("published_at") or "")[:10].replace("-", "")
+                return {"date": date, "url": a["browser_download_url"], "size": a.get("size", 0)}
+    except Exception:
+        pass
+    return {}
+
+def _days_between(a: str, b: str) -> int:
+    from datetime import datetime
+    try:
+        return (datetime.strptime(b, "%Y%m%d") - datetime.strptime(a, "%Y%m%d")).days
+    except Exception:
+        return 0
+
+def _install_ffmpeg_sync(info: dict) -> str:
+    """Zip laden, ffmpeg.exe und ffprobe.exe in tools/ffmpeg-<datum>/ legen,
+    pruefen, dass sie laufen. Liefert den neuen Ordner oder ''."""
+    FFMPEG_TOOLS_DIR.mkdir(parents=True, exist_ok=True)
+    target = FFMPEG_TOOLS_DIR / f"ffmpeg-{info['date']}"
+    tmp_zip = FFMPEG_TOOLS_DIR / f"ffmpeg-{info['date']}.zip.part"
+    tmp_dir = FFMPEG_TOOLS_DIR / f"ffmpeg-{info['date']}.part"
+    try:
+        _urllib_req.urlretrieve(info["url"], tmp_zip)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        tmp_dir.mkdir(parents=True)
+        with zipfile.ZipFile(tmp_zip) as z:
+            for name in z.namelist():
+                base = name.rsplit("/", 1)[-1].lower()
+                if base in ("ffmpeg.exe", "ffprobe.exe"):
+                    with z.open(name) as src, open(tmp_dir / base, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+        if not _ffmpeg_version_sync(str(tmp_dir / "ffmpeg.exe")):
+            raise RuntimeError("neue ffmpeg.exe startet nicht")
+        if not (tmp_dir / "ffprobe.exe").exists():
+            raise RuntimeError("ffprobe.exe fehlt im Paket")
+        shutil.rmtree(target, ignore_errors=True)
+        tmp_dir.rename(target)
+        return str(target)
+    except Exception as e:
+        print(f"[ffmpeg] Update fehlgeschlagen: {e}", flush=True)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return ""
+    finally:
+        try: tmp_zip.unlink()
+        except Exception: pass
+
+async def _ffmpeg_check(tu: dict, now: int, force: bool = False):
+    """Hoechstens einmal die Woche bei BtbN nachsehen; ist die eigene Version
+    mehr als zwei Monate aelter, mit Automatik neu laden, sonst Hinweis."""
+    global FFMPEG, FFPROBE
+    if sys.platform != "win32":
+        return
+    if not force and now - _state.get("ffmpeg_last_check", 0) < 7 * 86400:
+        return
+    loop = asyncio.get_running_loop()
+    lokal = await loop.run_in_executor(None, _ffmpeg_version_sync, None)
+    latest = await loop.run_in_executor(None, _ffmpeg_latest_sync)
+    _state["ffmpeg_last_check"] = now
+    lokal_date = _ffmpeg_build_date(lokal)
+    if not latest or not lokal_date:
+        return
+    alt = _days_between(lokal_date, latest["date"]) > _FFMPEG_MAX_AGE_DAYS
+    tu["ffmpeg"] = {"current": lokal_date, "latest": latest["date"], "available": alt}
+    if alt and _state.get("ytdlp_autoupdate", True):
+        print(f"[ffmpeg] Build {lokal_date} ist veraltet, lade {latest['date']}", flush=True)
+        folder = await loop.run_in_executor(None, _install_ffmpeg_sync, latest)
+        if folder:
+            FFMPEG  = str(Path(folder) / "ffmpeg.exe")
+            FFPROBE = str(Path(folder) / "ffprobe.exe")
+            tu["ffmpeg"] = {"current": latest["date"], "latest": latest["date"], "available": False}
+            tu["ffmpeg_updated"] = {"from": lokal_date, "to": latest["date"], "at": now}
+            await broadcast({"type": "tools_info", "ffmpeg_version": await loop.run_in_executor(None, _ffmpeg_version_sync, None)})
+
 def _ytdlp_version_sync() -> str:
     try:
         r = subprocess.run([YTDLP, "--version"], capture_output=True, text=True,
@@ -4506,7 +5081,7 @@ def _is_newer(latest: str, current: str) -> bool:
     a, b = _ver_tuple(latest), _ver_tuple(current)
     return bool(a) and bool(b) and a > b
 
-async def _tools_check_once():
+async def _tools_check_once(force: bool = False):
     """yt-dlp und spotdl mit dem neuesten Release auf GitHub vergleichen.
 
     Bisher lief die Pruefung nur fuer yt-dlp und nur mit eingeschalteter
@@ -4544,8 +5119,21 @@ async def _tools_check_once():
         if s_lokal and s_neueste:
             tu["spotdl"] = {"current": s_lokal, "latest": s_neueste.lstrip("v"),
                             "available": _is_newer(s_neueste, s_lokal)}
+            # Nur die von SynthiMIX geladene Exe selbst ersetzen — ein per pip
+            # oder von Hand installiertes spotdl gehoert dem Nutzer.
+            if (tu["spotdl"]["available"] and _state.get("ytdlp_autoupdate", True)
+                    and SPOTDL_LOCAL.exists() and not _spotify_download_active()):
+                await _install_spotdl(None)
+                s_neu = await loop.run_in_executor(None, _spotdl_version_sync)
+                if s_neu and s_neu != s_lokal:
+                    tu["spotdl_updated"] = {"from": s_lokal, "to": s_neu, "at": now}
     else:
         tu.pop("spotdl", None)
+
+    try:
+        await _ffmpeg_check(tu, now, force=force)
+    except Exception as e:
+        print(f"[ffmpeg] Pruefung fehlgeschlagen: {e}", flush=True)
 
     save_settings()
     await broadcast({"type": "tool_updates", "items": tu})
@@ -6177,7 +6765,7 @@ input[type=range]{height:var(--tap);accent-color:var(--accent);width:100%}
       <button id="normb" class="norm-btn on" onclick="toggleNorm()">Normalisierung an</button>
       <span id="normv" class="norm-val">-10 LUFS</span>
     </div>
-    <input type="range" id="normr" min="-23" max="-8" step="1" value="-10" oninput="onNorm(this.value)" onchange="flushNorm()" aria-label="Ziel-Lautst&#228;rke">
+    <input type="range" id="normr" min="-23" max="-5" step="1" value="-10" oninput="onNorm(this.value)" onchange="flushNorm()" aria-label="Ziel-Lautst&#228;rke">
     <div class="tg-row">
       <button id="amb" class="norm-btn" onclick="toggleAM()">Auto-Mix</button>
       <button id="rdb" class="norm-btn" onclick="toggleRadio()">Radio</button>

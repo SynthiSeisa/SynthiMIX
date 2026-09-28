@@ -39,3 +39,5 @@ bin/yt-dlp.exe
 *.tmp
 *.log
 .env
+changelog_cache.json
+tools/

@@ -1,7 +1,53 @@
 <script>
-  let { data = [], position = 0, onclick, introStart = 0, introEnd = -1, outroStart = -1, outroEnd = -1, height = 36, loading = false } = $props()
+  let { data = [], position = 0, onclick, introStart = 0, introEnd = -1, outroStart = -1, outroEnd = -1, height = 36, loading = false,
+        dragZone = null, onzonedrag = null, zoneTitle = '' } = $props()
 
   let canvas = $state(null)
+
+  // ── MIX-Zone ziehen ─────────────────────────────────────────────────────
+  // dragZone: 'outro' (laufender Titel) oder 'intro' (naechster Titel).
+  // onzonedrag(beginn, fertig) meldet den neuen Beginn der Zone (0…1).
+  let drag = null                  // { grab } Abstand Zeiger → Zonenbeginn
+  let hoverZone = $state(false)
+  let dragging  = $state(false)
+  let suppressClick = false
+  function zoneRange() {
+    if (dragZone === 'outro' && outroStart >= 0 && outroEnd > outroStart) return [outroStart, outroEnd]
+    if (dragZone === 'intro' && introEnd > 0 && introEnd > introStart) return [introStart, introEnd]
+    return null
+  }
+  function fracAt(e, el) {
+    const r = el.getBoundingClientRect()
+    return Math.max(0, Math.min(1, (e.clientX - r.left) / Math.max(1, r.width)))
+  }
+  function inZone(e, el) {
+    const z = zoneRange()
+    if (!z || !onzonedrag) return null
+    const f = fracAt(e, el), pad = 6 / Math.max(1, el.getBoundingClientRect().width)
+    return f >= z[0] - pad && f <= z[1] + pad ? { f, z } : null
+  }
+  function onDown(e) {
+    const hit = inZone(e, e.currentTarget)
+    if (!hit || e.button !== 0) return
+    e.preventDefault()
+    drag = { grab: hit.f - hit.z[0] }
+    dragging = true
+    suppressClick = true            // Klick in die Zone springt nicht dorthin
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+  function onMove(e) {
+    if (drag) { onzonedrag(Math.max(0, fracAt(e, e.currentTarget) - drag.grab), false); return }
+    hoverZone = !!inZone(e, e.currentTarget)
+  }
+  function onUp(e) {
+    if (!drag) return
+    onzonedrag(Math.max(0, fracAt(e, e.currentTarget) - drag.grab), true)
+    drag = null; dragging = false
+  }
+  function onClickWrap(e) {
+    if (suppressClick) { suppressClick = false; return }
+    onclick?.(e)
+  }
 
   // Die Farben stecken in CSS-Variablen, die das Canvas nicht von selbst
   // mitbekommt — beim Theme-Wechsel muss neu gezeichnet werden, sonst bleibt
@@ -26,11 +72,12 @@
     ctx.lineWidth = 1
     ctx.beginPath(); ctx.moveTo(a + 0.5, 0); ctx.lineTo(a + 0.5, h); ctx.stroke()
     ctx.beginPath(); ctx.moveTo(b - 0.5, 0); ctx.lineTo(b - 0.5, h); ctx.stroke()
-    if (label && (b - a) > 26 && h >= 16) {
+    if (label && (b - a) >= 20 && h >= 16) {
       ctx.fillStyle = theme.label
-      ctx.font = `700 ${Math.max(10, Math.min(12, Math.floor(h * 0.3)))}px 'Segoe UI', system-ui, sans-serif`
+      ctx.font = `700 ${(b - a) < 30 ? 9 : Math.max(10, Math.min(12, Math.floor(h * 0.3)))}px 'Segoe UI', system-ui, sans-serif`
       ctx.textBaseline = 'middle'
-      ctx.fillText(label, a + 4, h / 2)
+      ctx.textAlign = 'center'
+      ctx.fillText(label, (a + b) / 2, h / 2)
     }
   }
 
@@ -71,7 +118,7 @@
     }
 
     // ── Intro grey bar: [introStart, introEnd] — crossfade entry zone ──
-    if (introEnd > 0 && introEnd <= 1) greyZone(ctx, introStart, introEnd, w, h, 'INTRO', theme)
+    if (introEnd > 0 && introEnd <= 1) greyZone(ctx, introStart, introEnd, w, h, 'MIX', theme)
 
     // ── Outro grey bar: [outroStart, outroEnd] — the crossfade mix zone ──
     if (outroStart >= 0 && outroEnd > outroStart)
@@ -86,9 +133,12 @@
   }
 </script>
 
-<div class="waveform-wrap" style="height:{height}px"
+<div class="waveform-wrap" class:zone-hover={hoverZone} class:zone-drag={dragging} style="height:{height}px"
   role="slider" aria-valuenow={Math.round(position * 100)}
-  onclick={onclick} tabindex={onclick ? 0 : -1}>
+  title={hoverZone ? zoneTitle : ''}
+  onpointerdown={onDown} onpointermove={onMove} onpointerup={onUp} onpointercancel={onUp}
+  onpointerleave={() => { if (!drag) hoverZone = false }}
+  onclick={onClickWrap} tabindex={onclick ? 0 : -1}>
   <canvas bind:this={canvas}></canvas>
   {#if loading && data.length === 0}
     <div class="wf-loading"></div>
@@ -96,7 +146,9 @@
 </div>
 
 <style>
-  .waveform-wrap { width: 100%; cursor: pointer; border-radius: 2px; overflow: hidden; position: relative; }
+  .waveform-wrap { width: 100%; cursor: pointer; border-radius: 2px; overflow: hidden; position: relative; touch-action: none; }
+  .waveform-wrap.zone-hover { cursor: grab; }
+  .waveform-wrap.zone-drag  { cursor: grabbing; }
   canvas { width: 100%; height: 100%; display: block; }
   .wf-loading {
     position: absolute; inset: 0;

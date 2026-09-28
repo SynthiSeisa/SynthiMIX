@@ -11,6 +11,10 @@ export const library     = writable([])
 export const scanStatus  = writable('')
 export const waveform       = writable([])
 export const waveformNext   = writable([])
+// Taktraster je Pfad fuer den Beat-Sync: { bpm, off, conf } (bpm 0 = unbekannt)
+export const beatGrids      = writable({})
+// Ergebnis von "Harmonisch sortieren": { count, boosts, unknown_keys, at }
+export const harmonicResult = writable(null)
 export const searchResults  = writable(null)   // null = panel closed
 export const settings       = writable({ volume: 80, crossfade_s: 8 })
 export const playlists      = writable([])
@@ -45,6 +49,10 @@ export const trackIdentified     = writable(null)   // null | { title, artist, a
 export const fpcalcInstalling    = writable(false)
 export const fpcalcInstallError  = writable(null)
 export const wishes              = writable([])   // Musikwuensche der Gaeste
+export const wishesOpen          = writable(false) // Wunschliste offen (Titelleiste, Hinweis-Leiste)
+export const wishesLoaded        = writable(false) // erste Wunschliste vom Backend da
+// Release-Notes aller Versionen (von GitHub, offline aus dem Cache): [{tag, name, date, body}]
+export const changelog           = writable(null)
 // Eigener Store: im settings-Store landen nur volume/crossfade_s, dort kam der
 // Wert nie an — der Schalter stand in 1.4.2 dadurch immer auf aus.
 export const ytdlpAutoupdate     = writable(true)
@@ -103,6 +111,8 @@ const APP_SETTINGS_DEFAULTS = {
   cfCurve:            'cosine',
   introSkipSec:       0,
   beatAlignCf:        true,
+  tempoMatch:         true,    // Tempo des naechsten Titels im Uebergang angleichen
+  dupeAllowFolders:   [],      // Ordner, in denen Kopien nicht als Duplikat zaehlen
   keyNotation:        'musical',   // Tonart als 'musical' (F♯m) oder 'camelot' (11A)
   pauseFadeMs:        500,   // Aus-/Einblenden bei Pause und Fortsetzen
   volumeFadeMs:       200,   // Lautstaerke-Aenderungen glaetten
@@ -198,6 +208,10 @@ function connect() {
       case 'scan_status':   scanStatus.set(msg.text); break
       case 'waveform':        waveform.set(msg.data ?? []); break
       case 'waveform_next':   waveformNext.set(msg.data ?? []); break
+      case 'harmonic_result': harmonicResult.set({ ...msg, at: Date.now() }); break
+      case 'beatgrid':
+        beatGrids.update(g => ({ ...g, [msg.path]: { bpm: msg.bpm_f || 0, off: msg.beat_off || 0, conf: msg.beat_conf || 0 } }))
+        break
       case 'playlists':       playlists.set(msg.items ?? []); break
       case 'download_tree':   downloadTree.set(msg.tree ?? { folders: [], files: [] }); downloadTreeLoaded.set(true); break
       case 'search_results':  searchResults.set(msg); break
@@ -302,7 +316,8 @@ function connect() {
       case 'fpcalc_install_progress': fpcalcInstalling.set(true);  fpcalcInstallError.set(null); break
       case 'fpcalc_install_done':     fpcalcInstalling.set(false); break
       case 'fpcalc_install_error':    fpcalcInstalling.set(false); fpcalcInstallError.set(msg.text ?? 'Fehler'); break
-      case 'wishes':                  wishes.set(msg.items || []); break
+      case 'wishes':                  wishes.set(msg.items || []); wishesLoaded.set(true); break
+      case 'changelog':               changelog.set(msg.items || []); break
       case 'watched_folders':         watchedFolders.set(msg.items || []); break
       case 'excluded_folders':        excludedFolders.set(msg.items || []); break
       case 'tool_updates':            toolUpdates.set(msg.items || {}); break

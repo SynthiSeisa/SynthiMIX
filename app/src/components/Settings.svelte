@@ -11,7 +11,7 @@
            lastfmApiKey, acoustidApiKey,
            fpcalcInstalling, fpcalcInstallError,
            spotdlInstalling, spotdlInstallError, spotdlInstallText,
-           watchedFolders, watchedFolderImpact, ytdlpAutoupdate, excludedFolders, toolUpdates, servicesTest, setupOpen } from '../stores/ws.js'
+           watchedFolders, watchedFolderImpact, ytdlpAutoupdate, excludedFolders, toolUpdates, servicesTest, setupOpen, changelog } from '../stores/ws.js'
 
   let tab = $state('playback')
 
@@ -66,7 +66,8 @@
 
   // Tabs mit offenem Update-Hinweis bekommen einen Punkt
   const tabNotice = $derived({
-    system:   !!($toolUpdates.ytdlp?.available || $toolUpdates.ytdlp_updated),
+    system:   !!($toolUpdates.ytdlp?.available || $toolUpdates.ytdlp_updated || $toolUpdates.spotdl_updated
+                  || $toolUpdates.ffmpeg?.available || $toolUpdates.ffmpeg_updated),
     download: !!$toolUpdates.spotdl?.available,
   })
   let toolCheckRunning = $state(false)
@@ -76,6 +77,45 @@
     setTimeout(() => toolCheckRunning = false, 8000)
   }
   $effect(() => { void $toolUpdates; toolCheckRunning = false })
+
+  // ── Was ist neu: Release-Notes aller Versionen ──────────────────────────
+  const APP_VERSION = __APP_VERSION__
+  $effect(() => { if (tab === 'info' && $changelog === null) send({ type: 'get_changelog' }) })
+  // Release-Notes sind schlichtes Markdown: Ueberschriften, **fett**, Listen
+  // mit eingerueckten Folgezeilen. Hier ohne HTML-Einschleusen in Bloecke zerlegt.
+  function parseNotes(body) {
+    const out = []
+    let ul = null, para = null
+    for (const raw of (body || '').replace(/\r/g, '').split('\n')) {
+      const line = raw.trimEnd()
+      if (!line.trim()) { ul = null; para = null; continue }
+      if (/^#{1,6}\s/.test(line)) {
+        ul = null; para = null
+        if (!/^#+\s+Neues in/i.test(line)) out.push({ t: 'h', x: line.replace(/^#+\s*/, '') })
+        continue
+      }
+      const bold = line.match(/^\*\*(.+)\*\*:?$/)
+      if (bold) { ul = null; para = null; out.push({ t: 'h', x: bold[1] }); continue }
+      const li = line.match(/^\s*[-*•]\s+(.*)$/)
+      if (li) {
+        if (!ul) { ul = { t: 'ul', items: [] }; out.push(ul); para = null }
+        ul.items.push(li[1]); continue
+      }
+      if (ul && /^\s+/.test(raw)) { ul.items[ul.items.length - 1] += ' ' + line.trim(); continue }
+      if (para) para.x += ' ' + line.trim()
+      else { ul = null; para = { t: 'p', x: line.trim() }; out.push(para) }
+    }
+    return out
+  }
+  function splitBold(t) { return t.split('**').map((x, i) => [i % 2 === 1, x]) }
+  function fmtDate(d) { return d && d.length >= 10 ? `${d.slice(8, 10)}.${d.slice(5, 7)}.${d.slice(0, 4)}` : '' }
+  // ffmpeg-Builds heissen "N-125258-g…-20260624": fuer Menschen das Datum
+  function fmtBuild(d) { return d && d.length === 8 ? `${d.slice(6)}.${d.slice(4, 6)}.${d.slice(0, 4)}` : (d ?? '') }
+  function fmtFfmpeg(v) {
+    if (!v) return '—'
+    const m = v.match(/(20\d{2})(\d{2})(\d{2})\b/)
+    return m ? 'Build ' + fmtBuild(m[0]) : v
+  }
 
   // ── Queue-Ende: virtuelles Radio aus zwei stores ──────────────────────────
   const queueEnd = $derived(
@@ -308,7 +348,7 @@
             {#if $appSettings.normalizeVolume}
               <div class="row indent">
                 <span class="lbl">Ziel-LUFS</span>
-                <input type="range" min="-23" max="-8" step="1" value={$appSettings.targetLUFS}
+                <input type="range" min="-23" max="-5" step="1" value={$appSettings.targetLUFS}
                   oninput={(e) => { const v = +e.target.value; appSettings.update(s => ({...s, targetLUFS: v})) }}
                   onchange={(e) => send({type:'set_normalize_volume', value: $appSettings.normalizeVolume, target_lufs: +e.target.value})} />
                 <span class="val">{$appSettings.targetLUFS} LUFS</span>
@@ -447,18 +487,27 @@
           </div>
 
           <div class="group">
-            <div class="group-title">Beat-aligned Crossfade</div>
-            <div class="hint">Startet den Übergang exakt auf der nächsten Taktgrenze (±1 Beat Toleranz). Erfordert BPM-Analyse.</div>
+            <div class="group-title">Auf den Takt</div>
+            <div class="hint">SynthiMIX misst für den laufenden und den nächsten Titel das genaue Tempo und wo die Schläge liegen (etwa 1 s je Titel).</div>
             <div class="row" style="margin-top:8px">
-              <span class="lbl">Aktiv</span>
-              <button class="tog {$appSettings.beatAlignCf ? 'on' : ''}"
+              <span class="lbl">Schläge übereinanderlegen</span>
+              <button class="tog {$appSettings.beatAlignCf ? 'on' : ''}" aria-label="Schläge übereinanderlegen"
                 onclick={() => appSettings.update(s => ({...s, beatAlignCf: !s.beatAlignCf}))}></button>
             </div>
+            <div class="row">
+              <span class="lbl">Tempo angleichen</span>
+              <button class="tog {$appSettings.tempoMatch !== false ? 'on' : ''}" aria-label="Tempo angleichen"
+                onclick={() => appSettings.update(s => ({...s, tempoMatch: s.tempoMatch === false}))}></button>
+            </div>
             <div class="hint" style="margin-top:4px">
-              {#if $appSettings.beatAlignCf}
-                Crossfade-Trigger wird auf den nächsten Beat-Boundary verschoben (max. ±500ms bei 120 BPM).
+              {#if $appSettings.beatAlignCf && $appSettings.tempoMatch !== false}
+                Der Übergang beginnt auf einem Schlag, der neue Titel läuft währenddessen im Tempo des alten (Tonhöhe bleibt) und seine Schläge werden laufend auf die des alten gezogen. Danach gleitet das Tempo in etwa 20 s zurück aufs Original. Bei mehr als 8 % Tempo-Unterschied oder unklarem Takt (Live-Schlagzeug) wird nur geblendet.
+              {:else if $appSettings.beatAlignCf}
+                Der Übergang beginnt auf einem Schlag; ohne Tempo-Angleich halten die Schläge nur bei fast gleichem Tempo.
+              {:else if $appSettings.tempoMatch !== false}
+                Nur das Tempo wird angeglichen, die Schläge liegen nicht unbedingt übereinander.
               {:else}
-                Crossfade startet zum fixen Zeitpunkt ohne Beat-Ausrichtung.
+                Der Übergang startet zum festen Zeitpunkt ohne Takt-Ausrichtung.
               {/if}
             </div>
             <BlendSketch kind="beat" value={$appSettings.beatAlignCf} />
@@ -808,32 +857,45 @@
                 Neue Version {$toolUpdates.ytdlp.latest} verfügbar{$ytdlpAutoupdate ? ' — wird installiert, sobald kein Download läuft' : ''}.
                 Ältere Versionen scheitern bei YouTube früher oder später mit „403 Forbidden".
               </div>
-            {:else if $toolUpdates.ytdlp_updated}
+            {/if}
+
+            <div class="tool-row">
+              <span class="tool-name">ffmpeg</span>
+              <span class="tool-ver" title={$toolsInfo.ffmpeg_version ?? ''}>{fmtFfmpeg($toolsInfo.ffmpeg_version)}</span>
+            </div>
+            {#if $toolUpdates.ffmpeg?.available}
+              <div class="notice upd-note">
+                Neuerer ffmpeg-Build vom {fmtBuild($toolUpdates.ffmpeg.latest)}{$ytdlpAutoupdate ? ' — wird automatisch geladen (ca. 200 MB)' : ' verfügbar'}.
+              </div>
+            {/if}
+
+            {#if $toolUpdates.ytdlp_updated || $toolUpdates.spotdl_updated || $toolUpdates.ffmpeg_updated}
               <div class="notice ok upd-note">
-                Automatisch aktualisiert: {$toolUpdates.ytdlp_updated.from} → {$toolUpdates.ytdlp_updated.to}
+                Automatisch aktualisiert:
+                {[$toolUpdates.ytdlp_updated && `yt-dlp ${$toolUpdates.ytdlp_updated.from} → ${$toolUpdates.ytdlp_updated.to}`,
+                  $toolUpdates.spotdl_updated && `spotdl ${$toolUpdates.spotdl_updated.from} → ${$toolUpdates.spotdl_updated.to}`,
+                  $toolUpdates.ffmpeg_updated && `ffmpeg ${fmtBuild($toolUpdates.ffmpeg_updated.from)} → ${fmtBuild($toolUpdates.ffmpeg_updated.to)}`]
+                  .filter(Boolean).join(' · ')}
                 <button class="btn btn-sm" onclick={() => send({ type: 'dismiss_ytdlp_updated' })}>OK</button>
               </div>
             {/if}
             <div class="row">
-              <span class="lbl">Automatisch aktuell halten</span>
+              <span class="lbl">Werkzeuge automatisch aktuell halten</span>
               <button class="tog {$ytdlpAutoupdate ? 'on' : ''}"
                 onclick={() => send({ type: 'set_ytdlp_autoupdate', value: !$ytdlpAutoupdate })}></button>
             </div>
             <div class="hint" style="margin-bottom:10px">
-              Prüft einmal täglich auf eine neue yt-dlp-Version. YouTube ändert
-              regelmäßig etwas, wodurch ältere Versionen Downloads mit „403 Forbidden"
-              abbrechen — ohne dass man der App ansieht, woran es liegt. Ohne Automatik
-              gibt es stattdessen einen Hinweis (Punkt am Zahnrad).
+              yt-dlp und spotdl werden täglich geprüft und ersetzt, sobald kein Download läuft —
+              YouTube ändert regelmäßig etwas, wodurch ältere Versionen mit „403 Forbidden" abbrechen.
+              ffmpeg wird wöchentlich geprüft und erst neu geladen, wenn der eigene Build mehr als
+              zwei Monate alt ist (das Paket ist groß). Ohne Automatik gibt es stattdessen einen
+              Hinweis (Punkt am Zahnrad). Ein selbst installiertes spotdl bleibt unangetastet.
             </div>
             <div class="row">
               <span class="lbl">Auf Updates prüfen</span>
               <button class="btn btn-sm" onclick={checkToolUpdates} disabled={toolCheckRunning}>
                 {toolCheckRunning ? 'Prüfe…' : 'Jetzt prüfen'}
               </button>
-            </div>
-            <div class="tool-row">
-              <span class="tool-name">ffmpeg</span>
-              <span class="tool-ver">{$toolsInfo.ffmpeg_version ?? '—'}</span>
             </div>
             {#if $updateProgress}
               <div class="upd-status">{$updateProgress.text}</div>
@@ -911,6 +973,35 @@
 
         <!-- ── INFO ───────────────────────────────────────────────────── -->
         {:else if tab === 'info'}
+
+          {#snippet inline(text)}{#each splitBold(text) as [b, part]}{#if b}<b>{part}</b>{:else}{part}{/if}{/each}{/snippet}
+          <div class="group">
+            <div class="group-title">Was ist neu</div>
+            {#if $changelog === null}
+              <div class="hint"><i class="ti ti-refresh spin"></i> Lade die Änderungen…</div>
+            {:else if !$changelog.length}
+              <div class="hint">Keine Verbindung zu GitHub — die Änderungen erscheinen, sobald SynthiMIX einmal online war.</div>
+            {:else}
+              <div class="cl-list">
+                {#each $changelog as rel, i (rel.tag)}
+                  <details class="cl" open={i === 0}>
+                    <summary>
+                      <span class="cl-ver">{rel.tag}</span>
+                      {#if rel.tag === 'v' + APP_VERSION}<span class="cl-cur">installiert</span>{/if}
+                      <span class="cl-date">{fmtDate(rel.date)}</span>
+                    </summary>
+                    <div class="cl-body">
+                      {#each parseNotes(rel.body) as blk}
+                        {#if blk.t === 'h'}<div class="cl-h">{@render inline(blk.x)}</div>
+                        {:else if blk.t === 'ul'}<ul>{#each blk.items as li}<li>{@render inline(li)}</li>{/each}</ul>
+                        {:else}<p>{@render inline(blk.x)}</p>{/if}
+                      {/each}
+                    </div>
+                  </details>
+                {/each}
+              </div>
+            {/if}
+          </div>
 
           <div class="group">
             <div class="group-title">Einrichtung</div>
@@ -1113,4 +1204,23 @@
   }
   .spin { display: inline-block; animation: spin 1s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  /* ── Was ist neu ─────────────────────────────────────────────────────── */
+  .cl-list { display: flex; flex-direction: column; gap: 6px; }
+  .cl { border: 1px solid var(--c-br1); border-radius: var(--r-m); background: var(--c-bg2); }
+  .cl summary {
+    display: flex; align-items: center; gap: 10px; padding: 8px 12px; cursor: pointer;
+    list-style: none; font-weight: 700; color: var(--c-tx1);
+  }
+  .cl summary::-webkit-details-marker { display: none; }
+  .cl summary::before { content: '›'; color: var(--c-tx4); transition: transform .12s; display: inline-block; width: 10px; }
+  .cl[open] summary::before { transform: rotate(90deg); }
+  .cl-ver { font-variant-numeric: tabular-nums; }
+  .cl-cur { font-size: var(--fs-cap); font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--c-accent-tx); }
+  .cl-date { margin-left: auto; font-weight: 400; font-size: var(--fs-sm); color: var(--c-tx4); font-variant-numeric: tabular-nums; }
+  .cl-body { padding: 0 14px 12px 32px; font-size: var(--fs-body); color: var(--c-tx2); line-height: 1.5; max-width: 62ch; }
+  .cl-h { margin: 10px 0 2px; font-weight: 700; color: var(--c-tx1); }
+  .cl-body ul { margin: 2px 0; padding-left: 18px; }
+  .cl-body li { margin: 2px 0; }
+  .cl-body p { margin: 8px 0 0; color: var(--c-tx3); }
+  .cl-body b { color: var(--c-tx1); }
 </style>

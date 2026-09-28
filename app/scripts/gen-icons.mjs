@@ -83,6 +83,11 @@ const ICONS = [
   ['circle-check',    'outline'],
   ['folder-off',      'outline'],
   ['arrow-back-up',   'outline'],
+  // 28.09.2026: Harmonisch sortieren, Energie-Schub, erlaubte Doppel-Ordner
+  ['wave-sine',       'outline'],
+  ['trending-up',     'outline'],
+  ['copy-check',      'outline'],
+  ['copy-off',        'outline'],
 ]
 
 function maskUrl(name, variant) {

@@ -3,7 +3,8 @@
   import { untrack, onMount } from 'svelte'
   import { keyCompat } from '../lib/keys.js'
   import KeyChip from './KeyChip.svelte'
-  import { library, playerState, nowPlaying, queue, waveform, waveformNext, settings, playMode, send, autoMixEnabled, appSettings, introSkipPaths, skipNextCrossfade, livePositionMs } from '../stores/ws.js'
+  import { library, playerState, nowPlaying, queue, waveform, waveformNext, settings, playMode, send, autoMixEnabled, appSettings, introSkipPaths, skipNextCrossfade, livePositionMs, beatGrids } from '../stores/ws.js'
+  import { createSync, glideRate, alignedStart } from '../lib/beatsync.js'
   import Waveform from './Waveform.svelte'
 
   let elA = $state(null)
@@ -23,6 +24,39 @@
   let cfCancelled  = false   // cancels pending canplay.play() on pause
   let loadedUrl    = ''
 
+  // ── Beat-Sync und Anzeige des Uebergangs ──────────────────────────────────
+  let cfSync       = null            // Regelkreis waehrend des Uebergangs (lib/beatsync.js)
+  let _stopGlide   = () => {}        // Tempo nach dem Uebergang langsam zurueck auf 100 %
+  let blendP       = $state(0)       // Fortschritt des automatischen Uebergangs, 0…1
+  let blendNextPos = $state(0)       // Position im naechsten Titel waehrend des Uebergangs
+  let cfStartAt = 0, cfLenMs = 0     // fuer die Animation
+  function gridOf(path) {
+    const g = path ? get(beatGrids)[path] : null
+    return g && g.bpm > 0 ? g : null
+  }
+  function startSync(oldEl, newEl, oldPath, newPath) {
+    const cfg = get(appSettings)
+    if (!cfg.beatAlignCf && !cfg.tempoMatch) return null
+    return createSync(oldEl, newEl, gridOf(oldPath), gridOf(newPath),
+                      { tempo: cfg.tempoMatch !== false, phase: !!cfg.beatAlignCf })
+  }
+  function endSync(el) {
+    if (!cfSync) return
+    cfSync.settle(); cfSync = null
+    _stopGlide(); _stopGlide = glideRate(el, 20000)
+  }
+  // Animation: der naechste Titel gleitet waehrend des Uebergangs nach oben
+  function _blendLoop() {
+    if (!cfActive || cfLenMs <= 0) { blendP = 0; return }
+    blendP = Math.min(1, (performance.now() - cfStartAt) / cfLenMs)
+    requestAnimationFrame(_blendLoop)
+  }
+
+  // ── Mix-Zonen per Ziehen verschieben (gilt nur fuer diesen Uebergang) ─────
+  let outroOverride = $state(null)   // { path, frac }: Beginn der MIX-Zone im laufenden Titel
+  let introOverride = $state(null)   // { path, frac }: Einstieg im naechsten Titel
+  let zoneDragging  = false
+
   let audioCtx = null
   let gainA = null, gainB = null
   let lufsA = $state(-99)
@@ -37,8 +71,12 @@
     if (!_volDragging) {
       volume = $settings.volume
       const el = cur()
-      if (el && !cfActive && !cfRafActive && !el.paused) rampVolume(el, volume / 100, untrack(() => $appSettings.volumeFadeMs ?? 200))
-      else if (el && !cfActive && !cfRafActive) el.volume = volume / 100
+      // Waehrend der Pause-Blende (spielt noch, aber "playing" ist schon aus)
+      // nichts anfassen — sonst ersetzt die Rampe das Ausblenden und der Titel
+      // pausiert nie.
+      const playingNow = untrack(() => $playerState.playing)
+      if (el && !cfActive && !cfRafActive && !el.paused && playingNow) rampVolume(el, volume / 100, untrack(() => $appSettings.volumeFadeMs ?? 200))
+      else if (el && !cfActive && !cfRafActive && el.paused) el.volume = volume / 100
     }
   })
 
@@ -68,8 +106,15 @@
     if (!elA || !elB || audioCtx) return
     try {
       audioCtx = new AudioContext()
-      gainA = audioCtx.createGain(); gainA.connect(audioCtx.destination)
-      gainB = audioCtx.createGain(); gainB.connect(audioCtx.destination)
+      // Limiter vor dem Ausgang: bei lautem Normalisierungsziel (bis -5 LUFS)
+      // werden leise Titel stark angehoben — Spitzen sollen nicht verzerren.
+      // Bei normalen Pegeln greift er nicht ein.
+      const limiter = audioCtx.createDynamicsCompressor()
+      limiter.threshold.value = -1.5; limiter.knee.value = 0; limiter.ratio.value = 20
+      limiter.attack.value = 0.002;   limiter.release.value = 0.15
+      limiter.connect(audioCtx.destination)
+      gainA = audioCtx.createGain(); gainA.connect(limiter)
+      gainB = audioCtx.createGain(); gainB.connect(limiter)
       audioCtx.createMediaElementSource(elA).connect(gainA)
       audioCtx.createMediaElementSource(elB).connect(gainB)
     } catch (e) { console.warn('AudioContext:', e) }
@@ -256,6 +301,7 @@
   function _getNextIntroStart() {
     const cfg = get(appSettings)
     const nt  = get(queue)[_nextIdx()]
+    if (introOverride && nt?.path === introOverride.path) return introOverride.frac
     // Per-track one-shot skip (queue context menu "Intro überspringen") — always max
     if (nt?.path && get(introSkipPaths).has(nt.path)) {
       introSkipPaths.update(s => { const n = new Set(s); n.delete(nt.path); return n })
@@ -277,6 +323,8 @@
     if (durMs <= 0 || cfS <= 0) return -1
     const cfg    = get(appSettings)
     const cfFrac = Math.min(0.9, (cfS * 1000) / durMs)
+    if (outroOverride && outroOverride.path === get(nowPlaying)?.path)
+      return Math.max(0.02, Math.min(outroOverride.frac, 1 - cfFrac))
     const sil    = _outroSilence()
     let trig
     if (sil >= 0) {
@@ -297,9 +345,11 @@
   const _cfFrac = $derived(durMs > 0 && cfS > 0 ? Math.min(0.9, (cfS * 1000) / durMs) : 0)
 
   // Outro grey "mix" bar on the current track: [trigger, trigger + crossfade]
+  // Die Zone steht immer da (auch ohne Smart Fade), damit man sie ziehen kann
   const outroBarStart = $derived.by(() => {
-    if (!$appSettings.smartFade || durMs <= 0 || cfS <= 0) return -1
-    void $waveform; void $appSettings.outroAggressiveness
+    if (durMs <= 0 || cfS <= 0) return -1
+    void $waveform; void $appSettings.outroAggressiveness; void $appSettings.smartFade
+    void outroOverride; void $nowPlaying?.path
     return _outroTrigger()
   })
   const outroBarEnd = $derived(
@@ -373,6 +423,7 @@
     const ia = $appSettings.introAggressiveness ?? $appSettings.fadeAggressiveness ?? 3
     const wf = $waveformNext
     const nt = nextTrack
+    if (nt && introOverride && introOverride.path === nt.path) return introOverride.frac
     if (!nt || cfS <= 0 || !sf) return 0
     const a   = Math.max(0, Math.min(4, ia - 1))
     const det = wf?.length > 0 ? _detectIntroLen(wf) * INTRO_SKIP[a] : 0
@@ -384,6 +435,38 @@
     const dur = nt.duration_sec || 180
     return Math.min(0.95, nextIntroStart + cfS / dur)
   })
+
+  // Taktraster fuer laufenden und naechsten Titel holen (einmal je Pfad)
+  const _gridAsked = new Set()
+  $effect(() => {
+    if (!$appSettings.beatAlignCf && $appSettings.tempoMatch === false) return
+    for (const p of [$nowPlaying?.path, nextTrack?.path]) {
+      if (p && !_gridAsked.has(p)) { _gridAsked.add(p); send({ type: 'get_beatgrid', path: p }) }
+    }
+  })
+
+  // Verschobene Zonen gelten nur fuer den einen Uebergang
+  let _ovFor = ''
+  $effect(() => {
+    const p = $nowPlaying?.path ?? ''
+    if (p === _ovFor) return
+    _ovFor = p
+    untrack(() => { outroOverride = null; if (introOverride?.path === p) introOverride = null })
+  })
+  function dragOutro(frac, done) {
+    const np = get(nowPlaying)?.path
+    zoneDragging = !done
+    if (!np || cfActive || cfRafActive || durMs <= 0) return
+    const cfFrac = Math.min(0.9, (cfS * 1000) / durMs)
+    outroOverride = { path: np, frac: Math.max(0.02, Math.min(frac, 1 - cfFrac)) }
+  }
+  function dragIntro(frac, done) {
+    const nt = nextTrack
+    zoneDragging = !done
+    if (!nt?.path || cfActive || cfRafActive) return
+    const dur = nt.duration_sec || 180
+    introOverride = { path: nt.path, frac: Math.max(0, Math.min(frac, 0.95 - cfS / dur)) }
+  }
 
   let _lastNextPath = ''
   $effect(() => {
@@ -409,6 +492,7 @@
     if (cfRaf)   { clearTimeout(cfRaf); cfRaf = null }
     cfCancelled = true
     cfActive = false; cfNextIdx = -1
+    cfSync = null; _stopGlide(); blendP = 0
 
     const c  = untrack(cur)
     const a  = untrack(alt)
@@ -427,6 +511,7 @@
     if (wasPlaying && cf > 0 && !forceImmediate) {
       cfCancelled = false
       cfRafActive = true
+      a.playbackRate = 1
       a.src = url; a.dataset.path = track.path; a.volume = 0; a.load(); a.play().catch(() => {})
       setElLufs(a, track.lufs ?? -99)
       which = untrack(() => which) === 'A' ? 'B' : 'A'
@@ -454,15 +539,23 @@
       const t0     = performance.now()
       const vOld   = c.volume
 
+      let syncTried = false
+      const oldPath = c.dataset.path
       function rafTick() {
         const t = Math.min(1, (performance.now() - t0) / fadeMs)
         const [fv, tv] = _fade(t, vOld, v)
         c.volume = fv; a.volume = tv
+        // Beat-Sync, sobald der neue Titel wirklich laeuft
+        if (!syncTried && !a.paused && a.currentTime > 0.05) {
+          syncTried = true
+          cfSync = startSync(c, a, oldPath, track.path)
+        }
+        cfSync?.tick(t < 0.3)
         // setTimeout statt requestAnimationFrame: rAF steht still, wenn das
         // Fenster minimiert oder verdeckt ist — der Uebergang blieb dann haengen
         // und beide Titel spielten weiter
         if (t < 1) cfRaf = setTimeout(rafTick, 16)
-        else { cfRaf = null; cfRafActive = false; _silenceAndStop(c) }
+        else { cfRaf = null; cfRafActive = false; endSync(a); _silenceAndStop(c) }
       }
       cfRaf = setTimeout(rafTick, 16)
     } else {
@@ -471,6 +564,7 @@
       if (oldAlt) _silenceAndStop(oldAlt)
       const el = untrack(cur)
       if (el) {
+        el.playbackRate = 1
         el.src = url; el.dataset.path = track.path; el.volume = v; el.load(); setElLufs(el, track.lufs ?? -99)
         if (untrack(() => $playerState.playing)) el.play().catch(() => {})
       }
@@ -526,6 +620,7 @@
       if (cfRaf)   { clearTimeout(cfRaf); cfRaf = null }
       cfRafActive = false
       if (cfActive) { cfActive = false; cfNextIdx = -1 }
+      cfSync = null; blendP = 0; blendNextPos = 0
       const a = alt()
       if (a) {
         stopRamp(a)
@@ -562,13 +657,23 @@
   // ── Auto-crossfade ─────────────────────────────────────────────────────────
   function _checkCrossfade(pos) {
     if (cfActive || cfS <= 0 || durMs <= 0) return
+    // Nicht waehrend der Pause-Blende: der alte Titel laeuft dort noch ein
+    // paar hundert Millisekunden — frueher startete genau dann ein neuer
+    // Uebergang, und der naechste Titel spielte nach dem Pausieren weiter.
+    if (!get(playerState).playing || zoneDragging) return
 
     const trigFrac = _outroTrigger()
     let triggerMs  = trigFrac >= 0 ? trigFrac * durMs : durMs - cfS * 1000
 
-    // Beat-align: snap crossfade trigger to nearest beat (±1 beat tolerance)
+    // Beat-align: auf den naechsten Schlag des gemessenen Taktrasters, sonst
+    // (ohne Raster) auf ein Raster aus den ganzzahligen BPM ab 0:00
     const bpm = $nowPlaying?.bpm
-    if (bpm > 30 && bpm < 300 && get(appSettings).beatAlignCf) {
+    const gC  = gridOf($nowPlaying?.path)
+    if (get(appSettings).beatAlignCf && gC && gC.conf >= 0.3) {
+      const beatMs = 60000 / gC.bpm, offMs = gC.off * 1000
+      const snapped = offMs + Math.round((triggerMs - offMs) / beatMs) * beatMs
+      if (Math.abs(snapped - triggerMs) <= beatMs) triggerMs = Math.min(snapped, durMs - cfS * 1000 - 200)
+    } else if (bpm > 30 && bpm < 300 && get(appSettings).beatAlignCf) {
       const beatMs  = 60000 / bpm
       const snapped = Math.round(triggerMs / beatMs) * beatMs
       // Only apply if snap is within ±1 beat from base trigger
@@ -610,9 +715,12 @@
 
     const introFrac = _getNextIntroStart()
 
+    inactive.playbackRate = 1
     inactive.src = nextUrl
     inactive.dataset.path = nextTrk.path
     inactive.load()
+    const curPath = cur()?.dataset.path
+    const beginSync = () => { if (!cfCancelled && cfActive) cfSync = startSync(cur(), inactive, curPath, nextTrk.path) }
 
     inactive.addEventListener('canplay', function onCanPlay() {
       if (cfCancelled) return
@@ -628,10 +736,13 @@
       // Use inactive.duration (reliable at canplay) instead of metadata duration_sec
       // which is often 0 for newly added tracks.
       const elDur = inactive.duration
-      const skipSec = (introFrac > 0.01 && elDur > 0 && isFinite(elDur))
+      let skipSec = (introFrac > 0.01 && elDur > 0 && isFinite(elDur))
         ? introFrac * elDur : 0
+      // Auf derselben Taktphase einsteigen wie der laufende Titel gerade steht
+      if (get(appSettings).beatAlignCf)
+        skipSec = alignedStart(cur(), skipSec, gridOf(curPath), gridOf(nextTrk.path))
 
-      if (skipSec > 0.5) {
+      if (skipSec > 0.05) {
         // Option A: currentTime → wait for seeked → play().
         // Seek from 0 to skipSec always fires seeked.
         inactive.currentTime = skipSec
@@ -639,13 +750,13 @@
         const onSeeked = () => {
           if (seekDone) return
           seekDone = true
-          if (!cfCancelled) inactive.play().catch(() => {})
+          if (!cfCancelled) inactive.play().then(beginSync).catch(() => {})
         }
         inactive.addEventListener('seeked', onSeeked, { once: true })
-        const fbTimer = setTimeout(() => { if (!seekDone) { seekDone = true; if (!cfCancelled) inactive.play().catch(() => {}) } }, 1500)
+        const fbTimer = setTimeout(() => { if (!seekDone) { seekDone = true; if (!cfCancelled) inactive.play().then(beginSync).catch(() => {}) } }, 1500)
         inactive.addEventListener('seeked', () => clearTimeout(fbTimer), { once: true })
       } else {
-        inactive.play().catch(() => {})
+        inactive.play().then(beginSync).catch(() => {})
       }
     }, { once: true })
 
@@ -655,6 +766,8 @@
     const cfCurveSnap = get(appSettings).cfCurve ?? 'cosine'
 
     stopRamp(cur()); stopRamp(inactive)
+    cfStartAt = performance.now(); cfLenMs = cfMs; blendNextPos = introFrac
+    requestAnimationFrame(_blendLoop)
     cfTimer = setInterval(() => {
       elapsed += 50
       const t      = Math.min(1, elapsed / cfMs)
@@ -664,6 +777,9 @@
       const [fv, tv] = _fade(t, v, v, cfCurveSnap)
       if (active) active.volume = fv
       if (inact)  inact.volume  = tv
+      // Springen nur, solange der neue Titel noch leise ist
+      cfSync?.tick(t < 0.3)
+      if (inact && inact.duration > 0) blendNextPos = inact.currentTime / inact.duration
       if (t >= 1) {
         clearInterval(cfTimer); cfTimer = null
         _finishCrossfade(nextIdx, nextUrl, nextTrk.path)
@@ -681,6 +797,7 @@
     el.volume = 0
     setTimeout(() => {
       try { el.pause() } catch {}
+      el.playbackRate = 1
       el.removeAttribute('src')
       if (gn) { gn.gain.cancelScheduledValues(audioCtx?.currentTime ?? 0); gn.gain.value = 1 }
     }, 80)
@@ -694,6 +811,8 @@
     const oldEl = cur()
     const newEl = alt()
     loadedUrl = nextUrl
+    if (newEl) endSync(newEl)
+    blendP = 0; blendNextPos = 0
     which = which === 'A' ? 'B' : 'A'
 
     if (oldEl) _silenceAndStop(oldEl)
@@ -803,7 +922,7 @@
       // Automatischer Crossfade in die kaputte Datei: abbrechen, der aktuelle
       // Titel laeuft weiter; der naechste Versuch nimmt den Titel danach.
       if (cfTimer) { clearInterval(cfTimer); cfTimer = null }
-      cfCancelled = true; cfActive = false; cfNextIdx = -1
+      cfCancelled = true; cfActive = false; cfNextIdx = -1; cfSync = null
       const c = cur(); if (c) c.volume = volume / 100
       _silenceAndStop(el)
       return
@@ -854,8 +973,9 @@
   function setVolume(v) {
     volume = +v
     const el = cur()
-    if (el && !cfActive && !cfRafActive) rampVolume(el, volume / 100, get(appSettings).volumeFadeMs ?? 200)
-    else if (el) el.volume = volume / 100
+    const playingNow = get(playerState).playing
+    if (el && !cfActive && !cfRafActive && playingNow) rampVolume(el, volume / 100, get(appSettings).volumeFadeMs ?? 200)
+    else if (el && (playingNow || el.paused)) el.volume = volume / 100
     send({ type: 'set_volume', value: volume })
   }
 
@@ -876,6 +996,9 @@
 
   let centerH = $state(110)
   let deckH   = $state(0)
+  let deck1H   = $state(44)
+  let nextBarH = $state(18)
+  const WF1_H = 44, WF2_H = 24
 </script>
 
 <audio bind:this={elA} ontimeupdate={onTimeUpdate} onloadedmetadata={onLoadedMetadata} onended={onEnded} onerror={onMediaError}></audio>
@@ -894,12 +1017,12 @@
         {/if}
       </div>
       <div class="controls">
-        <button class="btn btn-icon" onclick={playPrev} title="Zurück" aria-label="Zurück"><i class="ti ti-player-track-prev"></i></button>
+        <button class="btn btn-icon btn-sm" onclick={playPrev} title="Zurück" aria-label="Zurück"><i class="ti ti-player-track-prev"></i></button>
         <button class="play" onclick={() => send({ type: $playerState.playing ? 'pause' : 'resume' })}
                 title={$playerState.playing ? 'Pause' : 'Abspielen'} aria-label={$playerState.playing ? 'Pause' : 'Abspielen'}>
           <i class="ti {$playerState.playing ? 'ti-player-pause-filled' : 'ti-player-play-filled'}"></i>
         </button>
-        <button class="btn btn-icon" onclick={() => { const n = _nextIdx(); if (n >= 0) send({ type: 'play_at', index: n }) }}
+        <button class="btn btn-icon btn-sm" onclick={() => { const n = _nextIdx(); if (n >= 0) send({ type: 'play_at', index: n }) }}
                 title="Weiter" aria-label="Weiter"><i class="ti ti-player-track-next"></i></button>
       </div>
     </div>
@@ -928,21 +1051,36 @@
         </span>
       </div>
 
-      <Waveform data={$waveform} position={pos} onclick={seek}
-                outroStart={outroBarStart} outroEnd={outroBarEnd}
-                loading={$nowPlaying !== null && $waveform.length === 0} />
-
-      {#if nextTrack}
-        <div class="next-bar">
-          <span class="eyebrow next-label">Nächster</span>
-          <span class="next-title">{nextTrack.title}{nextTrack.artist ? ' · ' + nextTrack.artist : ''}</span>
-          {#if nextKey}
-            <KeyChip key={nextKey.key} src={nextKey.key_src} compat={uebergang.level === 'unknown' ? null : uebergang} hint="Übergang: " />
-          {/if}
-          <span class="next-dur">{fmt(nextTrack.duration_sec * 1000)}</span>
+      <!-- Beim Uebergang gleitet der naechste Titel nach oben an die Stelle des
+           laufenden; am Ende tauschen die Daten, das Bild bleibt gleich -->
+      <div class="decks" style="--bp:{blendP}">
+        <div class="deck1" bind:clientHeight={deck1H}
+             style={blendP > 0 ? `transform:translateY(${-blendP * 100}%);opacity:${1 - blendP}` : ''}>
+          <Waveform data={$waveform} position={pos} onclick={seek} height={WF1_H}
+                    outroStart={outroBarStart} outroEnd={outroBarEnd}
+                    dragZone="outro" onzonedrag={dragOutro}
+                    zoneTitle="MIX-Zone ziehen: Übergang früher oder später starten (nur dieses Mal)"
+                    loading={$nowPlaying !== null && $waveform.length === 0} />
         </div>
-        <Waveform data={$waveformNext} position={0} introStart={nextIntroStart} introEnd={nextIntroEnd} height={20} />
-      {/if}
+        {#if nextTrack}
+          <div class="deck2" style={blendP > 0 ? `transform:translateY(${-blendP * (deck1H + nextBarH + 12)}px)` : ''}>
+            <div class="next-bar" bind:clientHeight={nextBarH} style={blendP > 0 ? `opacity:${1 - Math.min(1, blendP * 2)}` : ''}>
+              <span class="eyebrow next-label">Nächster</span>
+              <span class="next-title">{nextTrack.title}{nextTrack.artist ? ' · ' + nextTrack.artist : ''}</span>
+              {#if nextKey}
+                <KeyChip key={nextKey.key} src={nextKey.key_src} compat={uebergang.level === 'unknown' ? null : uebergang} hint="Übergang: " />
+              {/if}
+              <span class="next-dur">{fmt(nextTrack.duration_sec * 1000)}</span>
+            </div>
+            <div class="wf2" style={blendP > 0 ? `transform:scaleY(${1 + blendP * (WF1_H / WF2_H - 1)})` : ''}>
+              <Waveform data={$waveformNext} position={blendP > 0 ? blendNextPos : 0} height={WF2_H}
+                        introStart={nextIntroStart} introEnd={nextIntroEnd}
+                        dragZone="intro" onzonedrag={dragIntro}
+                        zoneTitle="MIX-Zone ziehen: an anderer Stelle in den nächsten Titel einsteigen (nur dieses Mal)" />
+            </div>
+          </div>
+        {/if}
+      </div>
     </div>
 
     <!-- Schmaler Lautstaerke-Fader; Mausrad fuer feine Schritte -->
@@ -968,13 +1106,19 @@
   .player-row { display: flex; align-items: flex-start; gap: var(--sp-4); }
 
   .deck { display: flex; flex-direction: column; align-items: center; gap: 6px; flex-shrink: 0; }
+  /* Grosses Cover, Bedienung klein darunter */
   .art {
-    width: 88px; height: 88px; border-radius: var(--r-m); flex-shrink: 0;
+    width: 120px; height: 120px; border-radius: var(--r-m); flex-shrink: 0;
     background: var(--c-bg5); border: 1px solid var(--c-br1);
     display: flex; align-items: center; justify-content: center; overflow: hidden;
   }
   .art img { width: 100%; height: 100%; object-fit: cover; }
-  .art-ph { font-size: 32px; color: var(--c-tx6); }
+  .art-ph { font-size: 40px; color: var(--c-tx6); }
+  :global([data-density="comfortable"]) .art { width: 140px; height: 140px; }
+  .decks { display: flex; flex-direction: column; gap: 6px; overflow: hidden; }
+  .deck1, .deck2 { will-change: transform; }
+  .deck2 { display: flex; flex-direction: column; gap: 6px; }
+  .wf2 { transform-origin: top center; }
 
   .center { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
   .track-info { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
@@ -993,18 +1137,18 @@
   .next-title { flex: 1; min-width: 0; font-size: var(--fs-body); color: var(--c-tx2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .next-dur { flex-shrink: 0; font-size: var(--fs-sm); color: var(--c-tx3); font-variant-numeric: tabular-nums; }
 
-  .controls { display: flex; align-items: center; gap: var(--sp-1); }
+  .controls { display: flex; align-items: center; justify-content: center; gap: var(--sp-1); }
   .norm-on b { color: var(--c-accent-tx); font-weight: 700; }
   .play {
-    width: 48px; height: 48px; border-radius: 50%; flex-shrink: 0;
+    width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0;
     border: none; background: var(--c-accent); color: var(--c-on-accent);
-    font-size: 22px; cursor: pointer;
+    font-size: 16px; cursor: pointer;
     display: flex; align-items: center; justify-content: center;
     transition: background .12s, transform .08s;
   }
   .play:hover { background: var(--c-accent2); }
   .play:active { transform: scale(.96); }
-  :global([data-density="comfortable"]) .play { width: 56px; height: 56px; font-size: 26px; }
+  :global([data-density="comfortable"]) .play { width: 40px; height: 40px; font-size: 19px; }
   .time { margin-left: auto; font-size: var(--fs-body); color: var(--c-tx3); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .time b { color: var(--c-tx1); font-weight: 600; }
 
