@@ -32,7 +32,7 @@ _FILES = {
     "QUEUE_FILE": "queue.json", "SETTINGS_FILE": "settings.json",
     "LIB_CACHE": "library_cache.json", "HISTORY_FILE": "history.json",
     "PLAY_LOG_FILE": "play_log.json", "NOTES_FILE": "notes.json",
-    "WISHES_FILE": "wishes.json",
+    "WISHES_FILE": "wishes.json", "QUALITY_CACHE": "quality_cache.json",
 }
 _LIST_STATE = ("library", "queue", "downloads", "history", "play_log", "wishes")
 
@@ -46,6 +46,8 @@ class BackendTest(unittest.TestCase):
         for name, fname in _FILES.items():
             setattr(main, name, self.tmp / fname)
         main.BASE_DIR = self.tmp
+        main._quality_cache = {}
+        main._quality_cache_dirty = False
         main.PLAYLISTS_DIR = self.tmp / "playlists"
         self._saved_state = {k: main._state.get(k) for k in (
             *_LIST_STATE, "current_idx", "download_dir", "watched_folders",

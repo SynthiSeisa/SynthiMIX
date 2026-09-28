@@ -216,6 +216,12 @@ async def lifespan(application: FastAPI):
     asyncio.create_task(_quality_scan_loop())
     print(f"[backend] ready on ws://127.0.0.1:{_BACKEND_PORT}/ws", flush=True)
     yield
+    # Beenden (auch vor einem Update): nichts Gemessenes verlieren
+    try:
+        save_library()
+        _save_quality_cache()
+    except Exception:
+        pass
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -303,9 +309,21 @@ def _load_json(path: Path, default):
         return default
 
 def _save_json(path: Path, data):
+    """Erst in eine Zwischendatei, dann austauschen. Fehler werden
+    protokolliert — frueher gingen sie in Hintergrund-Aufgaben still unter,
+    und Messwerte kamen nie auf der Platte an."""
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
-    tmp.replace(path)
+    try:
+        try:
+            txt = json.dumps(data, ensure_ascii=False)
+            tmp.write_text(txt, "utf-8")
+        except UnicodeEncodeError:
+            # z. B. kaputte Zeichen in Dateinamen: als \uXXXX schreiben
+            tmp.write_text(json.dumps(data, ensure_ascii=True), "utf-8")
+        tmp.replace(path)
+    except Exception as e:
+        print(f"[speichern] {path.name} FEHLER: {e}", flush=True)
+        raise
 
 _save_scheduled: bool = False
 
@@ -392,7 +410,12 @@ def _fix_mojibake(s: str) -> str:
     return _MOJIBAKE_RUN_RE.sub(_repl, s)
 
 def load_library():
-    raw = _load_json(LIB_CACHE, [])
+    raw = _load_json(LIB_CACHE, None)
+    if raw is None and LIB_CACHE.exists():
+        print("[library] library_cache.json nicht lesbar — nehme die Sicherung", flush=True)
+        raw = _load_json(LIB_CACHE.with_suffix(".bak"), [])
+    if raw is None:
+        raw = []
     # Old PyQt5 format: {"folder": "...", "tracks": [...]}
     if isinstance(raw, dict):
         raw = raw.get("tracks", [])
@@ -463,13 +486,79 @@ def load_library():
         print("[library] Umlaut-Kodierungsfehler in Titeln repariert", flush=True)
 
     _state["library"] = deduped
+    _load_quality_cache()
+    # Alte Messwerte in den getrennten Speicher uebernehmen, fehlende von dort holen
+    for lt in deduped:
+        if lt.get("cutoff_khz") is not None and _qkey(lt["path"], lt.get("duration_sec")) not in _quality_cache:
+            _remember_cutoff(lt)
+    wieder = _restore_cutoffs()
+    gemessen = sum(1 for lt in deduped if lt.get("cutoff_khz") is not None)
+    print(f"[library] {len(deduped)} Titel geladen · Qualitaet gemessen: {gemessen}"
+          + (f" ({wieder} aus dem Messwert-Speicher)" if wieder else ""), flush=True)
     # Beim Start bekannte Problemdateien sofort ins Set laden → Race Condition vermeiden
     _unanalyzable_paths.update(t["path"] for t in deduped if t.get("unanalyzable"))
     if len(deduped) != len(normalised) or mojibake_fixed:
         save_library()
 
 def save_library():
-    _save_json(LIB_CACHE, _state["library"])
+    try:
+        _save_json(LIB_CACHE, _state["library"])
+    except Exception:
+        return
+    _save_quality_cache()
+    # Einmal pro Sitzung eine Sicherung der zuletzt guten Datei
+    global _lib_backup_done
+    if not _lib_backup_done and _state["library"]:
+        try:
+            shutil.copyfile(LIB_CACHE, LIB_CACHE.with_suffix(".bak"))
+            _lib_backup_done = True
+        except Exception:
+            pass
+
+_lib_backup_done = False
+
+# ── Messwerte der Qualitaetspruefung zusaetzlich getrennt merken ────────────
+# Schluessel: Pfad (klein) + Laenge in Sekunden. Wird die Bibliothek einmal neu
+# aufgebaut (neu eingelesen, Datei beschaedigt), muss nicht alles neu gemessen
+# werden — nach einem Update war genau das passiert.
+QUALITY_CACHE = BASE_DIR / "quality_cache.json"
+_quality_cache: dict = {}
+_quality_cache_dirty = False
+
+def _qkey(path: str, dur) -> str:
+    return f"{(path or '').lower()}|{int(round(float(dur or 0)))}"
+
+def _load_quality_cache():
+    global _quality_cache
+    raw = _load_json(QUALITY_CACHE, {})
+    _quality_cache = raw if isinstance(raw, dict) else {}
+
+def _save_quality_cache():
+    global _quality_cache_dirty
+    if not _quality_cache_dirty:
+        return
+    try:
+        _save_json(QUALITY_CACHE, _quality_cache)
+        _quality_cache_dirty = False
+    except Exception:
+        pass
+
+def _remember_cutoff(lt: dict):
+    global _quality_cache_dirty
+    if lt.get("path") and lt.get("cutoff_khz") is not None:
+        _quality_cache[_qkey(lt["path"], lt.get("duration_sec"))] = lt["cutoff_khz"]
+        _quality_cache_dirty = True
+
+def _restore_cutoffs() -> int:
+    """Fehlende Messwerte aus dem getrennten Speicher uebernehmen."""
+    n = 0
+    for lt in _state["library"]:
+        if lt.get("cutoff_khz") is None and lt.get("path"):
+            v = _quality_cache.get(_qkey(lt["path"], lt.get("duration_sec")))
+            if v is not None:
+                lt["cutoff_khz"] = float(v)
+                n += 1
+    return n
 
 def load_settings():
     raw = _load_json(SETTINGS_FILE, {})
@@ -911,6 +1000,9 @@ def _make_library_entry(path: str, probe: dict, **overrides) -> dict:
         **({"mik_cues": probe["mik_cues"]} if probe.get("mik_cues") else {}),
     }
     entry.update(overrides)
+    v = _quality_cache.get(_qkey(path, entry.get("duration_sec")))
+    if v is not None and "cutoff_khz" not in entry:
+        entry["cutoff_khz"] = float(v)
     return entry
 
 def _mik_json(raw) -> dict:
@@ -1701,9 +1793,20 @@ async def _quality_scan_once():
             path = lt["path"]
             if not os.path.exists(path):
                 return                        # Laufwerk fehlt: spaeter nochmal
-            lt["cutoff_khz"] = await loop.run_in_executor(
-                None, _cutoff_khz_sync, path, lt.get("duration_sec") or 0)
+            known = _quality_cache.get(_qkey(path, lt.get("duration_sec")))
+            if known is not None:
+                lt["cutoff_khz"] = float(known)
+            else:
+                lt["cutoff_khz"] = await loop.run_in_executor(
+                    None, _cutoff_khz_sync, path, lt.get("duration_sec") or 0)
+                _remember_cutoff(lt)
             done += 1
+            # Hochgerechnete sofort zeigen — die ganze Bibliothek geht nur alle
+            # 500 Titel raus, bei einer neuen Bibliothek wirkte es sonst minutenlang,
+            # als wuerde nichts gemessen oder gespeichert
+            if 5 < lt["cutoff_khz"] < _CUTOFF_UPSCALED_KHZ:
+                await broadcast({"type": "track_meta_update",
+                                 "track": {"path": path, "cutoff_khz": lt["cutoff_khz"]}})
             if done % 25 == 0:
                 schedule_save()
                 await broadcast({"type": "quality_scan", "done": done, "total": total})
@@ -1896,6 +1999,7 @@ async def _quality_replace(path: str, url: str, ws: WebSocket):
         _beatgrid_cache.pop(path, None)
         _unanalyzable_paths.discard(path)
         lt["cutoff_khz"]   = await loop.run_in_executor(None, _cutoff_khz_sync, path, dur)
+        _remember_cutoff(lt)
         for item in _state["queue"]:
             if item.get("path") == path:
                 item["lufs"] = -99.0
@@ -2742,8 +2846,10 @@ async def _update_ytdlp(ws: WebSocket | None = None):
         if not dl_url:
             await _send("❌ Release nicht gefunden", -1); return False
         await _send(f"Lade {tag}…", 10)
-        dest = Path(YTDLP).resolve()
-        tmp  = str(dest) + ".tmp"
+        _YTDLP_TOOLS.mkdir(parents=True, exist_ok=True)
+        ver  = re.sub(r"[^\w.]", "", tag.lstrip("v")) or str(int(time.time()))
+        dest = _YTDLP_TOOLS / f"yt-dlp-{ver}.exe"
+        tmp  = str(dest) + ".part"
         def _dl():
             req = _req.Request(dl_url, headers={"User-Agent": "Mozilla/5.0"})
             with _req.urlopen(req, timeout=180) as r:
@@ -2754,6 +2860,15 @@ async def _update_ytdlp(ws: WebSocket | None = None):
                         f.write(chunk)
         await loop.run_in_executor(None, _dl)
         os.replace(tmp, str(dest))
+        global YTDLP
+        alt = YTDLP
+        YTDLP = str(dest)
+        # Aeltere eigene Kopien weg; eine gerade laufende bleibt bis zum naechsten Start
+        for _, old in _ytdlp_tool_builds():
+            if old != dest:
+                try: old.unlink()
+                except Exception: pass
+        print(f"[yt-dlp] jetzt {YTDLP} (vorher {alt})", flush=True)
         await _send(f"✓ {tag} installiert", 100)
         tu = _state.setdefault("tool_updates", {})
         tu["ytdlp"] = {"latest": tag, "available": False}
@@ -4238,6 +4353,22 @@ async def handle_message(ws: WebSocket, msg: dict):
                                     if d.get("session", d.get("id")) != sid]
         await push_downloads()
 
+    elif t == "download_retry_failed":
+        # z. B. zuhause, wenn unterwegs vieles gesperrt war
+        sid = msg.get("session_id")
+        hdr = next((d for d in _state["downloads"] if d.get("id") == sid), None)
+        failed = [d for d in _state["downloads"] if d.get("session") == sid and d.get("id") != sid
+                  and d.get("status") == "error" and d.get("url")]
+        if hdr and failed:
+            _state["downloads"] = [d for d in _state["downloads"] if d not in failed]
+            hdr["failed_n"] = 0
+            await push_downloads(force=True)
+            entries = [{"url": d["url"], "title": d.get("title") or "", "replaced": False, "duration": 0}
+                       for d in failed]
+            asyncio.create_task(run_download("", hdr.get("fmt") or "mp3-best", entries=entries,
+                                             folder=hdr.get("folder"),
+                                             label=f"Nochmal: {hdr.get('session_label') or 'Downloads'}"[:60]))
+
     elif t == "download_cancel":
         # Remove a single finished/error item from the list (doesn't kill subprocess)
         dl_id = msg.get("id")
@@ -5354,6 +5485,46 @@ _dl_counter = 0
 
 YTDLP = _find_tool("yt-dlp.exe", BASE_DIR, BASE_DIR / "bin")
 
+# Aktualisiertes yt-dlp liegt als tools/yt-dlp-<Version>.exe im Datenordner.
+# Frueher wurde die Exe im Installationsordner ersetzt — das scheiterte mit
+# "[WinError 5] Zugriff verweigert" (laufender Prozess, Schreibschutz), und
+# yt-dlp blieb stehen, bis YouTube die alte Version aussperrte.
+_YTDLP_TOOLS = BASE_DIR / "tools"
+
+def _ytdlp_tool_builds() -> list[tuple[tuple, Path]]:
+    out = []
+    try:
+        for f in _YTDLP_TOOLS.glob("yt-dlp-*.exe"):
+            ver = f.stem.split("-", 2)[-1]
+            nums = tuple(int(n) for n in re.findall(r"\d+", ver))
+            if nums:
+                out.append((nums, f))
+    except Exception:
+        pass
+    return sorted(out)
+
+def _use_newest_ytdlp():
+    """Beim Start die neueste eigene Kopie nehmen (wenn neuer als die
+    mitgelieferte) und aeltere wegraeumen."""
+    global YTDLP
+    builds = _ytdlp_tool_builds()
+    if not builds:
+        return
+    nums, f = builds[-1]
+    try:
+        r = subprocess.run([YTDLP, "--version"], capture_output=True, text=True, timeout=15,
+                           creationflags=_NO_WINDOW)
+        mit = tuple(int(n) for n in re.findall(r"\d+", r.stdout or ""))
+    except Exception:
+        mit = ()
+    if not mit or nums > mit:
+        YTDLP = str(f)
+    for _, old in builds[:-1]:
+        try: old.unlink()
+        except Exception: pass
+
+_use_newest_ytdlp()
+
 # ── JavaScript-Laufzeit fuer yt-dlp ──────────────────────────────────────────
 # Ohne sie warnt yt-dlp, dass die YouTube-Extraktion ohne JS-Runtime veraltet
 # ist und Formate fehlen koennen — irgendwann werden daraus echte Fehlschlaege.
@@ -5659,7 +5830,19 @@ async def _audit_playlist_for_videos(playlist_url: str) -> tuple[list[dict], str
             entry["title"]    = (f'{song["artist"]} - {song["title"]}' if song.get("artist") else song["title"]) or title
             entry["replaced"] = True
 
-    await asyncio.gather(*(replace(e) for e in entries if _VIDEO_TITLE_RE.search(e["title"] or "")))
+    # Nicht nur Titel mit "Official Video": viele Musikvideos heissen einfach
+    # "Kuenstler - Titel". Geprueft wird alles, was nicht vom Topic-Kanal
+    # (reine Audio-Uploads) kommt und nicht als Audio/Lyrics markiert ist —
+    # _pick_song_version nimmt nur eine Song-Version, die wirklich passt.
+    def needs_check(e):
+        t = e["title"] or ""
+        if _VIDEO_TITLE_RE.search(t):
+            return True
+        if (e.get("uploader") or "").lower().endswith("- topic"):
+            return False
+        return not _AUDIO_TITLE_RE.search(t)
+
+    await asyncio.gather(*(replace(e) for e in entries if needs_check(e)))
     return entries, pl_title
 
 
@@ -6206,15 +6389,49 @@ async def run_spotify_download(url: str, fmt_id: str = "mp3-best"):
             await push_downloads(force=True)
 
 
-async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
-    """Returns the final output path on success, None on failure."""
+_DL_REASON_TEXT = {
+    "geo":   "In diesem Land gesperrt",
+    "gone":  "Gelöscht oder privat",
+    "rate":  "YouTube bremst gerade – später nochmal",
+    "bot":   "YouTube verlangt eine Anmeldung – später nochmal",
+    "age":   "Altersbeschränkt – nur mit Anmeldung",
+    "other": "Fehler beim Laden",
+}
+_PLACEHOLDER_TITLE_RE = re.compile(r'^\[(deleted|private|unavailable)\s+video\]$', re.I)
+
+def _dl_error_reason(msg: str) -> str:
+    """yt-dlp-Fehlermeldung → Grund (Schluessel von _DL_REASON_TEXT)."""
+    m = (msg or "").lower()
+    if ("in your country" in m or "geo restrict" in m or "geo-restrict" in m
+            or "not available in your location" in m):
+        return "geo"
+    if "try again later" in m or "content isn't available" in m or "http error 429" in m or "rate-limit" in m:
+        return "rate"
+    if "confirm you" in m and "bot" in m:
+        return "bot"
+    if "confirm your age" in m or "age-restricted" in m or "inappropriate for some users" in m:
+        return "age"
+    if ("private video" in m or "has been removed" in m or "video unavailable" in m
+            or "no longer available" in m or "account associated" in m or "terminated" in m):
+        return "gone"
+    return "other"
+
+async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] | None = None,
+                       folder: str | None = None, label: str | None = None) -> str | None:
+    """Returns the final output path on success, None on failure.
+
+    entries/folder/label: fertige Titelliste statt einer Adresse (z. B.
+    "Fehlgeschlagene nochmal laden") — wird wie eine Playlist geladen."""
     global _dl_counter
     out_dir = _state.get("download_dir", str(BASE_DIR / "Downloads"))
     os.makedirs(out_dir, exist_ok=True)
 
     # ── session label + playlist folder name ─────────────────────────────────
     playlist_folder: str | None = None
-    if url.startswith("http") and _is_playlist(url):
+    if entries is not None:
+        playlist_folder = folder
+        slabel = label or "Erneut laden"
+    elif url.startswith("http") and _is_playlist(url):
         # Vorlaeufige Beschriftung; den echten Namen liefert gleich die Playlist-Pruefung
         m = re.search(r'list=([^&]+)', url)
         slabel = f"Playlist · {m.group(1)[:28]}" if m else url[:60]
@@ -6246,13 +6463,14 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
         slabel = title[:60]
         hdr["session_label"] = slabel
         hdr["title"] = slabel
+        hdr["folder"] = playlist_folder
 
     # ── session header item  (id == session_id identifies it as header) ───────
     _dl_counter += 1
     session_id = _dl_counter
 
     # For single-track HTTP URLs, title starts empty and gets filled from filename
-    hdr_title = slabel if not (url.startswith("http") and not _is_playlist(url)) else ""
+    hdr_title = slabel if (entries is not None or not (url.startswith("http") and not _is_playlist(url))) else ""
     hdr: dict = {
         "id":            session_id,
         "session":       session_id,
@@ -6260,6 +6478,7 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
         "title":         hdr_title,
         "url":           url,
         "fmt":           fmt_id,
+        "folder":        playlist_folder,
         "path":          None,
         "track_n":       0,
         "track_total":   0,
@@ -6302,7 +6521,7 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
     _hist_by_url = {h["url"]: h for h in reversed(_state.get("history", []))}
 
     # Smart-skip: only for single tracks (not playlists — playlists may have new entries)
-    if not (url.startswith("http") and _is_playlist(url)):
+    if entries is None and not (url.startswith("http") and _is_playlist(url)):
         h = _hist_by_url.get(url)
         if h and h.get("bitrate_kbps", 0) >= 192:
             p = h.get("path", "")
@@ -6319,7 +6538,9 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
     # ── Playlist: flat-list once, replace video entries, then download per-URL ─
     # Using per-URL mode always avoids a second internal flat-list by yt-dlp.
     _audited_entries: list[dict] | None = None
-    if url.startswith("http") and _is_playlist(url):
+    if entries is not None:
+        _audited_entries = [dict(e) for e in entries]
+    elif url.startswith("http") and _is_playlist(url):
         hdr["status_text"] = "Playlist analysieren…"
         await push_downloads(force=True)
         entries, pl_title = await _audit_playlist_for_videos(url)
@@ -6340,7 +6561,7 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
     if _audited_entries is not None:
         track_total = len(_audited_entries)
         hdr["track_total"] = track_total
-        state = {"done": 0, "final": None}
+        state = {"done": 0, "final": None, "failed": []}
         _dl_procs[session_id] = []
 
         async def _finish(item: dict, entry: dict, ok: bool, skipped: bool = False):
@@ -6350,9 +6571,21 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
             path = item.get("path")
             ok = ok and bool(path) and os.path.exists(path)
             _done(item, ok=ok, skipped=skipped)
+            item["url"] = item.get("url") or entry.get("url", "")
+            if ok and entry.get("_orig"):
+                item["status_text"] = "✓ Ersatz geladen"
+                item["title"] = (item.get("title") or "")[:80]
+                item.pop("reason", None)
             if not ok and not skipped:
+                reason = _dl_error_reason(item.get("error_msg") or "")
                 item["status"] = "error"
-                item["status_text"] = item.get("status_text") if "ERROR" in (item.get("error_msg") or "") else "✗ Fehler"
+                item["reason"] = reason
+                item["status_text"] = _DL_REASON_TEXT[reason]
+                state["failed"].append((item, entry.get("_orig") or entry))
+            if item.get("_counted"):
+                await push_downloads(force=True)
+                return
+            item["_counted"] = True
             state["done"] += 1
             hdr["track_n"] = state["done"]
             hdr["status_text"] = f"{state['done']} / {track_total}"
@@ -6365,6 +6598,10 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
                     await broadcast(_history_payload())
             await push_downloads(force=True)
 
+        def _vid(u: str) -> str:
+            m = re.search(r'(?:[?&]v=|youtu\.be/|/shorts/)([\w-]{11})', u or "")
+            return m.group(1) if m else ""
+
         # Schon vorhanden (Verlauf mit guter Qualitaet): gar nicht erst laden
         todo = []
         for entry in _audited_entries:
@@ -6376,10 +6613,6 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
                 await _finish(item, entry, ok=True, skipped=True)
             else:
                 todo.append(entry)
-
-        def _vid(u: str) -> str:
-            m = re.search(r'(?:[?&]v=|youtu\.be/|/shorts/)([\w-]{11})', u or "")
-            return m.group(1) if m else ""
 
         async def _batch(batch: list[dict], n: int):
             if not batch or hdr not in _state["downloads"]:
@@ -6410,8 +6643,15 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
                                 if cur_item is not None:
                                     await _finish(cur_item, cur_entry, ok=True)
                                 cur_entry, last_pct = e, -1.0
-                                cur_item = _new_track(e["title"])
-                                if e.get("replaced"):
+                                if e.get("_item") is not None:
+                                    cur_item = e["_item"]
+                                    cur_item.update(status="active", progress=0, path=None,
+                                                    error_msg="", _fin=False,
+                                                    status_text=e.get("_note") or "…")
+                                else:
+                                    cur_item = _new_track(e["title"])
+                                    cur_item["url"] = e["url"]
+                                if e.get("replaced") and not e.get("_item"):
                                     cur_item["status_text"] = "Audio-Version"
                                 await push_downloads(force=True)
                             continue
@@ -6447,10 +6687,59 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
         batches = [todo[i::_DL_PARALLEL] for i in range(_DL_PARALLEL)]
         await asyncio.gather(*(_batch(b, n) for n, b in enumerate(batches)))
 
-        # Titel, die yt-dlp gar nicht angefasst hat (nicht verfuegbar)
-        missing = track_total - state["done"]
+        # Gesperrt (Land) oder geloescht: eine andere Version desselben Songs
+        # suchen, die hier verfuegbar ist. Gebremst: nach einer Pause noch
+        # einmal. Umgangen wird nichts — nur ein anderer Upload genommen.
+        for runde in range(2):
+            if hdr not in _state["downloads"]:
+                break
+            failed, state["failed"] = state["failed"], []
+            second: list[dict] = []
+            wait_rate = False
+            for item, orig in failed:
+                reason = item.get("reason")
+                if reason == "rate" and runde == 0:
+                    second.append({**orig, "_item": item, "_note": "zweiter Versuch…"})
+                    wait_rate = True
+                    continue
+                if reason not in ("geo", "gone"):
+                    continue
+                t = (orig.get("title") or "").strip()
+                if not t or _PLACEHOLDER_TITLE_RE.match(t):
+                    continue
+                cands = orig.get("_cands")
+                if cands is None:
+                    hdr["status_text"] = f"Suche Ersatz: {t[:40]}"
+                    await push_downloads(force=True)
+                    try:
+                        found = await _ytm_songs(_song_query(t) or t, 5, details=True)
+                    except Exception:
+                        found = []
+                    dur = orig.get("duration") or 0
+                    cands = [c for c in found if _vid(c.get("url", "")) and _vid(c["url"]) != _vid(orig["url"])
+                             and (not dur or not c.get("duration") or abs(c["duration"] - dur) <= 20)]
+                    orig["_cands"] = cands
+                if runde < len(cands):
+                    c = cands[runde]
+                    second.append({"url": c["url"], "title": c.get("title") or t, "replaced": True,
+                                   "_item": item, "_orig": orig, "_note": "Ersatz wird geladen…"})
+            if not second:
+                break
+            if wait_rate:
+                hdr["status_text"] = "YouTube bremst — kurze Pause…"
+                await push_downloads(force=True)
+                await asyncio.sleep(45)
+            await _batch(second, 90 + runde)     # ein Prozess, schonend
+
+        fehl = [d for d in _state["downloads"] if d.get("session") == session_id
+                and d.get("id") != session_id and d.get("status") == "error"]
+        ersetzt = sum(1 for d in _state["downloads"] if d.get("session") == session_id
+                      and d.get("status_text") == "✓ Ersatz geladen")
+        ok_n = state["done"] - len(fehl)
         hdr["status"] = "done"; hdr["progress"] = 100
-        hdr["status_text"] = f"✓ {state['done']} Tracks" + (f" · {missing} nicht verfügbar" if missing > 0 else "")
+        hdr["failed_n"] = len(fehl)
+        hdr["status_text"] = (f"✓ {ok_n} Tracks" + (f" · {ersetzt} ersetzt" if ersetzt else "")
+                              + (f" · {len(fehl)} nicht verfügbar" if fehl else ""))
         _dl_procs.pop(session_id, None)
         await push_downloads(force=True)
         return state["final"]

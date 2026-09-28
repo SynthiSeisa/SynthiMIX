@@ -314,6 +314,12 @@
                 <button class="btn btn-icon btn-sm" onclick={() => openInExplorer(s)}
                         title="Im Explorer zeigen" aria-label="Im Explorer zeigen"><i class="ti ti-folder"></i></button>
               {/if}
+              {#if !active && s.failed_n > 0}
+                <button class="btn btn-sm" onclick={() => send({ type: 'download_retry_failed', session_id: g.session_id })}
+                        title="Die nicht geladenen Titel noch einmal versuchen — z. B. später oder zuhause, wenn sie unterwegs gesperrt waren">
+                  <i class="ti ti-refresh"></i> {s.failed_n} nochmal
+                </button>
+              {/if}
               {#if !active}
                 <button class="btn btn-icon btn-sm" onclick={() => removeGroup(g)} title="Aus der Liste entfernen" aria-label="Aus der Liste entfernen"><i class="ti ti-x"></i></button>
               {/if}
@@ -344,7 +350,8 @@
                   {:else if dl.status === 'error'}
                     <i class="ti ti-alert-triangle track-err" title={dl.error_msg || dl.status_text || ''}></i>
                     {#if dl.error_msg || dl.status_text}
-                      <span class="track-errmsg">{(dl.error_msg || dl.status_text || '').slice(0, 60)}</span>
+                      <!-- Grund auf Deutsch (gesperrt, geloescht …), die yt-dlp-Meldung im Tooltip -->
+                      <span class="track-errmsg" title={dl.error_msg || ''}>{((dl.reason ? dl.status_text : (dl.error_msg || dl.status_text)) || '').slice(0, 60)}</span>
                     {/if}
                     {#if dl.fix_tab}
                       <button class="btn btn-sm" onclick={(e) => { e.stopPropagation(); openSettings(dl.fix_tab) }}

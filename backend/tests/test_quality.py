@@ -155,3 +155,35 @@ class QualityTest(BackendTest):
             main._download_replacement = alt
         self.assertEqual(ws.of_type("quality_replace_status")[-1]["state"], "error")
         self.assertEqual(old.read_bytes(), before)
+
+
+class QualityCacheTest(BackendTest):
+    """Messwerte der Hochrechnungs-Pruefung ueberleben einen Neuaufbau der Bibliothek."""
+
+    def test_neu_aufgebaute_bibliothek_behaelt_messwerte(self):
+        import json
+        eintrag = {"path": r"M:\Musik\a.mp3", "title": "a", "duration_sec": 200.4, "cutoff_khz": 16.1}
+        self.write_library([eintrag])
+        main.load_library()
+        self.assertTrue(main.QUALITY_CACHE.exists() or main._quality_cache)
+        main.save_library()
+        # Bibliothek ohne Messwert (z. B. neu eingelesen)
+        self.write_library([{k: v for k, v in eintrag.items() if k != "cutoff_khz"}])
+        main._quality_cache = {}
+        main.load_library()
+        self.assertEqual(main._state["library"][0]["cutoff_khz"], 16.1)
+
+    def test_kaputte_datei_nimmt_sicherung(self):
+        self.write_library([{"path": r"M:\Musik\b.mp3", "title": "b", "duration_sec": 100, "cutoff_khz": 20.0}])
+        main.load_library()
+        main._lib_backup_done = False
+        main.save_library()                                  # legt .bak an
+        main.LIB_CACHE.write_text("{kaputt", "utf-8")
+        main.load_library()
+        self.assertEqual(len(main._state["library"]), 1)
+        self.assertEqual(main._state["library"][0]["cutoff_khz"], 20.0)
+
+    def test_neuer_eintrag_bekommt_bekannten_wert(self):
+        main._quality_cache = {main._qkey(r"M:\Musik\c.mp3", 180): 15.5}
+        e = main._make_library_entry(r"M:\Musik\c.mp3", {"duration_sec": 180.2})
+        self.assertEqual(e["cutoff_khz"], 15.5)

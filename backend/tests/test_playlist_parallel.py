@@ -45,7 +45,12 @@ class PlaylistParallelTest(BackendTest):
         self.log = self.tmp / "fake.log"
         import os
         os.environ["FAKE_LOG"] = str(self.log)
-        self._saved_tools = (main.YTDLP, main._JS_ARGS, main._audit_playlist_for_videos, main.FFMPEG_DIR)
+        self._saved_tools = (main.YTDLP, main._JS_ARGS, main._audit_playlist_for_videos, main.FFMPEG_DIR, main._ytm_songs)
+        self.ersatz = []          # Antwort der (ersetzten) Song-Suche
+
+        async def songs(query, n=8, details=True):
+            return list(self.ersatz)
+        main._ytm_songs = songs
         main.YTDLP, main._JS_ARGS, main.FFMPEG_DIR = str(bat), [], ""
         main._state["download_dir"] = str(self.tmp / "Downloads")
         main._state["playlist_folder_enabled"] = True
@@ -54,7 +59,7 @@ class PlaylistParallelTest(BackendTest):
         main._state["library"] = []
 
     def tearDown(self):
-        main.YTDLP, main._JS_ARGS, main._audit_playlist_for_videos, main.FFMPEG_DIR = self._saved_tools
+        main.YTDLP, main._JS_ARGS, main._audit_playlist_for_videos, main.FFMPEG_DIR, main._ytm_songs = self._saved_tools
         super().tearDown()
 
     def fake_audit(self, ids, title):
@@ -89,3 +94,43 @@ class PlaylistParallelTest(BackendTest):
         tracks = [d for d in main._state["downloads"] if d["id"] != main._state["downloads"][0]["id"]]
         by = {t["title"][:12]: t["status"] for t in tracks}
         self.assertEqual(sorted(by.values()), ["done", "done", "error"])
+        err = [t for t in tracks if t["status"] == "error"][0]
+        self.assertEqual(err["reason"], "gone")
+        self.assertEqual(err["status_text"], "Gelöscht oder privat")
+        self.assertEqual(main._state["downloads"][0]["failed_n"], 1)
+
+    def test_ersatz_wird_geladen(self):
+        # Gesperrt/geloescht: eine andere Version desselben Songs wird genommen
+        self.ersatz = [{"url": "https://music.youtube.com/watch?v=ersatz00001", "title": "Song", "duration": 200}]
+        self.fake_audit(["idaaaaaaaaa", "kaputt00000"], "Liste")
+        self.run_async(main.run_download("https://www.youtube.com/playlist?list=PLtest3", "mp3-best"))
+        hdr = main._state["downloads"][0]
+        tracks = [d for d in main._state["downloads"] if d["id"] != hdr["id"]]
+        self.assertEqual(len(tracks), 2)
+        self.assertTrue(all(t["status"] == "done" for t in tracks))
+        self.assertIn("✓ Ersatz geladen", [t["status_text"] for t in tracks])
+        self.assertIn("1 ersetzt", hdr["status_text"])
+
+    def test_fehlgeschlagene_nochmal(self):
+        import asyncio
+        from tests.support import FakeWS
+        self.fake_audit(["idaaaaaaaaa", "kaputt00000"], "Liste")
+
+        async def ablauf():
+            await main.run_download("https://www.youtube.com/playlist?list=PLtest4", "mp3-best")
+            sid = main._state["downloads"][0]["id"]
+            main._audit_playlist_for_videos = None          # darf nicht gebraucht werden
+            await main.handle_message(FakeWS(), {"type": "download_retry_failed", "session_id": sid})
+            for _ in range(200):
+                neu = [d for d in main._state["downloads"] if str(d.get("session_label", "")).startswith("Nochmal")]
+                if neu and neu[0].get("status") == "done":
+                    return sid, neu[0]
+                await asyncio.sleep(0.05)
+            return sid, None
+
+        sid, neu = self.run_async(ablauf())
+        self.assertIsNotNone(neu)
+        self.assertEqual(neu["folder"], "Liste")                 # gleicher Ordner wie vorher
+        alt = [d for d in main._state["downloads"] if d.get("session") == sid and d["id"] != sid]
+        self.assertEqual([d["status"] for d in alt], ["done"])  # Fehlgeschlagener ist umgezogen
+        self.assertIn("1 nicht verfügbar", neu["status_text"])  # Attrappe: bleibt kaputt
