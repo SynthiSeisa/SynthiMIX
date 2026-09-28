@@ -3,7 +3,7 @@
   import { untrack, onMount } from 'svelte'
   import { keyCompat } from '../lib/keys.js'
   import KeyChip from './KeyChip.svelte'
-  import { library, playerState, nowPlaying, queue, waveform, waveformNext, settings, playMode, send, autoMixEnabled, appSettings, introSkipPaths, skipNextCrossfade, livePositionMs, beatGrids } from '../stores/ws.js'
+  import { library, playerState, nowPlaying, queue, waveform, waveformNext, settings, playMode, send, autoMixEnabled, appSettings, introSkipPaths, skipNextCrossfade, livePositionMs, beatGrids, waveformThird } from '../stores/ws.js'
   import { createSync, glideRate, alignedStart } from '../lib/beatsync.js'
   import Waveform from './Waveform.svelte'
 
@@ -56,6 +56,7 @@
   let outroOverride = $state(null)   // { path, frac }: Beginn der MIX-Zone im laufenden Titel
   let introOverride = $state(null)   // { path, frac }: Einstieg im naechsten Titel
   let zoneDragging  = false
+  let _cfDoneAt     = 0            // Ende des letzten Uebergangs (performance.now)
 
   let audioCtx = null
   let gainA = null, gainB = null
@@ -323,7 +324,8 @@
     if (durMs <= 0 || cfS <= 0) return -1
     const cfg    = get(appSettings)
     const cfFrac = Math.min(0.9, (cfS * 1000) / durMs)
-    if (outroOverride && outroOverride.path === get(nowPlaying)?.path)
+    const playingPath = cur()?.dataset.path || get(nowPlaying)?.path
+    if (outroOverride && outroOverride.path === playingPath)
       return Math.max(0.02, Math.min(outroOverride.frac, 1 - cfFrac))
     const sil    = _outroSilence()
     let trig
@@ -414,6 +416,13 @@
   const nextTrack    = $derived(
     nextTrackIdx >= 0 && nextTrackIdx < $queue.length ? $queue[nextTrackIdx] : null
   )
+  // Der Titel danach gleitet beim Uebergang in die Zeile "Naechster" nach
+  // (bei Zufallswiedergabe steht er noch nicht fest)
+  const thirdTrack = $derived.by(() => {
+    if ($playMode.shuffle || nextTrackIdx < 0) return null
+    const i = _computeNext($queue, nextTrackIdx, $playMode, '')
+    return i >= 0 && i !== nextTrackIdx && i !== $playerState.current_idx ? $queue[i] : null
+  })
   // Deck 2 grey bar:
   //   START = where track 2 begins playing (seeks to this position)
   //   END   = start + cfS (bar is always exactly one crossfade wide)
@@ -454,7 +463,7 @@
     untrack(() => { outroOverride = null; if (introOverride?.path === p) introOverride = null })
   })
   function dragOutro(frac, done) {
-    const np = get(nowPlaying)?.path
+    const np = cur()?.dataset.path || get(nowPlaying)?.path
     zoneDragging = !done
     if (!np || cfActive || cfRafActive || durMs <= 0) return
     const cfFrac = Math.min(0.9, (cfS * 1000) / durMs)
@@ -555,7 +564,7 @@
         // Fenster minimiert oder verdeckt ist — der Uebergang blieb dann haengen
         // und beide Titel spielten weiter
         if (t < 1) cfRaf = setTimeout(rafTick, 16)
-        else { cfRaf = null; cfRafActive = false; endSync(a); _silenceAndStop(c) }
+        else { cfRaf = null; cfRafActive = false; endSync(a); _silenceAndStop(c); _cfDoneAt = performance.now() }
       }
       cfRaf = setTimeout(rafTick, 16)
     } else {
@@ -661,6 +670,9 @@
     // paar hundert Millisekunden — frueher startete genau dann ein neuer
     // Uebergang, und der naechste Titel spielte nach dem Pausieren weiter.
     if (!get(playerState).playing || zoneDragging) return
+    // Nach einem Uebergang den neuen Titel erst ein paar Sekunden laufen
+    // lassen — nie zwei Uebergaenge direkt hintereinander (Ueberspringen)
+    if (performance.now() - _cfDoneAt < 8000) return
 
     const trigFrac = _outroTrigger()
     let triggerMs  = trigFrac >= 0 ? trigFrac * durMs : durMs - cfS * 1000
@@ -766,6 +778,8 @@
     const cfCurveSnap = get(appSettings).cfCurve ?? 'cosine'
 
     stopRamp(cur()); stopRamp(inactive)
+    if (thirdTrack?.path && get(waveformThird).path !== thirdTrack.path)
+      send({ type: 'get_waveform_third', path: thirdTrack.path })
     cfStartAt = performance.now(); cfLenMs = cfMs; blendNextPos = introFrac
     requestAnimationFrame(_blendLoop)
     cfTimer = setInterval(() => {
@@ -813,6 +827,8 @@
     loadedUrl = nextUrl
     if (newEl) endSync(newEl)
     blendP = 0; blendNextPos = 0
+    _cfDoneAt = performance.now()
+    outroOverride = null; introOverride = null
     which = which === 'A' ? 'B' : 'A'
 
     if (oldEl) _silenceAndStop(oldEl)
@@ -825,7 +841,8 @@
     // Immediately show next track's waveform — don't wait for WS round-trip.
     const wfNext = get(waveformNext)
     waveform.set(wfNext)
-    waveformNext.set([])
+    const w3 = get(waveformThird)
+    waveformNext.set(w3.path && w3.path === thirdTrack?.path ? w3.data : [])
     if (wfNext.length > 0) {
       // Prime _wfPath so the deck-1 waveform effect reuses this without a flicker
       _wfPath = nextPath
@@ -998,7 +1015,8 @@
   let deckH   = $state(0)
   let deck1H   = $state(44)
   let nextBarH = $state(18)
-  const WF1_H = 44, WF2_H = 24
+  let deck2H   = $state(48)
+  const WF1_H = 60, WF2_H = 28
 </script>
 
 <audio bind:this={elA} ontimeupdate={onTimeUpdate} onloadedmetadata={onLoadedMetadata} onended={onEnded} onerror={onMediaError}></audio>
@@ -1028,15 +1046,18 @@
     </div>
 
     <div class="center" bind:clientHeight={centerH}>
+      <!-- Eine Zeile: Titel links, Tonart/BPM/Zeit rechtsbuendig. Die Zeile
+           darunter faellt weg, die Waveform bekommt den Platz -->
       <div class="track-info">
-        <span class="title">{$nowPlaying?.title ?? '—'}</span>
+        <span class="title" title={$nowPlaying?.title ?? ''}>{$nowPlaying?.title ?? '—'}{#if $nowPlaying?.artist && !($nowPlaying.title ?? '').toLowerCase().includes($nowPlaying.artist.toLowerCase())}<span class="artist"> · {$nowPlaying.artist}</span>{/if}</span>
         <span class="meta">
-          {#if $nowPlaying?.artist}<span class="artist">{$nowPlaying.artist}</span>{/if}
+          {#if playerNotice}<span class="lufs-warn" role="status"><i class="ti ti-alert-triangle"></i> {playerNotice}</span>{/if}
           {#if curKey}<KeyChip key={curKey.key} src={curKey.key_src} />{/if}
           {#if $nowPlaying?.bpm}<span class="m-num">{$nowPlaying.bpm} BPM</span>
           {:else if $nowPlaying}<span class="bpm-pending">BPM wird gemessen…</span>{/if}
-          <!-- Normalisierung wird in den Einstellungen geschaltet; hier nur der Stand -->
-          {#if $nowPlaying?.lufs && $nowPlaying.lufs > -90}
+          <!-- LUFS nur auf Wunsch (Einstellungen → Darstellung) -->
+          {#if !$appSettings.playerShowLufs}
+          {:else if $nowPlaying?.lufs && $nowPlaying.lufs > -90}
             {#if $appSettings.normalizeVolume}
               <span class="m-num norm-on" title="Lautstärke-Angleichung an: {$nowPlaying.lufs.toFixed(1)} LUFS wird auf {$appSettings.targetLUFS} LUFS gebracht (Einstellungen → Wiedergabe)"><b>≋</b> {$nowPlaying.lufs.toFixed(1)} → {$appSettings.targetLUFS} LUFS</span>
             {:else}
@@ -1045,15 +1066,13 @@
           {:else if $appSettings.normalizeVolume && $nowPlaying}
             <span class="lufs-warn" title="Keine Lautstärkemessung — Normalisierung nicht aktiv für diesen Track">kein LUFS-Wert</span>
           {/if}
-          {#if $nowPlaying?.play_count}<span class="m-num" title="So oft gespielt">×{$nowPlaying.play_count}</span>{/if}
-          {#if playerNotice}<span class="lufs-warn" role="status"><i class="ti ti-alert-triangle"></i> {playerNotice}</span>{/if}
           <span class="time"><b>{fmt(posMs)}</b> / {fmt(durMs)}</span>
         </span>
       </div>
 
       <!-- Beim Uebergang gleitet der naechste Titel nach oben an die Stelle des
            laufenden; am Ende tauschen die Daten, das Bild bleibt gleich -->
-      <div class="decks" style="--bp:{blendP}">
+      <div class="decks" style={blendP > 0 ? `height:${deck1H + 6 + deck2H}px` : ''}>
         <div class="deck1" bind:clientHeight={deck1H}
              style={blendP > 0 ? `transform:translateY(${-blendP * 100}%);opacity:${1 - blendP}` : ''}>
           <Waveform data={$waveform} position={pos} onclick={seek} height={WF1_H}
@@ -1063,7 +1082,7 @@
                     loading={$nowPlaying !== null && $waveform.length === 0} />
         </div>
         {#if nextTrack}
-          <div class="deck2" style={blendP > 0 ? `transform:translateY(${-blendP * (deck1H + nextBarH + 12)}px)` : ''}>
+          <div class="deck2" bind:clientHeight={deck2H} style={blendP > 0 ? `transform:translateY(${-blendP * (deck1H + nextBarH + 12)}px)` : ''}>
             <div class="next-bar" bind:clientHeight={nextBarH} style={blendP > 0 ? `opacity:${1 - Math.min(1, blendP * 2)}` : ''}>
               <span class="eyebrow next-label">Nächster</span>
               <span class="next-title">{nextTrack.title}{nextTrack.artist ? ' · ' + nextTrack.artist : ''}</span>
@@ -1079,6 +1098,17 @@
                         zoneTitle="MIX-Zone ziehen: an anderer Stelle in den nächsten Titel einsteigen (nur dieses Mal)" />
             </div>
           </div>
+          {#if blendP > 0 && thirdTrack}
+            <!-- Titel danach rueckt von unten in die Zeile "Naechster" nach -->
+            <div class="deck2 deck3" style={`transform:translateY(${-blendP * (deck2H + 6)}px);opacity:${Math.min(1, blendP * 1.6)}`}>
+              <div class="next-bar">
+                <span class="eyebrow next-label">Nächster</span>
+                <span class="next-title">{thirdTrack.title}{thirdTrack.artist ? ' · ' + thirdTrack.artist : ''}</span>
+                <span class="next-dur">{fmt(thirdTrack.duration_sec * 1000)}</span>
+              </div>
+              <Waveform data={$waveformThird.path === thirdTrack.path ? $waveformThird.data : []} position={0} height={WF2_H} />
+            </div>
+          {/if}
         {/if}
       </div>
     </div>
@@ -1121,13 +1151,14 @@
   .wf2 { transform-origin: top center; }
 
   .center { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
-  .track-info { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .track-info { display: flex; align-items: center; gap: var(--sp-4); min-width: 0; }
   .title {
-    font-size: var(--fs-xl); font-weight: 700; color: var(--c-tx1); line-height: 1.2;
+    flex: 1; min-width: 0;
+    font-size: var(--fs-xl); font-weight: 700; color: var(--c-tx1); line-height: 1.25;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  .meta { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; font-size: var(--fs-body); color: var(--c-tx3); }
-  .artist { color: var(--c-tx2); font-weight: 600; }
+  .meta { flex-shrink: 0; display: flex; align-items: center; gap: var(--sp-3); font-size: var(--fs-body); color: var(--c-tx3); }
+  .artist { color: var(--c-tx3); font-weight: 600; }
   .m-num { font-variant-numeric: tabular-nums; }
   .bpm-pending { color: var(--c-tx5); font-style: italic; }
   .lufs-warn { color: var(--c-warn-tx); display: inline-flex; align-items: center; gap: 4px; }
@@ -1149,7 +1180,7 @@
   .play:hover { background: var(--c-accent2); }
   .play:active { transform: scale(.96); }
   :global([data-density="comfortable"]) .play { width: 40px; height: 40px; font-size: 19px; }
-  .time { margin-left: auto; font-size: var(--fs-body); color: var(--c-tx3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .time { font-size: var(--fs-body); color: var(--c-tx3); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .time b { color: var(--c-tx1); font-weight: 600; }
 
   /* ── Lautstaerke-Fader: schmal, Wert oben, Fuellung zeigt den Pegel ─────── */

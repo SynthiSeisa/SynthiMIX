@@ -220,7 +220,21 @@ ipcMain.handle('open-path', (e, target) => {
   // Die Remote-Adresse kommt auch hier an. Als Datei gesucht fand sie sich nie,
   // und "Im Browser oeffnen" tat deshalb schlicht nichts.
   if (/^https?:\/\//i.test(target)) return shell.openExternal(target)
-  if (fs.existsSync(target)) return shell.showItemInFolder(target)
+  target = path.win32.normalize(String(target))
+  let st = null
+  try { st = fs.statSync(target) } catch {}
+  if (st?.isDirectory()) return shell.openPath(target)
+  if (st) {
+    // explorer.exe /select: markiert die Datei und kommt zuverlaessig nach
+    // vorne; showItemInFolder als Rueckfall
+    if (process.platform === 'win32') {
+      try {
+        require('child_process').spawn('explorer.exe', ['/select,', target], { detached: true, stdio: 'ignore' }).unref()
+        return
+      } catch {}
+    }
+    return shell.showItemInFolder(target)
+  }
   // Datei verschoben oder geloescht: wenigstens den Ordner zeigen, in dem sie
   // lag. Der fruehere Rueckfall auf ../../Downloads existiert im Installer nicht.
   const dir = path.dirname(target)

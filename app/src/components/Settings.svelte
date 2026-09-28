@@ -354,7 +354,7 @@
                 <span class="val">{$appSettings.targetLUFS} LUFS</span>
               </div>
             {/if}
-            <div class="hint">Der Player zeigt den Stand neben BPM, z. B. „≋ −8.1 → {$appSettings.targetLUFS} LUFS“. Auf der Fernbedienung lässt sich die Angleichung weiter schalten.</div>
+            <div class="hint">Den Stand im Player („≋ −8.1 → {$appSettings.targetLUFS} LUFS“) blendest du unter Darstellung → Player ein. Auf der Fernbedienung lässt sich die Angleichung weiter schalten.</div>
           </div>
 
           <div class="group">
@@ -727,6 +727,16 @@
               {#if $density === 'compact'}Kompakt: niedrige Zeilen, viele Titel auf einmal — gut zum Aufräumen zuhause.
               {:else}Komfortabel: größere Zeilen, Schrift und Klickziele — gut aus Abstand und live am Laptop.{/if}
             </div>
+          </div>
+
+          <div class="group">
+            <div class="group-title">Player</div>
+            <div class="row">
+              <span class="lbl">Lautheit (LUFS) anzeigen</span>
+              <button class="tog {$appSettings.playerShowLufs ? 'on' : ''}" aria-label="Lautheit im Player anzeigen"
+                onclick={() => appSettings.update(s => ({ ...s, playerShowLufs: !s.playerShowLufs }))}></button>
+            </div>
+            <div class="hint">Zeigt neben BPM, wie laut der Titel ist und worauf er angeglichen wird, z. B. „≋ −8.1 → −10 LUFS“.</div>
           </div>
 
           <div class="group">

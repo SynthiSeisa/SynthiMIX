@@ -1,6 +1,6 @@
 <script>
   import { onMount, untrack, tick } from 'svelte'
-  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected, qualityScan, revealPath, excludedFolders } from '../stores/ws.js'
+  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected, qualityScan, revealPath, excludedFolders, watchedFolders, downloadDir } from '../stores/ws.js'
   import BetterVersionDialog from './BetterVersionDialog.svelte'
   import { keySortValue } from '../lib/keys.js'
   import KeyChip from './KeyChip.svelte'
@@ -143,22 +143,29 @@
   let secGenreOpen    = $state(_secSaved.genre    ?? false)
   let secDlOpen       = $state(_secSaved.dl       ?? true)
   let secPlaylistOpen = $state(_secSaved.playlist ?? true)
+  let secQuickOpen    = $state(_secSaved.quick    ?? true)
+  let secDirsOpen     = $state(_secSaved.dirs     ?? true)
+  let secFilterOpen   = $state(_secSaved.filter   ?? false)
 
   // Nur Ansichten, die sich allein aus Bibliothek, Playlisten oder dem
   // Download-Baum ergeben. "Mein Computer" braeuchte eine Ordnerabfrage,
   // "Duplikate" einen Scan — die startet man lieber bewusst.
   function restorableMode(mode) {
     if (mode === 'history' || mode === 'dl_recent') return 'downloads'
-    if (['all', 'recent', 'downloads', 'dl_all', 'quality'].includes(mode)) return mode
-    if (/^(artist|album|genre|playlist):/.test(mode)) return mode
-    if (mode.startsWith('dl:') && !mode.startsWith('dl:file:')) return mode
+    if (mode === 'dl_all') return 'downloads'
+    if (['all', 'recent', 'downloads', 'quality'].includes(mode)) return mode
+    if (/^(artist|album|genre|playlist|dir):/.test(mode)) return mode
+    // Fruehere Ordneransichten (Download-Baum, Mein Computer) → Ordner
+    if (mode.startsWith('dl:') && !mode.startsWith('dl:file:')) return 'dir:' + mode.slice(3)
+    if (mode.startsWith('fs:')) return 'dir:' + mode.slice(3)
     return null
   }
 
   let _navRestored = false
   $effect(() => {
     const sections = { fs: secFsOpen, artist: secArtistOpen, album: secAlbumOpen,
-                       genre: secGenreOpen, dl: secDlOpen, playlist: secPlaylistOpen }
+                       genre: secGenreOpen, dl: secDlOpen, playlist: secPlaylistOpen,
+                       quick: secQuickOpen, dirs: secDirsOpen, filter: secFilterOpen }
     const mode = navMode
     // Waehrend der Suche aufgeklappte Abschnitte sind kein gewollter Zustand.
     if (navQ) return
@@ -184,10 +191,10 @@
       if (pl) untrack(() => openPlaylistInLibrary(pl))
       return
     }
-    if (want.startsWith('dl')) {
-      if (!$downloadTreeLoaded) { untrack(() => loadDlTree()); return }
+    if (want.startsWith('dir:')) {
+      if (!$library.length) return
       _navRestored = true
-      untrack(() => selectNav(want))
+      untrack(() => selectDir(want.slice(4)))
       return
     }
     if (/^(artist|album|genre):/.test(want)) {
@@ -355,6 +362,109 @@
     }
   }
 
+  // ── Ordnerbaum (Schnellzugriff, Musikordner, Computer) ──────────────────
+  // Ein Baum, eine Logik: ▸ klappt auf, ein Klick zeigt alle Titel im Ordner
+  // samt Unterordnern. Unterordner und Zaehler kommen aus der Bibliothek;
+  // Ordner ausserhalb der Bibliothek werden vom Laufwerk gelesen.
+  const _nd  = (p) => (p ?? '').replace(/\//g, '\\').replace(/\\+$/, '')
+  const _dk  = (p) => _nd(p).toLowerCase()
+  const _base = (p) => { const n = _nd(p); return n.split('\\').pop() || n }
+  const libDirs = $derived.by(() => {
+    const m = new Map()          // Schluessel → { path, name, count, kids:Set }
+    for (const t of $library) {
+      if (!t.path || t.missing) continue
+      const parts = _nd(t.path).split('\\')
+      parts.pop()
+      let acc = '', parentKey = null
+      for (let i = 0; i < parts.length; i++) {
+        acc = i === 0 ? parts[0] : acc + '\\' + parts[i]
+        const k = acc.toLowerCase()
+        let n = m.get(k)
+        if (!n) { n = { path: acc, name: parts[i], count: 0, kids: new Set() }; m.set(k, n) }
+        n.count++
+        if (parentKey) m.get(parentKey).kids.add(k)
+        parentKey = k
+      }
+    }
+    return m
+  })
+  function dirCount(path) { return libDirs.get(_dk(path))?.count ?? 0 }
+  // Unterordner: aus der Bibliothek, sonst (Ordner nicht eingelesen) vom Laufwerk
+  function dirKids(path) {
+    const n = libDirs.get(_dk(path))
+    if (n && n.kids.size) {
+      return [...n.kids].map(k => libDirs.get(k)).sort((a, b) => a.name.localeCompare(b.name, 'de', { numeric: true }))
+    }
+    return (fsKids[path] ?? []).filter(c => c.isDir).map(c => ({ path: c.path, name: c.name, count: dirCount(c.path) }))
+  }
+  function hasKids(path) {
+    const n = libDirs.get(_dk(path))
+    if (n && n.kids.size) return true
+    if (fsKids[path]) return fsKids[path].some(c => c.isDir)
+    return !n                   // unbekannt: erst beim Aufklappen nachsehen
+  }
+
+  const NAV_OPEN_KEY = 'synthimix-nav-open'
+  let dirOpen = $state((() => { try { return new Set(JSON.parse(localStorage.getItem(NAV_OPEN_KEY) ?? '[]')) } catch { return new Set() } })())
+  function _saveOpen() { try { localStorage.setItem(NAV_OPEN_KEY, JSON.stringify([...dirOpen])) } catch {} }
+  async function _ensureFsKids(path) {
+    if (!fsKids[path] && window.electron?.listDir)
+      fsKids = { ...fsKids, [path]: await window.electron.listDir(path) }
+  }
+  async function toggleDir(path, e) {
+    e?.stopPropagation()
+    const k = _dk(path)
+    const s = new Set(dirOpen)
+    if (s.has(k)) s.delete(k)
+    else {
+      s.add(k)
+      if (!libDirs.get(k)?.kids.size) await _ensureFsKids(path)
+    }
+    dirOpen = s
+    _saveOpen()
+  }
+  async function selectDir(path) {
+    selectNav('dir:' + path)
+    // Ordner ohne Titel in der Bibliothek: Dateien vom Laufwerk zeigen
+    if (!dirCount(path)) await _ensureFsKids(path)
+  }
+  function dirDragStart(e, path) {
+    const k = _dk(path) + '\\'
+    const tracks = $library.filter(t => _dk(t.path).startsWith(k))
+                           .map(t => ({ path: t.path, title: t.title, duration_sec: t.duration_sec ?? 0 }))
+    e.dataTransfer.setData('application/x-ytdl-multi', JSON.stringify(tracks))
+    e.dataTransfer.effectAllowed = 'copy'
+  }
+
+  // Musikordner: die beobachteten Ordner, dazu der Download-Ordner, falls er
+  // nicht schon darin liegt
+  const musicRoots = $derived.by(() => {
+    const roots = ($watchedFolders ?? []).map(w => w.path ?? w).filter(Boolean)
+    const dl = $downloadDir
+    if (dl && !roots.some(r => _dk(dl) === _dk(r) || _dk(dl).startsWith(_dk(r) + '\\'))) roots.push(dl)
+    return roots
+  })
+  // Suche in der Navigation: passende Ordner als flache Liste
+  const matchingDirs = $derived(navQ
+    ? [...libDirs.values()].filter(n => n.name.toLowerCase().includes(navQ))
+        .sort((a, b) => b.count - a.count).slice(0, 40)
+    : [])
+
+  // Schnellzugriff = Favoriten. Frueher angeheftete Download-Ordner einmalig uebernehmen.
+  $effect(() => {
+    if (!$connected || !pinnedDlFolders.length) return
+    untrack(() => {
+      for (const p of pinnedDlFolders)
+        if (!$favorites.some(f => _dk(f.path) === _dk(p.path))) send({ type: 'add_favorite', path: p.path, name: p.name })
+      pinnedDlFolders = []
+    })
+  })
+  async function addQuickFolder(e) {
+    e?.stopPropagation()
+    const dir = await window.electron?.pickFolder?.()
+    if (dir) send({ type: 'add_favorite', path: dir, name: _base(dir) })
+  }
+
   function toggleSection(sec) {
     if (sec === 'fs') {
       secFsOpen = !secFsOpen
@@ -368,6 +478,9 @@
       if (secDlOpen && !$downloadTreeLoaded) loadDlTree()
     }
     else if (sec === 'playlist') secPlaylistOpen = !secPlaylistOpen
+    else if (sec === 'quick')    secQuickOpen    = !secQuickOpen
+    else if (sec === 'dirs')     secDirsOpen     = !secDirsOpen
+    else if (sec === 'filter')   secFilterOpen   = !secFilterOpen
   }
 
   onMount(() => {
@@ -581,6 +694,25 @@
       return applySort(list)
     }
 
+    // ── Ordner: alle Titel darin samt Unterordnern ─────────────────────────
+    if (navMode.startsWith('dir:')) {
+      const dirPath = navMode.slice(4)
+      const k = _dk(dirPath) + '\\'
+      let list = $library.filter(t => t.path && _dk(t.path).startsWith(k))
+      if (!list.length) {
+        // Nicht in der Bibliothek: Dateien direkt im Ordner vom Laufwerk
+        const AUDIO = /\.(mp3|flac|wav|m4a|ogg|aac|opus|wma|aiff?)$/i
+        list = (fsKids[dirPath] ?? []).filter(c => !c.isDir && AUDIO.test(c.name)).map(f => ({
+          path: f.path, title: f.name.replace(/\.[^.]+$/, ''), artist: '', duration_sec: 0, lufs: -99, bpm: 0, bitrate_kbps: 0
+        }))
+      }
+      if (q) list = list.filter(t => {
+        const { artist, title } = getTrackArtistTitle(t)
+        return title.toLowerCase().includes(q) || artist.toLowerCase().includes(q)
+      })
+      return applySort(list)
+    }
+
     // ── Filesystem browser: show audio files from that directory ─────────────
     if (navMode.startsWith('fs:')) {
       const fsPath = navMode.slice(3)
@@ -711,6 +843,9 @@
   const CUTOFF_UPSCALED = 17.0               // kHz, wie _CUTOFF_UPSCALED_KHZ im Backend
   const MV_TITLE_RE = /\b(official\s+(?:music\s+)?video|music\s+video|official\s+mv|mv)\b/i
   const QUALITY_LABELS = { video: 'Musikvideo', bitrate: 'Niedrige Bitrate', upscaled: 'Hochgerechnet' }
+  // Warnfarbe: rot erst, wenn die Hoehen unter 16 kHz abgeschnitten sind
+  // (deutlich hoerbar), alles andere orange
+  const CUTOFF_RED = 16
   const QUALITY_TIPS = {
     video: 'Musikvideo-Version: oft Intro, Pausen oder Geräusche',
     bitrate: 'Unter 192 kbps',
@@ -842,7 +977,19 @@
     dupeKeep = { ...dupeKeep, [g.gid]: track.path }
     try { localStorage.setItem(KEEP_KEY, JSON.stringify(dupeKeep)) } catch {}
   }
-  function trashOne(track) { send({ type: 'library_remove_disk', path: track.path }) }
+  function trashOne(track) { trashPaths([track.path]) }
+  // In den Papierkorb: Zeilen sofort ausblenden, das Backend erledigt alle
+  // Dateien in einem Rutsch und schickt danach die Bibliothek (misslungene
+  // Titel tauchen dann wieder auf, mit Hinweis unten links)
+  function trashPaths(paths) {
+    const set = new Set(paths)
+    if (!set.size) return
+    library.update(l => l.filter(t => !set.has(t.path)))
+    downloadTree.update(dt => ({ folders: (dt.folders ?? []).map(f => ({ ...f, tracks: (f.tracks ?? []).filter(t => !set.has(t.path)) })),
+                                  files: (dt.files ?? []).filter(f => !set.has(f.path)) }))
+    const sel = new Set(selected); for (const p of set) sel.delete(p); selected = sel
+    send({ type: 'library_remove_disk_many', paths: [...set] })
+  }
 
   const globalDupes = $derived(withKeep(findDupes($library)))
   const scopedDupes = $derived(dupeSourceMode === 'all' || dupeSourceMode === 'duplicates'
@@ -1235,14 +1382,15 @@
     ctxMenu = null
   }
   function confirmDeleteFromDisk() {
-    for (const { path } of dlgDeletePaths) send({ type: 'library_remove_disk', path })
+    trashPaths(dlgDeletePaths.map(d => d.path))
     selected = new Set()
     dlgDeletePaths = []
   }
 
   function qualityDot(track) {
     const ext = track.path?.split('.').pop()?.toLowerCase() ?? ''
-    if ((track.cutoff_khz ?? 0) > 5 && track.cutoff_khz < CUTOFF_UPSCALED) return 'q-red'
+    if ((track.cutoff_khz ?? 0) > 5 && track.cutoff_khz < CUTOFF_RED) return 'q-red'
+    if ((track.cutoff_khz ?? 0) > 5 && track.cutoff_khz < CUTOFF_UPSCALED) return 'q-yellow'
     if (['flac', 'wav', 'aiff', 'aif', 'alac'].includes(ext)) return 'q-green'
     const br = track.bitrate_kbps ?? 0
     if (br >= 192) return 'q-green'
@@ -1308,7 +1456,7 @@
 
   function removeHiddenDupes() {
     if (!confirm(`${dupesHidden.size} Kopien in den Papierkorb?\n\nDie mit ✓ markierte Datei jedes Songs bleibt.`)) return
-    for (const p of dupesHidden) send({ type: 'library_remove_disk', path: p })
+    trashPaths([...dupesHidden])
   }
 
   function clearPlayHistory() {
@@ -1474,7 +1622,7 @@
       </button>
       <button class="t-item {navMode === 'recent' ? 'active' : ''}" onclick={() => selectNav('recent')}>
         <i class="ti ti-clock t-ico" aria-hidden="true"></i>
-        <span class="t-name">Wiedergabe-Verlauf</span>
+        <span class="t-name">Zuletzt gespielt</span>
       </button>
       <button class="t-item {navMode === 'downloads' ? 'active' : ''}"
               title="Alles, was heruntergeladen wurde, neueste zuerst"
@@ -1498,30 +1646,6 @@
           <span class="t-count">{qualityInfo.map.size}</span>
         </button>
       {/if}
-      {#if $favorites.length > 0}
-        <div class="fav-wrap">
-          <button class="t-item {favOpen ? 'active' : ''}" onclick={(e) => { e.stopPropagation(); favOpen = !favOpen }}>
-            <i class="ti ti-star t-ico t-ico-warn" aria-hidden="true"></i>
-            <span class="t-name">Favoriten</span>
-            <span class="t-count">{$favorites.length}</span>
-            <i class="ti {favOpen ? 'ti-chevron-up' : 'ti-chevron-down'} fav-arrow" aria-hidden="true"></i>
-          </button>
-          {#if favOpen}
-          <div class="fav-dropdown" onclick={(e) => e.stopPropagation()}>
-            {#each $favorites as fav}
-              <button class="fav-item {navMode === 'fs:' + fav.path ? 'active' : ''}"
-                      onclick={() => { clickFsNode({ path: fav.path, isDir: true }); favOpen = false }}>
-                <i class="ti ti-folder t-ico-sm" aria-hidden="true"></i>
-                <span class="fav-item-name" title={fav.path}>{fav.name}</span>
-                <span class="row-act" role="button" tabindex="0" title="Aus Favoriten entfernen" aria-label="Aus Favoriten entfernen"
-                      onclick={(e) => { e.stopPropagation(); send({ type: 'remove_favorite', path: fav.path }) }}
-                      onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), send({ type: 'remove_favorite', path: fav.path }))}><i class="ti ti-x"></i></span>
-              </button>
-            {/each}
-          </div>
-          {/if}
-        </div>
-      {/if}
       <div class="nav-sep nav-sep-top"></div>
     </div>
 
@@ -1538,194 +1662,93 @@
     <!-- Scrollable tree section -->
     <div class="nav-tree">
 
-    <!-- 0. ANGEHEFTET -->
-    {#if pinnedDlFolders.length > 0}
-      <div class="t-sec-hdr t-pinned-hdr">
-        <i class="ti ti-pin t-ico-sm" aria-hidden="true"></i>
-        <span class="t-sec-label">Angeheftet</span>
+    {#snippet dirNode(node, depth)}
+      {@const k = _dk(node.path)}
+      {@const open = dirOpen.has(k) || !!navQ}
+      {@const kids = hasKids(node.path)}
+      <div class="t-child t-dir {navMode === 'dir:' + node.path ? 'active' : ''}"
+           role="treeitem" tabindex="0" aria-expanded={kids ? open : undefined} aria-selected={navMode === 'dir:' + node.path}
+           style="padding-left:{6 + depth * 14}px"
+           draggable="true" ondragstart={(e) => dirDragStart(e, node.path)}
+           onclick={() => selectDir(node.path)}
+           ondblclick={(e) => kids && toggleDir(node.path, e)}
+           onkeydown={(e) => { if (e.key === 'Enter') selectDir(node.path); else if (e.key === 'ArrowRight' && kids && !open) toggleDir(node.path, e); else if (e.key === 'ArrowLeft' && open) toggleDir(node.path, e) }}
+           oncontextmenu={(e) => onFolderCtx(e, node.path)}
+           class:excluded={excludedBy(node.path)}
+           title={node.path}>
+        {#if kids}
+          <span class="t-tog" role="button" tabindex="-1" aria-label={open ? 'Zuklappen' : 'Aufklappen'}
+                onclick={(e) => toggleDir(node.path, e)}><i class="ti ti-chevron-right t-chevron" class:open aria-hidden="true"></i></span>
+        {:else}
+          <span class="t-tog"></span>
+        {/if}
+        <i class="ti {node.icon ?? 'ti-folder'} t-ico-sm" aria-hidden="true"></i>
+        <span class="t-name">{node.name}</span>
+        {#if node.count ?? dirCount(node.path)}<span class="t-count">{node.count ?? dirCount(node.path)}</span>{/if}
+        {#if node.remove}
+          <span class="row-act" role="button" tabindex="0" title="Aus dem Schnellzugriff entfernen" aria-label="Aus dem Schnellzugriff entfernen"
+                onclick={(e) => { e.stopPropagation(); node.remove() }}
+                onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), node.remove())}><i class="ti ti-x"></i></span>
+        {/if}
       </div>
-      {#each pinnedDlFolders as pinned}
-        <div class="t-child {navMode === 'dl:' + pinned.path ? 'active' : ''}"
-             role="button" tabindex="0"
-             onclick={() => selectNav('dl:' + pinned.path)}
-             onkeydown={(e) => e.key === 'Enter' && selectNav('dl:' + pinned.path)}
-             title={pinned.name}>
-          <span class="t-toggle-ico" style="opacity:0">·</span>
-          <i class="ti ti-folder t-ico-sm" aria-hidden="true"></i>
-          <span class="t-name">{pinned.name}</span>
-          <span class="row-act" role="button" tabindex="0" title="Loslösen" aria-label="Loslösen"
-                onclick={(e) => { e.stopPropagation(); unpinDlFolder(pinned.path) }}
-                onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), unpinDlFolder(pinned.path))}><i class="ti ti-x"></i></span>
-        </div>
-      {/each}
-    {/if}
-
-    <!-- 1. DOWNLOADS -->
-    <div class="t-sec-hdr" role="button" tabindex="0"
-         onclick={() => toggleSection('dl')}
-         onkeydown={(e) => e.key === 'Enter' && toggleSection('dl')}>
-      <i class="ti ti-chevron-right t-chevron" class:open={secDlOpen} aria-hidden="true"></i>
-      <span class="t-sec-label">Downloads</span>
-      {#if $downloadTreeLoaded}
-        <span class="t-count">{dlTotalCount}</span>
-      {/if}
-      <span class="row-act" title="Downloads neu einlesen" aria-label="Downloads neu einlesen" role="button" tabindex="0"
-            onclick={(e) => { e.stopPropagation(); loadDlTree() }}
-            onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), loadDlTree())}><i class="ti ti-refresh"></i></span>
-    </div>
-    {#if secDlOpen}
-      {#if $downloadTreeLoaded}
-        <!-- Alle Downloads: root + subfolders combined view -->
-        <button class="t-child {navMode === 'dl_all' ? 'active' : ''}"
-                onclick={() => selectNav('dl_all')}
-                title="Alle heruntergeladenen Titel anzeigen">
-          <span class="t-toggle-ico" style="opacity:0">·</span>
-          <i class="ti ti-download t-ico-sm" aria-hidden="true"></i>
-          <span class="t-name">Alle Downloads</span>
-          <span class="t-count">{dlTotalCount}</span>
-        </button>
-        {#snippet dlFolderNode(folder, depth)}
-          {@const allTracks = folder.tracks.map(f => ({ path: f.path, title: f.name, duration_sec: 0 }))}
-          {@const hasSubs = folder.folders?.length > 0}
-          {@const isExpanded = dlExpandedFolders.has(folder.path)}
-          <button class="t-child {navMode === 'dl:' + folder.path ? 'active' : ''}"
-                  style="padding-left: {8 + depth * 12}px"
-                  draggable="true"
-                  ondragstart={(e) => {
-                    e.dataTransfer.setData('application/x-ytdl-multi', JSON.stringify(allTracks))
-                    e.dataTransfer.effectAllowed = 'copy'
-                  }}
-                  onclick={() => selectNav('dl:' + folder.path)}
-                  oncontextmenu={(e) => onFolderCtx(e, folder.path)}
-                  class:excluded={excludedBy(folder.path)}
-                  title={excludedBy(folder.path) ? folder.name + '\nAus der Bibliothek ausgeschlossen — Rechtsklick: wieder aufnehmen' : folder.name + '\nDraggen: alle Tracks zur Queue'}>
-            {#if hasSubs}
-              <span class="t-toggle-ico dl-tog" onclick={(e) => { e.stopPropagation(); toggleDlFolder(folder.path) }}>
-                {isExpanded ? '−' : '+'}
-              </span>
-            {:else}
-              <span class="t-toggle-ico" style="opacity:0">·</span>
-            {/if}
-            <i class="ti ti-folder t-ico-sm" aria-hidden="true"></i>
-            <span class="t-name">{stripTrackNumber(folder.name)}</span>
-            {#if folder.tracks.length > 0}<span class="t-count">{folder.tracks.length}</span>{/if}
-            <span role="button" tabindex="0"
-                    class="row-act {isDlPinned(folder.path) ? 'is-on' : ''}"
-                    onclick={(e) => { e.stopPropagation(); isDlPinned(folder.path) ? unpinDlFolder(folder.path) : pinDlFolder(folder) }}
-                    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); isDlPinned(folder.path) ? unpinDlFolder(folder.path) : pinDlFolder(folder) }}}
-                    title={isDlPinned(folder.path) ? 'Loslösen' : 'Anpinnen'}>
-              <i class="ti {isDlPinned(folder.path) ? 'ti-pin-filled' : 'ti-pin'}" aria-hidden="true"></i>
-            </span>
-          </button>
-          {#if hasSubs && isExpanded}
-            {#each folder.folders as sub}
-              {@render dlFolderNode(sub, depth + 1)}
-            {/each}
-          {/if}
-        {/snippet}
-
-        {#each filteredDlFolders as folder}
-          {@render dlFolderNode(folder, 0)}
+      {#if kids && dirOpen.has(k) && !navQ}
+        {#each dirKids(node.path) as sub (sub.path)}
+          {@render dirNode(sub, depth + 1)}
         {/each}
-        {#each filteredDlFiles as file}
-          <button class="t-child t-d2 {navMode === 'dl:file:' + file.path ? 'active' : ''}"
-                  onclick={() => selectNav('dl:file:' + file.path)} title={file.name}>
-            <i class="ti ti-music t-ico-sm" aria-hidden="true"></i>
-            <span class="t-name">{stripTrackNumber(file.name)}</span>
-          </button>
+      {/if}
+    {/snippet}
+
+    <!-- 1. SCHNELLZUGRIFF (Favoriten-Ordner, aufklappbar) -->
+    <div class="t-sec-hdr" role="button" tabindex="0"
+         onclick={() => toggleSection('quick')}
+         onkeydown={(e) => e.key === 'Enter' && toggleSection('quick')}>
+      <i class="ti ti-chevron-right t-chevron" class:open={secQuickOpen} aria-hidden="true"></i>
+      <i class="ti ti-star t-sec-ico" aria-hidden="true"></i>
+      <span class="t-sec-label">Schnellzugriff</span>
+      <span class="row-act" title="Ordner zum Schnellzugriff hinzufügen" aria-label="Ordner hinzufügen" role="button" tabindex="0"
+            onclick={addQuickFolder}
+            onkeydown={(e) => e.key === 'Enter' && addQuickFolder(e)}><i class="ti ti-plus"></i></span>
+    </div>
+    {#if secQuickOpen}
+      {#if !$favorites.length}
+        <div class="t-empty">Rechtsklick auf einen Ordner → „Zum Schnellzugriff“, oder +</div>
+      {:else}
+        {#each $favorites.filter(f => !navQ || f.name.toLowerCase().includes(navQ)) as fav (fav.path)}
+          {@render dirNode({ path: fav.path, name: fav.name, remove: () => send({ type: 'remove_favorite', path: fav.path }) }, 0)}
         {/each}
       {/if}
     {/if}
 
-    <!-- 2. KÜNSTLER -->
-    <button class="t-sec-hdr" onclick={() => toggleSection('artist')}>
-      <i class="ti ti-chevron-right t-chevron" class:open={secArtistOpen} aria-hidden="true"></i>
-      <span class="t-sec-label">Künstler</span>
-      <span class="t-count">{zahl(filteredArtists.length, artists.length)}</span>
-    </button>
-    {#if secArtistOpen}
-      {#if filteredArtists.length > 8}
-        <div class="artist-az">
-          {#each AZ_LETTERS as letter}
-            {@const has = filteredArtists.some(a => a.toUpperCase().startsWith(letter))}
-            <button class="az-btn" disabled={!has}
-                    onclick={() => has && jumpLetter('artist', letter)}
-                    title={letter}>{letter}</button>
-          {/each}
-        </div>
-      {/if}
-      {#each filteredArtists as artist}
-        <button class="t-child {navMode === 'artist:' + artist.toLowerCase() ? 'active' : ''}"
-                onclick={() => selectNav('artist:' + artist.toLowerCase())}
-                data-az={'artist:' + (artist[0]?.toLowerCase() ?? '#')}
-                title={artist}>
-          <i class="ti ti-user t-ico-sm" aria-hidden="true"></i>
-          <span class="t-name">{artist}</span>
-        </button>
-      {/each}
-    {/if}
-
-    <!-- 3. ALBEN -->
-    {#if albums.length > 0}
-    <button class="t-sec-hdr" onclick={() => toggleSection('album')}>
-      <i class="ti ti-chevron-right t-chevron" class:open={secAlbumOpen} aria-hidden="true"></i>
-      <span class="t-sec-label">Alben</span>
-      <span class="t-count">{zahl(filteredAlbums.length, albums.length)}</span>
-    </button>
-    {#if secAlbumOpen}
-      {#if filteredAlbums.length > 8}
-        <div class="artist-az">
-          {#each AZ_LETTERS as letter}
-            {@const has = filteredAlbums.some(a => a.toUpperCase().startsWith(letter))}
-            <button class="az-btn" disabled={!has}
-                    onclick={() => has && jumpLetter('album', letter)}
-                    title={letter}>{letter}</button>
-          {/each}
-        </div>
-      {/if}
-      {#each filteredAlbums as album}
-        <button class="t-child {navMode === 'album:' + album.toLowerCase() ? 'active' : ''}"
-                onclick={() => selectNav('album:' + album.toLowerCase())}
-                data-az={'album:' + (album[0]?.toLowerCase() ?? '#')}
-                title={album}>
-          <i class="ti ti-vinyl t-ico-sm" aria-hidden="true"></i>
-          <span class="t-name">{album}</span>
-          <span class="t-count">{albumCounts.get(album.toLowerCase()) ?? 0}</span>
-        </button>
-      {/each}
-    {/if}
-    {/if}
-
-    <!-- 4. GENRES -->
-    {#if genres.length > 0 || !navQ}
+    <!-- 2. MUSIKORDNER -->
     <div class="t-sec-hdr" role="button" tabindex="0"
-         onclick={() => toggleSection('genre')}
-         onkeydown={(e) => e.key === 'Enter' && toggleSection('genre')}>
-      <i class="ti ti-chevron-right t-chevron" class:open={secGenreOpen} aria-hidden="true"></i>
-      <span class="t-sec-label">Genres</span>
-      <span class="t-count">{zahl(filteredGenres.length, genres.length)}</span>
-      <span class="row-act" title="Genres vereinheitlichen und fehlende ergänzen" aria-label="Genres ergänzen" role="button" tabindex="0"
-            onclick={(e) => { e.stopPropagation(); showGenres = true }}
-            onkeydown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); showGenres = true } }}><i class="ti ti-wand"></i></span>
+         onclick={() => toggleSection('dirs')}
+         onkeydown={(e) => e.key === 'Enter' && toggleSection('dirs')}>
+      <i class="ti ti-chevron-right t-chevron" class:open={secDirsOpen} aria-hidden="true"></i>
+      <i class="ti ti-folder t-sec-ico" aria-hidden="true"></i>
+      <span class="t-sec-label">Musikordner</span>
     </div>
-    {#if secGenreOpen}
-      {#each filteredGenres as genre}
-        <button class="t-child {navMode === 'genre:' + genre.toLowerCase() ? 'active' : ''}"
-                onclick={() => selectNav('genre:' + genre.toLowerCase())}
-                title={genre}>
-          <i class="ti ti-tags t-ico-sm" aria-hidden="true"></i>
-          <span class="t-name">{genre}</span>
-          <span class="t-count">{genreCounts.get(genre.toLowerCase()) ?? 0}</span>
-        </button>
-      {/each}
-    {/if}
+    {#if secDirsOpen}
+      {#if navQ}
+        {#each matchingDirs as d (d.path)}
+          {@render dirNode(d, 0)}
+        {:else}
+          <div class="t-empty">Kein Ordner passt</div>
+        {/each}
+      {:else if !musicRoots.length}
+        <div class="t-empty">Noch kein Musikordner · Einstellungen → System</div>
+      {:else}
+        {#each musicRoots as root (root)}
+          {@render dirNode({ path: root, name: _base(root) }, 0)}
+        {/each}
+      {/if}
     {/if}
 
-    <!-- 5. PLAYLISTEN -->
+    <!-- 3. PLAYLISTEN -->
     <div class="t-sec-hdr" role="button" tabindex="0"
          onclick={() => toggleSection('playlist')}
          onkeydown={(e) => e.key === 'Enter' && toggleSection('playlist')}>
       <i class="ti ti-chevron-right t-chevron" class:open={secPlaylistOpen} aria-hidden="true"></i>
+      <i class="ti ti-list t-sec-ico" aria-hidden="true"></i>
       <span class="t-sec-label">Playlisten</span>
       <span class="t-count">{zahl(filteredPlaylists.length, $playlists.length)}</span>
       <span class="row-act" title="Queue als Playlist speichern" aria-label="Queue als Playlist speichern" role="button" tabindex="0"
@@ -1767,93 +1790,112 @@
     {/if}
 
 
-    <!-- 6. MEIN COMPUTER -->
+
+    <!-- 4. COMPUTER (Laufwerke) -->
     <button class="t-sec-hdr" onclick={() => toggleSection('fs')}>
       <i class="ti ti-chevron-right t-chevron" class:open={secFsOpen} aria-hidden="true"></i>
-      <span class="t-sec-label">Mein Computer</span>
+      <i class="ti ti-device-desktop t-sec-ico" aria-hidden="true"></i>
+      <span class="t-sec-label">Computer</span>
     </button>
-    {#if secFsOpen}
-      {#if fsReady}
-        {#each fsRoots as drive}
-          {@const dOpen = !!fsOpen[drive.path]}
-          <button class="t-child {navMode === 'fs:' + drive.path ? 'active' : ''}"
-                  onclick={() => clickFsNode(drive)}
-                  oncontextmenu={(e) => onFolderCtx(e, drive.path)} class:excluded={excludedBy(drive.path)}>
-            <span class="t-toggle-ico">{dOpen ? '−' : '+'}</span>
-            <i class="ti ti-device-desktop t-ico-sm" aria-hidden="true"></i>
-            <span class="t-name">{drive.name}</span>
-          </button>
-          {#if dOpen && fsKids[drive.path]}
-            {#each fsKids[drive.path] as child}
-              {@const cOpen = !!fsOpen[child.path]}
-              <button class="t-child t-d2 {navMode === 'fs:' + child.path ? 'active' : ''}"
-                      onclick={() => clickFsNode(child)} title={child.name}
-                      oncontextmenu={child.isDir ? (e) => onFolderCtx(e, child.path) : undefined}
-                      class:excluded={child.isDir && excludedBy(child.path)}>
-                {#if child.isDir}
-                  <span class="t-toggle-ico">{cOpen ? '−' : '+'}</span>
-                  <i class="ti ti-folder t-ico-sm" aria-hidden="true"></i>
-                {:else}
-                  <span class="t-toggle-ico" style="opacity:0">·</span>
-                  <i class="ti ti-music t-ico-sm" aria-hidden="true"></i>
-                {/if}
-                <span class="t-name">{child.name}</span>
-              </button>
-              {#if child.isDir && cOpen && fsKids[child.path]}
-                {#each fsKids[child.path] as grand}
-                  {@const gOpen = !!fsOpen[grand.path]}
-                  <button class="t-child t-d3 {navMode === 'fs:' + grand.path ? 'active' : ''}"
-                          onclick={() => clickFsNode(grand)} title={grand.name}
-                          oncontextmenu={grand.isDir ? (e) => onFolderCtx(e, grand.path) : undefined}
-                          class:excluded={grand.isDir && excludedBy(grand.path)}>
-                    {#if grand.isDir}
-                      <span class="t-toggle-ico">{gOpen ? '−' : '+'}</span>
-                      <i class="ti ti-folder t-ico-sm" aria-hidden="true"></i>
-                    {:else}
-                      <span class="t-toggle-ico" style="opacity:0">·</span>
-                      <i class="ti ti-music t-ico-sm" aria-hidden="true"></i>
-                    {/if}
-                    <span class="t-name">{grand.name}</span>
-                  </button>
-                  {#if grand.isDir && gOpen && fsKids[grand.path]}
-                    {#each fsKids[grand.path] as great}
-                      {@const ggOpen = !!fsOpen[great.path]}
-                      <button class="t-child t-d4 {navMode === 'fs:' + great.path ? 'active' : ''}"
-                              onclick={() => clickFsNode(great)} title={great.name}
-                              oncontextmenu={great.isDir ? (e) => onFolderCtx(e, great.path) : undefined}
-                              class:excluded={great.isDir && excludedBy(great.path)}>
-                        {#if great.isDir}
-                          <span class="t-toggle-ico">{ggOpen ? '−' : '+'}</span>
-                          <i class="ti ti-folder t-ico-sm" aria-hidden="true"></i>
-                        {:else}
-                          <span class="t-toggle-ico" style="opacity:0">·</span>
-                          <i class="ti ti-music t-ico-sm" aria-hidden="true"></i>
-                        {/if}
-                        <span class="t-name">{great.name}</span>
-                      </button>
-                      {#if great.isDir && ggOpen && fsKids[great.path]}
-                        {#each fsKids[great.path] as gg}
-                          <button class="t-child t-d5 {navMode === 'fs:' + gg.path ? 'active' : ''}"
-                                  onclick={() => clickFsNode(gg)} title={gg.name}>
-                            {#if gg.isDir}
-                              <span class="t-toggle-ico">+</span>
-                              <i class="ti ti-folder t-ico-sm" aria-hidden="true"></i>
-                            {:else}
-                              <span class="t-toggle-ico" style="opacity:0">·</span>
-                              <i class="ti ti-music t-ico-sm" aria-hidden="true"></i>
-                            {/if}
-                            <span class="t-name">{gg.name}</span>
-                          </button>
-                        {/each}
-                      {/if}
-                    {/each}
-                  {/if}
-                {/each}
-              {/if}
-            {/each}
-          {/if}
-        {/each}
+    {#if secFsOpen && fsReady}
+      {#each fsRoots as drive (drive.path)}
+        {@render dirNode({ path: drive.path, name: drive.name.replace(/\\$/, ''), icon: 'ti-device-desktop' }, 0)}
+      {/each}
+    {/if}
+
+    <!-- 5. FILTER (ganz unten) -->
+    <div class="t-sec-hdr" role="button" tabindex="0"
+         onclick={() => toggleSection('filter')}
+         onkeydown={(e) => e.key === 'Enter' && toggleSection('filter')}>
+      <i class="ti ti-chevron-right t-chevron" class:open={secFilterOpen || !!navQ} aria-hidden="true"></i>
+      <i class="ti ti-tags t-sec-ico" aria-hidden="true"></i>
+      <span class="t-sec-label">Filter</span>
+    </div>
+    {#if secFilterOpen || navQ}
+    <!-- 2. KÜNSTLER -->
+    <button class="t-sec-hdr t-sub-hdr" onclick={() => toggleSection('artist')}>
+      <i class="ti ti-chevron-right t-chevron" class:open={secArtistOpen} aria-hidden="true"></i>
+      <span class="t-sec-label">Künstler</span>
+      <span class="t-count">{zahl(filteredArtists.length, artists.length)}</span>
+    </button>
+    {#if secArtistOpen}
+      {#if filteredArtists.length > 8}
+        <div class="artist-az">
+          {#each AZ_LETTERS as letter}
+            {@const has = filteredArtists.some(a => a.toUpperCase().startsWith(letter))}
+            <button class="az-btn" disabled={!has}
+                    onclick={() => has && jumpLetter('artist', letter)}
+                    title={letter}>{letter}</button>
+          {/each}
+        </div>
       {/if}
+      {#each filteredArtists as artist}
+        <button class="t-child {navMode === 'artist:' + artist.toLowerCase() ? 'active' : ''}"
+                onclick={() => selectNav('artist:' + artist.toLowerCase())}
+                data-az={'artist:' + (artist[0]?.toLowerCase() ?? '#')}
+                title={artist}>
+          <i class="ti ti-user t-ico-sm" aria-hidden="true"></i>
+          <span class="t-name">{artist}</span>
+        </button>
+      {/each}
+    {/if}
+
+    <!-- 3. ALBEN -->
+    {#if albums.length > 0}
+    <button class="t-sec-hdr t-sub-hdr" onclick={() => toggleSection('album')}>
+      <i class="ti ti-chevron-right t-chevron" class:open={secAlbumOpen} aria-hidden="true"></i>
+      <span class="t-sec-label">Alben</span>
+      <span class="t-count">{zahl(filteredAlbums.length, albums.length)}</span>
+    </button>
+    {#if secAlbumOpen}
+      {#if filteredAlbums.length > 8}
+        <div class="artist-az">
+          {#each AZ_LETTERS as letter}
+            {@const has = filteredAlbums.some(a => a.toUpperCase().startsWith(letter))}
+            <button class="az-btn" disabled={!has}
+                    onclick={() => has && jumpLetter('album', letter)}
+                    title={letter}>{letter}</button>
+          {/each}
+        </div>
+      {/if}
+      {#each filteredAlbums as album}
+        <button class="t-child {navMode === 'album:' + album.toLowerCase() ? 'active' : ''}"
+                onclick={() => selectNav('album:' + album.toLowerCase())}
+                data-az={'album:' + (album[0]?.toLowerCase() ?? '#')}
+                title={album}>
+          <i class="ti ti-vinyl t-ico-sm" aria-hidden="true"></i>
+          <span class="t-name">{album}</span>
+          <span class="t-count">{albumCounts.get(album.toLowerCase()) ?? 0}</span>
+        </button>
+      {/each}
+    {/if}
+    {/if}
+
+    <!-- 4. GENRES -->
+    {#if genres.length > 0 || !navQ}
+    <div class="t-sec-hdr t-sub-hdr" role="button" tabindex="0"
+         onclick={() => toggleSection('genre')}
+         onkeydown={(e) => e.key === 'Enter' && toggleSection('genre')}>
+      <i class="ti ti-chevron-right t-chevron" class:open={secGenreOpen} aria-hidden="true"></i>
+      <span class="t-sec-label">Genres</span>
+      <span class="t-count">{zahl(filteredGenres.length, genres.length)}</span>
+      <span class="row-act" title="Genres vereinheitlichen und fehlende ergänzen" aria-label="Genres ergänzen" role="button" tabindex="0"
+            onclick={(e) => { e.stopPropagation(); showGenres = true }}
+            onkeydown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); showGenres = true } }}><i class="ti ti-wand"></i></span>
+    </div>
+    {#if secGenreOpen}
+      {#each filteredGenres as genre}
+        <button class="t-child {navMode === 'genre:' + genre.toLowerCase() ? 'active' : ''}"
+                onclick={() => selectNav('genre:' + genre.toLowerCase())}
+                title={genre}>
+          <i class="ti ti-tags t-ico-sm" aria-hidden="true"></i>
+          <span class="t-name">{genre}</span>
+          <span class="t-count">{genreCounts.get(genre.toLowerCase()) ?? 0}</span>
+        </button>
+      {/each}
+    {/if}
+    {/if}
+
     {/if}
 
     </div><!-- /nav-tree -->
@@ -2094,7 +2136,7 @@
                     <span class="q-icon" role="img" aria-label={reasons.map(k => QUALITY_LABELS[k]).join(', ')}
                           onmouseenter={(e) => showQTip(e, track)} onmouseleave={() => qTip = null}>
                       {#if reasons.length}
-                        <i class="ti ti-alert-triangle q-warn {reasons.some(k => k !== 'video') ? 'q-bad' : ''} {track.quality_ok ? 'q-off' : ''}" aria-hidden="true"></i>
+                        <i class="ti ti-alert-triangle q-warn {(track.cutoff_khz ?? 0) > 5 && track.cutoff_khz < CUTOFF_RED ? 'q-bad' : ''} {track.quality_ok ? 'q-off' : ''}" aria-hidden="true"></i>
                       {/if}
                     </span>
                     <button class="r-btn" title="Bessere Version suchen" aria-label="Bessere Version suchen"
@@ -2266,7 +2308,7 @@
 
 {#if showDupeScan}
   <DuplicateScanDialog groups={dupesGroups} onclose={() => showDupeScan = false}
-    onremove={(path) => send({ type: 'library_remove_disk', path })} />
+    onremove={(path) => trashPaths([path])} />
 {/if}
 
 {#if showPlDupeScan}
@@ -2415,11 +2457,12 @@
     <button onclick={() => analyzeFolder(false)}>Analysieren — nur dieser Ordner</button>
     <button onclick={() => analyzeFolder(true)}>Analysieren — mit Unterordnern</button>
     <button onclick={scanFolderDupes}>Auf Duplikate scannen</button>
+    <button onclick={() => { window.electron?.openPath(folderCtx.path); folderCtx = null }}>Im Explorer öffnen</button>
     <div class="ctx-sep"></div>
     {#if $favorites.some(f => f.path === folderCtx.path)}
-      <button onclick={() => { send({ type: 'remove_favorite', path: folderCtx.path }); folderCtx = null }}>Aus Favoriten entfernen</button>
+      <button onclick={() => { send({ type: 'remove_favorite', path: folderCtx.path }); folderCtx = null }}>Aus dem Schnellzugriff entfernen</button>
     {:else}
-      <button onclick={() => { send({ type: 'add_favorite', path: folderCtx.path, name: folderCtx.path.split(/[\\/]/).filter(Boolean).pop() ?? folderCtx.path }); folderCtx = null }}>Zu Favoriten hinzufügen</button>
+      <button onclick={() => { send({ type: 'add_favorite', path: folderCtx.path, name: folderCtx.path.split(/[\\/]/).filter(Boolean).pop() ?? folderCtx.path }); folderCtx = null }}>Zum Schnellzugriff hinzufügen</button>
     {/if}
     <div class="ctx-sep"></div>
     {#if allowedFolderOf(folderCtx.path)}
@@ -2523,6 +2566,12 @@
   .t-sec-hdr:hover { color: var(--c-tx1); }
   .t-sec-label { flex: 1; }
   .t-chevron { font-size: 13px; flex-shrink: 0; transition: transform .15s; }
+  .t-sec-ico { font-size: 14px; opacity: .75; flex-shrink: 0; }
+  .t-sub-hdr { padding-left: 22px; text-transform: none; letter-spacing: 0; font-size: var(--fs-body); font-weight: 600; }
+  .t-dir { cursor: pointer; }
+  .t-tog { width: 16px; height: 16px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
+           color: var(--c-tx4); border-radius: var(--r-s); }
+  .t-tog:hover { color: var(--c-tx1); background: var(--c-hover); }
   .t-chevron.open { transform: rotate(90deg); }
   .t-pinned-hdr { cursor: default; }
   .t-pinned-hdr:hover { color: var(--c-tx4); }

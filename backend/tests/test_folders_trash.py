@@ -184,3 +184,48 @@ class AusschliessenTest(TrashTestBase):
         self.run_async(main.handle_message(FakeWS(), {"type": "include_folder", "folder": str(self.party)}))
         neu = main._find_new_audio_paths(str(self.musik), {str(self.musik / "oben.mp3")}, True)
         self.assertEqual(len(neu), 2)
+
+
+class VieleLoeschenTest(TrashTestBase):
+    """Mehrere Titel auf einmal: ein Papierkorb-Aufruf, einmal speichern."""
+
+    def setUp(self):
+        super().setUp()
+        self._echt_many = main._move_many_to_trash
+        self.aufrufe = []
+
+        def attrappe(paths, klemmt=()):
+            self.aufrufe.append(list(paths))
+            for p in paths:
+                if os.path.exists(p) and os.path.basename(p) not in self.klemmt:
+                    os.remove(p)
+            return [p for p in paths if os.path.exists(p)]
+        self.klemmt = set()
+        main._move_many_to_trash = attrappe
+
+    def tearDown(self):
+        main._move_many_to_trash = self._echt_many
+        super().tearDown()
+
+    def test_alle_in_einem_rutsch(self):
+        fs = [self.datei(f"s{i}.mp3") for i in range(5)]
+        main._state["library"] = [{"path": str(f), "title": f.stem} for f in fs] + [{"path": "bleibt.mp3"}]
+        self.run_async(main.handle_message(FakeWS(), {"type": "library_remove_disk_many",
+                                                      "paths": [str(f) for f in fs]}))
+        self.assertEqual(len(self.aufrufe), 1)
+        self.assertEqual([lt["path"] for lt in main._state["library"]], ["bleibt.mp3"])
+
+    def test_klemmende_datei_bleibt_in_der_bibliothek(self):
+        a, b = self.datei("a.mp3"), self.datei("b.mp3")
+        self.klemmt = {"b.mp3"}
+        main._state["library"] = [{"path": str(a)}, {"path": str(b)}]
+        ws = FakeWS()
+        self.run_async(main.handle_message(ws, {"type": "library_remove_disk_many", "paths": [str(a), str(b)]}))
+        self.assertEqual([lt["path"] for lt in main._state["library"]], [str(b)])
+
+    @unittest.skipUnless(os.environ.get("SYNTHIMIX_TEST_TRASH") == "1", "nur mit SYNTHIMIX_TEST_TRASH=1")
+    def test_echter_papierkorb_viele(self):
+        main._move_many_to_trash = self._echt_many
+        fs = [self.datei(f"SynthiMIX-Papierkorbtest-{i}.txt") for i in range(3)]
+        self.assertEqual(main._move_many_to_trash([str(f) for f in fs]), [])
+        self.assertFalse(any(f.exists() for f in fs))

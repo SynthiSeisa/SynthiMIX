@@ -11,6 +11,7 @@ export const library     = writable([])
 export const scanStatus  = writable('')
 export const waveform       = writable([])
 export const waveformNext   = writable([])
+export const waveformThird  = writable({ path: '', data: [] })   // Titel nach dem naechsten
 // Taktraster je Pfad fuer den Beat-Sync: { bpm, off, conf } (bpm 0 = unbekannt)
 export const beatGrids      = writable({})
 // Ergebnis von "Harmonisch sortieren": { count, boosts, unknown_keys, at }
@@ -112,6 +113,7 @@ const APP_SETTINGS_DEFAULTS = {
   introSkipSec:       0,
   beatAlignCf:        true,
   tempoMatch:         true,    // Tempo des naechsten Titels im Uebergang angleichen
+  playerShowLufs:     false,   // LUFS-Stand im Player neben BPM zeigen
   dupeAllowFolders:   [],      // Ordner, in denen Kopien nicht als Duplikat zaehlen
   keyNotation:        'musical',   // Tonart als 'musical' (F♯m) oder 'camelot' (11A)
   pauseFadeMs:        500,   // Aus-/Einblenden bei Pause und Fortsetzen
@@ -158,6 +160,7 @@ function connect() {
     ws.send(JSON.stringify({ type: 'get_history' }))
     ws.send(JSON.stringify({ type: 'check_tools' }))
     ws.send(JSON.stringify({ type: 'get_download_tree' }))
+    ws.send(JSON.stringify({ type: 'get_watched_folders' }))   // Musikordner in der Navigation
   }
 
   ws.onclose = () => {
@@ -208,6 +211,7 @@ function connect() {
       case 'scan_status':   scanStatus.set(msg.text); break
       case 'waveform':        waveform.set(msg.data ?? []); break
       case 'waveform_next':   waveformNext.set(msg.data ?? []); break
+      case 'waveform_third':  waveformThird.set({ path: msg.path ?? '', data: msg.data ?? [] }); break
       case 'harmonic_result': harmonicResult.set({ ...msg, at: Date.now() }); break
       case 'beatgrid':
         beatGrids.update(g => ({ ...g, [msg.path]: { bpm: msg.bpm_f || 0, off: msg.beat_off || 0, conf: msg.beat_conf || 0 } }))

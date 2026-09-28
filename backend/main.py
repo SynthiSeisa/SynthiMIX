@@ -224,7 +224,8 @@ clients: set[WebSocket] = set()
 _remote_clients: set[WebSocket] = set()
 _remote_server: Any = None
 _remote_port = 8080
-_dl_procs: dict[int, Any] = {}  # session_id → asyncio.Process (for kill support)
+_dl_procs: dict[int, Any] = {}  # session_id → asyncio.Process oder Liste davon (Playlist parallel)
+_DL_PARALLEL = 3                  # gleichzeitige yt-dlp-Prozesse bei Playlists
 
 _state: dict[str, Any] = {
     "queue":        [],   # list of track dicts
@@ -1271,6 +1272,7 @@ _analyze_cancel  = False
 # und der Zaehler zeigte die andere, groessere Analyse.
 _analyze_pending: list = []
 _unanalyzable_paths: set[str] = set()   # Pfade die dauerhaft nicht analysierbar sind
+_ANALYZE_PARALLEL = 3                    # Titel, die gleichzeitig analysiert werden
 
 async def _analyze_library_meta_task(only_paths: list[str] | None = None):
     """Background: fill in missing LUFS and BPM for every library track.
@@ -1301,9 +1303,16 @@ async def _analyze_library_meta_task(only_paths: list[str] | None = None):
         changed = False
         if total > 0:
             await broadcast({"type": "analyze_progress", "done": 0, "total": total})
-        for lt in pending:
+        # Drei Titel gleichzeitig: jeder Schritt ist ein eigener ffmpeg-Prozess
+        # bzw. numpy — frueher streng nacheinander, ~2 s je Titel.
+        sem = asyncio.Semaphore(_ANALYZE_PARALLEL)
+        prog = {"done": 0}
+
+        async def _one(lt):
+          async with sem:
             if _analyze_cancel:
-                break
+                return
+            changed = False
             path = lt.get("path", "")
             need_lufs = lt.get("lufs", -99) <= -90
             need_bpm  = not lt.get("bpm")
@@ -1334,11 +1343,13 @@ async def _analyze_library_meta_task(only_paths: list[str] | None = None):
                         changed = True
             except Exception as e:
                 print(f"[analyze_meta] {Path(path).name}: {e}")
-            done += 1
-            await broadcast({"type": "analyze_progress", "done": done, "total": total})
+            prog["done"] += 1
+            await broadcast({"type": "analyze_progress", "done": prog["done"], "total": total})
             if changed:
                 await broadcast({"type": "track_meta_update", "track": lt})
-                changed = False
+
+        await asyncio.gather(*(_one(lt) for lt in pending))
+        done = prog["done"]
         save_library()
         await push_library()
         await broadcast({"type": "analyze_progress", "done": done, "total": total, "finished": True})
@@ -3926,6 +3937,26 @@ async def handle_message(ws: WebSocket, msg: dict):
         save_library()
         await push_library()
 
+    elif t == "library_remove_disk_many":
+        # Mehrere Titel auf einmal: ein Papierkorb-Aufruf, einmal speichern und
+        # schicken. Frueher je Titel alles einzeln — bei 190 Kopien Minuten.
+        paths = [p for p in (msg.get("paths") or []) if isinstance(p, str) and p]
+        if paths:
+            failed = set(await asyncio.get_running_loop().run_in_executor(None, _move_many_to_trash, paths))
+            gone = set(paths) - failed
+            _state["library"] = [lt for lt in _state["library"] if lt.get("path") not in gone]
+            save_library()
+            await push_library()
+            if failed:
+                names = ", ".join(Path(p).name for p in list(failed)[:3])
+                more = f" und {len(failed) - 3} weitere" if len(failed) > 3 else ""
+                await broadcast({"type": "scan_status",
+                                 "text": f"Nicht in den Papierkorb (in Benutzung?): {names}{more}"})
+            else:
+                await broadcast({"type": "scan_status", "text": f"{len(gone)} Titel in den Papierkorb verschoben"})
+                await asyncio.sleep(4)
+                await broadcast({"type": "scan_status", "text": ""})
+
     elif t == "library_remove_disk":
         path = msg.get("path", "")
         if path:
@@ -4049,6 +4080,12 @@ async def handle_message(ws: WebSocket, msg: dict):
         path = msg.get("path", "")
         if path:
             asyncio.create_task(_send_beatgrid(ws, path))
+
+    elif t == "get_waveform_third":
+        # Titel nach dem naechsten: gleitet waehrend des Uebergangs mit hoch
+        path = msg.get("path", "")
+        data = await compute_waveform(path)
+        await ws.send_text(json.dumps({"type": "waveform_third", "path": path, "data": data}))
 
     elif t == "get_waveform_next":
         path = msg.get("path", "")
@@ -4193,8 +4230,8 @@ async def handle_message(ws: WebSocket, msg: dict):
         # Kill entire session (all tracks) and terminate subprocess
         sid = msg.get("session_id")
         if sid is not None:
-            proc = _dl_procs.get(sid)
-            if proc:
+            procs = _dl_procs.get(sid)
+            for proc in (procs if isinstance(procs, list) else [procs] if procs else []):
                 try: proc.kill()
                 except Exception: pass
             _state["downloads"] = [d for d in _state["downloads"]
@@ -4848,6 +4885,42 @@ async def scan_folder(folder: str):
     await asyncio.sleep(4)
     await broadcast({"type": "scan_status", "text": ""})
 
+def _move_many_to_trash(paths: list[str]) -> list[str]:
+    """Mehrere Dateien in einem Rutsch in den Papierkorb. Liefert die Pfade,
+    die danach noch da sind (in Benutzung, keine Rechte).
+
+    Ein SHFileOperation-Aufruf fuer viele Dateien ist um ein Vielfaches
+    schneller als einer je Datei (der Papierkorb wird nur einmal angefasst).
+    """
+    paths = [p for p in dict.fromkeys(paths) if p and os.path.exists(p)]
+    if not paths:
+        return []
+    if sys.platform != "win32":
+        for p in paths:
+            try: os.remove(p)
+            except OSError: pass
+        return [p for p in paths if os.path.exists(p)]
+    import ctypes
+    from ctypes import wintypes
+
+    class SHFILEOPSTRUCTW(ctypes.Structure):
+        _fields_ = [("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT),
+                    ("pFrom", wintypes.LPCWSTR), ("pTo", wintypes.LPCWSTR),
+                    ("fFlags", ctypes.c_uint16), ("fAnyOperationsAborted", wintypes.BOOL),
+                    ("hNameMappings", wintypes.LPVOID), ("lpszProgressTitle", wintypes.LPCWSTR)]
+
+    flags = 0x0040 | 0x0010 | 0x0004 | 0x0400   # ALLOWUNDO | NOCONFIRMATION | SILENT | NOERRORUI
+    for i in range(0, len(paths), 200):
+        chunk = paths[i:i + 200]
+        # Pfade durch \0 getrennt, doppelt nullterminiert (die letzte Null haengt ctypes an)
+        buf = "\0".join(os.path.abspath(p) for p in chunk) + "\0"
+        op = SHFILEOPSTRUCTW(None, 3, buf, None, flags, False, None, None)
+        try:
+            ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+        except Exception as e:
+            print(f"[trash] {e}", flush=True)
+    return [p for p in paths if os.path.exists(p)]
+
 def _move_to_trash(path: str) -> bool:
     """Datei in den Windows-Papierkorb verschieben statt endgueltig loeschen.
 
@@ -5304,8 +5377,12 @@ os.environ["ELECTRON_RUN_AS_NODE"] = "1"
 print(f"[backend] JS-Laufzeit: {_JS_ARGS[1] if _JS_ARGS else 'keine gefunden'}", flush=True)
 
 def _yt(*args: str) -> list[str]:
-    """yt-dlp-Kommando inklusive JS-Laufzeit."""
-    return [YTDLP, *_JS_ARGS, *args]
+    """yt-dlp-Kommando inklusive JS-Laufzeit, Ausgabe immer UTF-8.
+
+    Ohne --encoding schreibt yt-dlp unter Windows in der ANSI-Codepage — die
+    Titel kamen dann verstuemmelt an ("Arc\ufffdngel" statt "Arcángel"), in
+    der Playlist-Pruefung wie in den Suchergebnissen."""
+    return [YTDLP, *_JS_ARGS, "--encoding", "utf-8", *args]
 FFMPEG_DIR = str(Path(FFMPEG).parent) if FFMPEG != "ffmpeg" else ""
 
 # format-id → (audio_format, audio_quality)
@@ -5527,11 +5604,14 @@ _VIDEO_TITLE_RE = re.compile(
     re.IGNORECASE
 )
 
-async def _audit_playlist_for_videos(playlist_url: str) -> list[dict]:
+async def _audit_playlist_for_videos(playlist_url: str) -> tuple[list[dict], str]:
     """
     Flat-list a playlist. For entries whose title contains video keywords,
-    search YTM for an audio replacement. Returns list of {url, title, replaced}.
+    search YTM for an audio replacement. Returns ([{url, title, replaced}], playlist_title).
+    Der Name steht in jedem Eintrag der flachen Liste — ein eigener Aufruf
+    dafuer (frueher mit 15 s Zeitlimit) entfaellt.
     """
+    pl_title = ""
     base_args = ["--flat-playlist", "-j", "--quiet", "--no-warnings"]
     if FFMPEG_DIR:
         base_args += ["--ffmpeg-location", FFMPEG_DIR]
@@ -5548,6 +5628,8 @@ async def _audit_playlist_for_videos(playlist_url: str) -> list[dict]:
                 item = json.loads(raw.decode("utf-8", errors="replace"))
                 raw_url = item.get("url") or item.get("webpage_url") or item.get("id", "")
                 url = _normalise_yt_url(raw_url)
+                if not pl_title:
+                    pl_title = (item.get("playlist_title") or item.get("playlist") or "").strip()
                 if url:
                     entries.append({"url": url, "title": item.get("title") or "", "replaced": False,
                                     "uploader": item.get("uploader") or item.get("channel") or "",
@@ -5559,7 +5641,7 @@ async def _audit_playlist_for_videos(playlist_url: str) -> list[dict]:
         pass
 
     if not entries:
-        return entries
+        return entries, pl_title
 
     # Eintraege mit Video-Stichwort: Studio-Version von YouTube Music suchen.
     # Frueher per "ytmsearch", das es nicht gibt — ersetzt wurde nie etwas.
@@ -5578,7 +5660,7 @@ async def _audit_playlist_for_videos(playlist_url: str) -> list[dict]:
             entry["replaced"] = True
 
     await asyncio.gather(*(replace(e) for e in entries if _VIDEO_TITLE_RE.search(e["title"] or "")))
-    return entries
+    return entries, pl_title
 
 
 _MV_TITLE_RE = re.compile(
@@ -6133,27 +6215,37 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
     # ── session label + playlist folder name ─────────────────────────────────
     playlist_folder: str | None = None
     if url.startswith("http") and _is_playlist(url):
+        # Vorlaeufige Beschriftung; den echten Namen liefert gleich die Playlist-Pruefung
+        m = re.search(r'list=([^&]+)', url)
+        slabel = f"Playlist · {m.group(1)[:28]}" if m else url[:60]
+    elif url.startswith("http"):
+        slabel = url[:60]
+    else:
+        slabel = url[:60]
+
+    async def _playlist_title_fallback() -> str:
         try:
             pr = await asyncio.create_subprocess_exec(
                 *_yt('--print', 'playlist_title', '--playlist-items', '1',
                      '--no-warnings', '--quiet', '--encoding', 'utf-8', url),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
                 creationflags=_NO_WINDOW)
-            out, _ = await asyncio.wait_for(pr.communicate(), timeout=15)
-            raw_title = out.decode(errors='replace').strip().splitlines()[0] if out else ''
-            if raw_title and raw_title not in ('NA', 'N/A', ''):
-                playlist_folder = re.sub(r'[<>:"/\\|?*]', '_', raw_title)[:80]
-                slabel = raw_title[:60]
-            else:
-                m = re.search(r'list=([^&]+)', url)
-                slabel = f"Playlist · {m.group(1)[:28]}" if m else url[:60]
+            out, _ = await asyncio.wait_for(pr.communicate(), timeout=30)
+            t = out.decode("utf-8", errors='replace').strip().splitlines()[0] if out else ''
+            return "" if t in ('NA', 'N/A') else t
         except Exception:
-            m = re.search(r'list=([^&]+)', url)
-            slabel = f"Playlist · {m.group(1)[:28]}" if m else url[:60]
-    elif url.startswith("http"):
-        slabel = url[:60]
-    else:
-        slabel = url[:60]
+            return ""
+
+    def _use_playlist_title(title: str):
+        """Ordnername und Beschriftung aus dem Playlist-Namen."""
+        nonlocal playlist_folder, slabel
+        title = (title or "").strip()
+        if not title:
+            return
+        playlist_folder = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', title)[:80].rstrip(' .') or None
+        slabel = title[:60]
+        hdr["session_label"] = slabel
+        hdr["title"] = slabel
 
     # ── session header item  (id == session_id identifies it as header) ───────
     _dl_counter += 1
@@ -6230,7 +6322,8 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
     if url.startswith("http") and _is_playlist(url):
         hdr["status_text"] = "Playlist analysieren…"
         await push_downloads(force=True)
-        entries = await _audit_playlist_for_videos(url)
+        entries, pl_title = await _audit_playlist_for_videos(url)
+        _use_playlist_title(pl_title or await _playlist_title_fallback())
         if entries:
             replaced_count = sum(1 for e in entries if e["replaced"])
             _audited_entries = entries  # always use per-URL mode → one flat-list total
@@ -6239,98 +6332,128 @@ async def run_download(url: str, fmt_id: str = "mp3-best") -> str | None:
             hdr["status_text"] = "Starte…"
         await push_downloads(force=True)
 
-    # ── Per-URL mode (when videos were replaced in playlist) ─────────────────
+    # ── Playlist: mehrere yt-dlp-Prozesse parallel ─────────────────────────
+    # Frueher ein Prozess je Titel, nacheinander: bei 140 Titeln sass man
+    # Minuten allein auf Programmstarts. Jetzt teilen sich _DL_PARALLEL
+    # Prozesse die Titel (je eine Liste per -a), zugeordnet wird die Ausgabe
+    # ueber die Video-ID in "[youtube] Extracting URL: …".
     if _audited_entries is not None:
         track_total = len(_audited_entries)
         hdr["track_total"] = track_total
-        final_path = None
-        for i, entry in enumerate(_audited_entries):
-            if hdr not in _state["downloads"]:
-                break
-            track_n = i + 1
-            hdr["track_n"]     = track_n
-            hdr["status_text"] = f"{track_n} / {track_total}"
-            hdr["progress"]    = round((track_n - 1) / track_total * 100)
-            cur = _new_track(entry["title"])
-            if entry["replaced"]:
-                cur["status_text"] = "Audio-Version"
+        state = {"done": 0, "final": None}
+        _dl_procs[session_id] = []
+
+        async def _finish(item: dict, entry: dict, ok: bool, skipped: bool = False):
+            if item.get("status") == "done" or item.get("_fin"):
+                return
+            item["_fin"] = True
+            path = item.get("path")
+            ok = ok and bool(path) and os.path.exists(path)
+            _done(item, ok=ok, skipped=skipped)
+            if not ok and not skipped:
+                item["status"] = "error"
+                item["status_text"] = item.get("status_text") if "ERROR" in (item.get("error_msg") or "") else "✗ Fehler"
+            state["done"] += 1
+            hdr["track_n"] = state["done"]
+            hdr["status_text"] = f"{state['done']} / {track_total}"
+            hdr["progress"] = round(state["done"] / track_total * 100)
+            if ok:
+                state["final"] = path
+                if not skipped:
+                    probe = await asyncio.get_running_loop().run_in_executor(None, _probe_sync, path)
+                    _append_history(entry["url"], item.get("title", ""), path, probe.get("bitrate_kbps", 0))
+                    await broadcast(_history_payload())
             await push_downloads(force=True)
 
-            # Smart-skip per-entry (O(1) via pre-built dict)
-            entry_path = None
+        # Schon vorhanden (Verlauf mit guter Qualitaet): gar nicht erst laden
+        todo = []
+        for entry in _audited_entries:
             h = _hist_by_url.get(entry["url"])
-            if h and h.get("bitrate_kbps", 0) >= 192:
-                p = h.get("path", "")
-                if p and os.path.exists(p):
-                    cur["path"]  = p
-                    cur["title"] = h.get("title") or Path(p).stem
-                    _done(cur, skipped=True)
-                    entry_path = p
+            p = (h or {}).get("path", "")
+            if h and h.get("bitrate_kbps", 0) >= 192 and p and os.path.exists(p):
+                item = _new_track(h.get("title") or Path(p).stem)
+                item["path"] = p
+                await _finish(item, entry, ok=True, skipped=True)
+            else:
+                todo.append(entry)
 
-            if entry_path is None:
-                _env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
-                ep = await asyncio.create_subprocess_exec(
-                    *_ytdlp_cmd(entry["url"], fmt_id, out_dir, playlist_folder, force_folder=True),
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-                    env=_env, creationflags=_NO_WINDOW)
-                _dl_procs[session_id] = ep
-                last_pct = -1.0
+        def _vid(u: str) -> str:
+            m = re.search(r'(?:[?&]v=|youtu\.be/|/shorts/)([\w-]{11})', u or "")
+            return m.group(1) if m else ""
+
+        async def _batch(batch: list[dict], n: int):
+            if not batch or hdr not in _state["downloads"]:
+                return
+            by_id = {_vid(e["url"]): e for e in batch}
+            listfile = Path(tempfile.gettempdir()) / f"synthimix-dl-{session_id}-{n}.txt"
+            listfile.write_text("\n".join(e["url"] for e in batch) + "\n", "utf-8")
+            cmd = _ytdlp_cmd(batch[0]["url"], fmt_id, out_dir, playlist_folder, force_folder=True)
+            cmd = cmd[:-1] + ["-a", str(listfile)]           # URL durch die Liste ersetzen
+            env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
+            ep = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                env=env, creationflags=_NO_WINDOW)
+            _dl_procs[session_id].append(ep)
+            cur_item, cur_entry, last_pct = None, None, -1.0
+            try:
                 async for raw in ep.stdout:
+                    if hdr not in _state["downloads"]:
+                        _kill_quietly(ep)
+                        break
+                    line = raw.decode('utf-8', errors='replace').strip()
+                    if not line:
+                        continue
                     try:
-                        line = raw.decode('utf-8', errors='replace').strip()
-                        if not line: continue
+                        if "Extracting URL:" in line:
+                            e = by_id.get(_vid(line))
+                            if e is not None:
+                                if cur_item is not None:
+                                    await _finish(cur_item, cur_entry, ok=True)
+                                cur_entry, last_pct = e, -1.0
+                                cur_item = _new_track(e["title"])
+                                if e.get("replaced"):
+                                    cur_item["status_text"] = "Audio-Version"
+                                await push_downloads(force=True)
+                            continue
+                        if cur_item is None:
+                            continue
                         if "[download] Destination:" in line:
                             fname = line.split("Destination:", 1)[1].strip()
-                            cur["title"] = Path(fname).stem[:80]; cur["path"] = fname
+                            cur_item["title"] = Path(fname).stem[:80]; cur_item["path"] = fname
                         elif "[ExtractAudio] Destination:" in line:
                             fname = line.split("Destination:", 1)[1].strip()
-                            cur["path"] = fname; cur["title"] = Path(fname).stem[:80]
-                            entry_path = fname
+                            cur_item["path"] = fname; cur_item["title"] = Path(fname).stem[:80]
                         elif "has already been downloaded" in line:
                             fname = line.split("] ", 1)[-1].split(" has")[0].strip()
-                            cur["title"] = Path(fname).stem[:80]; cur["path"] = fname
-                            entry_path = fname
-                            _done(cur, skipped=True)
+                            cur_item["title"] = Path(fname).stem[:80]; cur_item["path"] = fname
+                            await _finish(cur_item, cur_entry, ok=True, skipped=True)
+                        elif line.startswith("ERROR"):
+                            cur_item["error_msg"] = line[:200]
                         elif "[download]" in line and "%" in line:
                             pct = float(line.split("%")[0].split()[-1])
-                            if abs(pct - last_pct) >= 2.0:
-                                last_pct = pct; cur["progress"] = pct
-                                sp = re.search(r'at\s+([\d.]+\s*\w+/s)', line)
-                                et = re.search(r'ETA\s+(\d+:\d+)', line)
-                                spd = sp.group(1).strip() if sp else ''
-                                eta = et.group(1) if et else ''
-                                if spd and eta:
-                                    cur["status_text"] = f"{pct:.0f}% · {spd} · ETA {eta}"
-                                elif eta:
-                                    cur["status_text"] = f"{pct:.0f}% · ETA {eta}"
-                                else:
-                                    cur["status_text"] = f"{pct:.0f}%"
+                            if abs(pct - last_pct) >= 4.0:
+                                last_pct = pct; cur_item["progress"] = pct
+                                cur_item["status_text"] = f"{pct:.0f}%"
                                 await push_downloads()
                     except Exception:
                         pass
                 await ep.wait()
-                if cur["status"] != "done":
-                    ok = ep.returncode == 0 and bool(cur.get("path"))
-                    _done(cur, ok=ok)
+                if cur_item is not None:
+                    await _finish(cur_item, cur_entry, ok=True)
+            finally:
+                try: listfile.unlink()
+                except Exception: pass
 
-                # Record freshly-downloaded entries in history right away so they
-                # show up immediately, not just at the very end of the batch
-                if entry_path and os.path.exists(entry_path):
-                    probe = await asyncio.get_running_loop().run_in_executor(None, _probe_sync, entry_path)
-                    _append_history(entry["url"], cur.get("title", ""), entry_path,
-                                     probe.get("bitrate_kbps", 0))
-                    await broadcast(_history_payload())
+        batches = [todo[i::_DL_PARALLEL] for i in range(_DL_PARALLEL)]
+        await asyncio.gather(*(_batch(b, n) for n, b in enumerate(batches)))
 
-            if entry_path:
-                final_path = entry_path
-            hdr["progress"] = round(track_n / track_total * 100)
-            await push_downloads(force=True)
-
+        # Titel, die yt-dlp gar nicht angefasst hat (nicht verfuegbar)
+        missing = track_total - state["done"]
         hdr["status"] = "done"; hdr["progress"] = 100
-        hdr["status_text"] = f"✓ {track_total} Tracks"
+        hdr["status_text"] = f"✓ {state['done']} Tracks" + (f" · {missing} nicht verfügbar" if missing > 0 else "")
         _dl_procs.pop(session_id, None)
         await push_downloads(force=True)
-        return final_path
+        return state["final"]
 
     try:
         _env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
