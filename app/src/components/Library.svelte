@@ -14,6 +14,7 @@
   let showGenres       = $state(false)
   let batchPaths       = $state(null)    // Sammel-Ersetzen: Liste der Pfade
   let titlePaths       = $state(undefined) // Titel aufraeumen: null = alle, Liste = Auswahl
+  let fpPaths          = $state(null)      // Fingerprint-Erkennung fuer mehrere Titel
   let showPlDupeScan   = $state(false)
   let editTrack        = $state(null)   // { path, title, artist } — metadata edit dialog
   let plNameDialog     = $state(false)  // add playlist dialog
@@ -124,7 +125,7 @@
     // Der Nav-Eintrag zeigt immer die ganze Bibliothek; Ordner und Playlisten
     // prueft man gezielt ueber deren Kontextmenue ("Auf Duplikate scannen").
     if (mode === 'duplicates') dupeSourceMode = 'all'
-    if (mode === 'downloads') dlColSort = false
+    if (mode === 'downloads' || mode.startsWith('playlist:')) dlColSort = false
     navMode = mode
     search  = ''
     selected = new Set()
@@ -561,7 +562,8 @@
         const { artist, title } = getTrackArtistTitle(t)
         return title.toLowerCase().includes(q) || artist.toLowerCase().includes(q)
       })
-      return list
+      // Frueher immer in Playlist-Reihenfolge — Spaltenklicks taten nichts
+      return dlColSort ? applySort(list) : list
     }
 
     // Gemeinsame Sort-Funktion für alle Modi
@@ -1093,9 +1095,15 @@
   // Downloads stehen nach Ladedatum; erst ein Klick auf eine Spalte sortiert um
   let dlColSort = $state(false)
   // Wiedergabe-Verlauf und Downloads haben ihre eigene Reihenfolge
-  const sortShown = $derived(navMode !== 'recent' && (navMode !== 'downloads' || dlColSort))
+  const ownOrder  = $derived(navMode === 'downloads' || navMode.startsWith('playlist:'))
+  const sortShown = $derived(navMode !== 'recent' && (!ownOrder || dlColSort))
+  // Position in der Playlist (Spalte "#")
+  const playlistPos = $derived.by(() => {
+    if (!navMode.startsWith('playlist:')) return new Map()
+    return new Map(($playlistContent[navMode.slice(9)] ?? []).map((pt, i) => [pt.path, i + 1]))
+  })
   function setSort(key) {
-    if (navMode === 'downloads' && !dlColSort) { dlColSort = true; sortCol = key; sortAsc = key === 'title' || key === 'key'; return }
+    if (ownOrder && !dlColSort) { dlColSort = true; sortCol = key; sortAsc = key === 'title' || key === 'key'; return }
     if (sortCol === key) sortAsc = !sortAsc
     else { sortCol = key; sortAsc = key === 'title' || key === 'key' }   // Tonart beginnt bei 1A
   }
@@ -2084,6 +2092,9 @@
         {#if navMode === 'downloads'}
           <button class="dl-col dl-hdr col-btn {!dlColSort ? 'sort-active' : ''}" onclick={() => dlColSort = false}
                   title="Nach Ladedatum, neueste zuerst">Geladen{#if !dlColSort}<i class="ti ti-chevron-down sort-ico" aria-hidden="true"></i>{/if}</button>
+        {:else if navMode.startsWith('playlist:')}
+          <button class="pl-col dl-hdr col-btn {!dlColSort ? 'sort-active' : ''}" onclick={() => dlColSort = false}
+                  title="Reihenfolge der Playlist">#{#if !dlColSort}<i class="ti ti-chevron-up sort-ico" aria-hidden="true"></i>{/if}</button>
         {/if}
         {#each cols as col, ci}
           <button
@@ -2185,6 +2196,9 @@
                             onclick={(e) => { e.stopPropagation(); trashOne(track) }}><i class="ti ti-trash"></i></button>
                   </span>
                 {/if}
+                {#if navMode.startsWith('playlist:')}
+                  <span class="pl-col">{playlistPos.get(track.path) ?? ''}</span>
+                {/if}
                 {#if navMode === 'downloads'}
                   <span class="dl-col" title={track._gone ? 'Datei wurde gelöscht' : ''}>
                     <span class="dl-date">{fmtMtime(track._dlTs)}</span>
@@ -2267,6 +2281,9 @@
 
 {#if titlePaths !== undefined}
   <TitleDialog paths={titlePaths} onclose={() => titlePaths = undefined} />
+{/if}
+{#if fpPaths}
+  <TitleDialog paths={fpPaths} mode="fingerprint" onclose={() => fpPaths = null} />
 {/if}
 
 {#if normDlg}
@@ -2431,7 +2448,9 @@
     {:else}
       <button onclick={() => analyzeTrack(ctxMenu.track)}>Track analysieren (BPM · LUFS)</button>
     {/if}
-    {#if $acoustidApiKey}
+    {#if selected.size > 1 && selected.has(ctxMenu.track.path)}
+      <button onclick={() => { fpPaths = [...selected]; closeCtx() }}>{selected.size} Titel per Fingerprint erkennen…</button>
+    {:else if $acoustidApiKey}
       <button onclick={() => identifyTrack(ctxMenu.track)}>Fingerprint-Erkennung (AcoustID)</button>
     {/if}
     <button onclick={() => openBetterVersion(ctxMenu.track)}>Bessere Version suchen</button>
@@ -2479,6 +2498,8 @@
     <button onclick={() => analyzeFolder(false)}>Analysieren — nur dieser Ordner</button>
     <button onclick={() => analyzeFolder(true)}>Analysieren — mit Unterordnern</button>
     <button onclick={scanFolderDupes}>Auf Duplikate scannen</button>
+    <button onclick={() => { const p = tracksInFolder(folderCtx.path, true).map(t => t.path); folderCtx = null; if (p.length) fpPaths = p }}
+            title="Alle Titel in diesem Ordner und darunter am Klang erkennen (AcoustID) — Vorschläge zum Prüfen, nichts wird ungefragt geändert">Per Fingerprint erkennen…</button>
     <button onclick={() => { window.electron?.openPath(folderCtx.path); folderCtx = null }}>Im Explorer öffnen</button>
     <div class="ctx-sep"></div>
     {#if $favorites.some(f => f.path === folderCtx.path)}
@@ -2727,6 +2748,7 @@
   .q-icon { width: 20px; display: flex; justify-content: center; }
   .q-off { opacity: .45; }
   .d-col { width: 56px; flex-shrink: 0; display: flex; align-items: center; gap: 2px; padding-left: 4px; }
+  .pl-col { width: 40px; flex-shrink: 0; padding-left: var(--sp-2); color: var(--c-tx4); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; display: flex; align-items: center; }
   .dl-col { width: 92px; flex-shrink: 0; display: flex; align-items: center; gap: 2px; padding-left: var(--sp-2); }
   .dl-date { width: 60px; color: var(--c-tx4); font-variant-numeric: tabular-nums; font-size: var(--fs-sm); }
   .dl-hdr { color: var(--c-tx4); font-size: var(--fs-sm); }

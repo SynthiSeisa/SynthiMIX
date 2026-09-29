@@ -1,12 +1,15 @@
 <script>
   import { untrack } from 'svelte'
-  import { titleState, send, lastfmApiKey } from '../stores/ws.js'
+  import { titleState, send, lastfmApiKey, openSettings } from '../stores/ws.js'
 
   // Titel aufraeumen: Video-Zusaetze, Kanal-/Label-Angaben und Genre-Klammern
   // entfernen, "Kuenstler - Titel" auf Titel- und Kuenstler-Tag verteilen.
   // Optional Schreibweise von Last.fm. Geschrieben werden nur diese beiden
   // Tags, nie der Dateiname — rekordbox findet die Dateien weiter.
-  let { paths = null, onclose } = $props()
+  // mode "fingerprint": dieselbe Liste, die Vorschlaege kommen aber von
+  // AcoustID (am Klang erkannt) statt aus den Regeln.
+  let { paths = null, mode = 'clean', onclose } = $props()
+  const fp = mode === 'fingerprint'
 
   const PAGE = 250
   const st = $derived($titleState)
@@ -24,7 +27,7 @@
   $effect(() => {
     untrack(() => {
       titleState.set({ busy: true })
-      send({ type: 'title_suggest', online: false, paths })
+      send(fp ? { type: 'fingerprint_suggest', paths } : { type: 'title_suggest', online: false, paths })
     })
   })
   $effect(() => {
@@ -58,24 +61,37 @@
     send({ type: 'title_apply', items })
   }
   function onkey(e) { if (e.key === 'Escape' && !st.applying) onclose() }
+  // ~1,3 s je Titel, 3 gleichzeitig
+  const fpEta = $derived(st.progress?.total ? Math.ceil((st.progress.total - st.progress.done) * 0.45 / 60) : 0)
+  function fixSettings() { openSettings(sugg.fix_tab); onclose() }
+  // Geschlossen, waehrend noch gesucht wird: nicht im Hintergrund weiterfragen
+  $effect(() => () => { if (untrack(() => $titleState.busy)) send({ type: 'title_cancel' }) })
 </script>
 
 <svelte:window onkeydown={onkey} />
 
-<div class="dlg-overlay" onclick={() => !st.applying && onclose()} role="presentation">
-  <div class="dlg panel" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Titel aufräumen">
+<div class="dlg-overlay" onclick={() => !st.applying && !st.busy && onclose()} role="presentation">
+  <div class="dlg panel" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={fp ? 'Per Fingerprint erkennen' : 'Titel aufräumen'}>
 
     <div class="hdr">
-      <span class="dlg-title">Titel aufräumen{paths?.length ? ` · ${paths.length} ausgewählt` : ''}</span>
+      <span class="dlg-title">{fp ? 'Per Fingerprint erkennen' : 'Titel aufräumen'}{paths?.length ? ` · ${paths.length} ${paths.length === 1 ? 'Titel' : 'ausgewählt'}` : ''}</span>
       <button class="btn btn-icon btn-sm close-btn" onclick={onclose} disabled={!!st.applying} title="Schließen" aria-label="Schließen"><i class="ti ti-x"></i></button>
     </div>
 
     <div class="body">
+      {#if fp}
+      <p class="intro">
+        Erkennt jeden Titel am Klang (AcoustID) — auch Dateien ohne oder mit falschen Tags. Vorausgewählt sind nur
+        sichere Treffer (ab 85 %); Remixe, die AcoustID dem Original zuordnet, und reine Text-Treffer sind orange markiert und nicht vorausgewählt.
+        Geschrieben werden nur Titel und Künstler — Dateinamen bleiben.
+      </p>
+      {:else}
       <p class="intro">
         Entfernt „(Official Video)“, „HQ“, „| Kanalname“, „[Label]“, Genre-Klammern wie „(Rock)“ und Anführungszeichen,
         und verteilt „Künstler - Titel“ auf Titel- und Künstler-Feld. Remix, Edit, VIP, feat. und Acapella bleiben.
         Geschrieben werden nur diese zwei Tags — Dateinamen bleiben, rekordbox findet alles weiter („Tag neu laden“).
       </p>
+      {/if}
 
       <div class="bar">
         <input class="field field-sm" type="search" placeholder="Filtern…" bind:value={filter} aria-label="Filtern" />
@@ -83,20 +99,26 @@
         <span class="spacer"></span>
         <button class="btn btn-ghost btn-sm" onclick={() => setAll(true)} disabled={!list.length}>Alle</button>
         <button class="btn btn-ghost btn-sm" onclick={() => setAll(false)} disabled={!list.length}>Keine</button>
+        {#if !fp}
         <button class="btn btn-sm" onclick={() => run(true)} disabled={st.busy || !!st.applying || !$lastfmApiKey}
                 title={$lastfmApiKey ? 'Schreibweise von Künstler und Titel bei Last.fm prüfen' : 'Last.fm-Key unter Einstellungen → Dienste eintragen'}>
           <i class="ti ti-wand"></i> Schreibweise online prüfen
         </button>
+        {/if}
       </div>
 
       {#if st.busy}
         <div class="busy"><i class="ti ti-refresh spin"></i>
-          {#if st.progress?.total}Frage Last.fm: {st.progress.done} / {st.progress.total}
+          {#if st.progress?.total}{fp ? 'Erkenne am Klang' : 'Frage Last.fm'}: {st.progress.done} / {st.progress.total}{#if fp && fpEta > 1} · noch ca. {fpEta} min{/if}
             <button class="btn btn-ghost btn-sm" onclick={() => send({ type: 'title_cancel' })}>Abbrechen</button>
           {:else}Rechne…{/if}
         </div>
+      {:else if sugg?.error}
+        <div class="busy err"><i class="ti ti-alert-triangle"></i> {sugg.error}
+          {#if sugg.fix_tab}<button class="btn btn-sm" onclick={fixSettings}>Einstellungen öffnen</button>{/if}
+        </div>
       {:else if sugg && !sugg.items.length}
-        <div class="busy">Alles sauber — keine Vorschläge.</div>
+        <div class="busy">{fp ? `Keine Änderungen: ${sugg.same ?? 0} passen schon, ${sugg.nomatch ?? 0} nicht erkannt.` : 'Alles sauber — keine Vorschläge.'}</div>
       {:else if sugg}
         <div class="list">
           <div class="it head"><span class="cb"></span><span class="c-old">Bisher</span><span class="c-new">Neu: Künstler - Titel</span><span class="c-src"></span></div>
@@ -124,7 +146,8 @@
                 </button>
               {/if}
               <span class="c-src">
-                {#if !it.sure}<span class="unsure" title="Künstler sieht nach Titel aus — evtl. „Titel - Künstler“ vertauscht">prüfen</span>
+                {#if fp}<span class="src" class:low={!it.sure} title={it.why || 'Übereinstimmung laut AcoustID'}>{it.source}</span>
+                {:else if !it.sure}<span class="unsure" title="Künstler sieht nach Titel aus — evtl. „Titel - Künstler“ vertauscht">prüfen</span>
                 {:else if it.source !== 'Regeln'}<span class="src">{it.source}</span>{/if}
               </span>
             </div>
@@ -144,6 +167,8 @@
       {:else if st.applying}
         <div class="notice info apply-row"><i class="ti ti-refresh spin"></i> Schreibe Titel: {st.applying.done} / {st.applying.total}
           <button class="btn btn-sm" onclick={() => send({ type: 'title_cancel' })}><i class="ti ti-player-stop"></i> Abbrechen</button></div>
+      {:else if fp}
+        <div class="dlg-hint">{#if sugg && !sugg.error}{sugg.checked ?? 0} geprüft · {sugg.same ?? 0} passen schon · {sugg.nomatch ?? 0} nicht erkannt{sugg.cancelled ? ' · abgebrochen' : ''}.{' '}{/if}Orange = unsicher (Maus drauf zeigt warum). Klick auf einen neuen Titel zum Bearbeiten.</div>
       {:else}
         <div class="dlg-hint">„prüfen“ = Reihenfolge vermutlich vertauscht, nicht vorausgewählt. Klick auf einen neuen Titel zum Bearbeiten.</div>
       {/if}
@@ -189,10 +214,12 @@
   .n-a { color: var(--c-tx2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
   .dash { color: var(--c-tx5); }
   .n-t { color: var(--c-tx1); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-  .c-src { width: 60px; flex-shrink: 0; text-align: right; }
+  .c-src { width: 76px; flex-shrink: 0; text-align: right; }
   .unsure { font-size: var(--fs-cap); font-weight: 700; padding: 0 5px; border-radius: var(--r-s);
             color: var(--c-warn-tx); border: 1px solid var(--c-warn-br); background: var(--c-warn-bg); }
-  .src { font-size: var(--fs-cap); color: var(--c-green-tx); }
+  .src { font-size: var(--fs-cap); color: var(--c-green-tx); font-variant-numeric: tabular-nums; }
+  .src.low { color: var(--c-warn-tx); }
+  .busy.err { color: var(--c-warn-tx); flex-wrap: wrap; text-align: center; }
   .more { margin: var(--sp-2) auto; display: flex; }
   .foot { display: flex; flex-direction: column; gap: var(--sp-3); padding: var(--sp-3) var(--sp-5) var(--sp-4); border-top: 1px solid var(--c-br1); }
   .foot .dlg-actions { margin: 0; }

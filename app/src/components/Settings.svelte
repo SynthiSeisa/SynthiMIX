@@ -11,10 +11,21 @@
            lastfmApiKey, acoustidApiKey,
            fpcalcInstalling, fpcalcInstallError,
            spotdlInstalling, spotdlInstallError, spotdlInstallText,
-           watchedFolders, watchedFolderImpact, ytdlpAutoupdate, excludedFolders, toolUpdates, servicesTest, setupOpen, changelog } from '../stores/ws.js'
+           watchedFolders, watchedFolderImpact, ytdlpAutoupdate, excludedFolders, toolUpdates, servicesTest, setupOpen, changelog, followed } from '../stores/ws.js'
   import { infoHints } from '../lib/infohints.js'
 
   let tab = $state('playback')
+
+  // ── Verfolgte Playlists (frueher als Kasten ueber den Downloads) ─────────
+  const FOLLOW_MODE = { playlist: 'als Playlist', new: 'nur neue', folder: 'kompletter Ordner' }
+  function followAgo(ts) {
+    if (!ts) return 'noch nie geprüft'
+    const min = Math.round((Date.now() / 1000 - ts) / 60)
+    if (min < 1) return 'gerade geprüft'
+    if (min < 60) return `vor ${min} min`
+    const h = Math.round(min / 60)
+    return h < 48 ? `vor ${h} h` : `vor ${Math.round(h / 24)} Tagen`
+  }
 
   // ── Beobachtete Ordner ────────────────────────────────────────────────────
   // Bisher liess sich ein Ordner hinzufuegen, aber weder ansehen noch wieder
@@ -511,9 +522,22 @@
               <button class="tog {$appSettings.tempoMatch !== false ? 'on' : ''}" aria-label="Tempo angleichen"
                 onclick={() => appSettings.update(s => ({...s, tempoMatch: s.tempoMatch === false}))}></button>
             </div>
+            {#if $appSettings.tempoMatch !== false}
+              {@const td = $appSettings.maxTempoDiff ?? 8}
+              <div class="row indent">
+                <span class="lbl">Tempo angleichen bis</span>
+                <input type="range" min="4" max="25" step="1" value={td} aria-label="Größter Tempo-Unterschied"
+                  oninput={(e) => appSettings.update(s => ({...s, maxTempoDiff: +e.target.value}))} />
+                <span class="val">±{td} %</span>
+              </div>
+              <div class="hint keep">
+                Bei 128 BPM: {Math.round(128 / (1 + td / 100))}–{Math.round(128 * (1 + td / 100))} BPM.
+                {#if td > 12}Ab etwa 12 % hört man das Dehnen etwas (klingt leicht verwaschen).{:else}Bis hierhin fällt das Angleichen kaum auf.{/if}
+              </div>
+            {/if}
             <div class="hint" style="margin-top:4px">
               {#if $appSettings.beatAlignCf && $appSettings.tempoMatch !== false}
-                Der Übergang beginnt auf einem Schlag, der neue Titel läuft währenddessen im Tempo des alten (Tonhöhe bleibt) und seine Schläge werden laufend auf die des alten gezogen. Danach gleitet das Tempo in etwa 20 s zurück aufs Original. Bei mehr als 8 % Tempo-Unterschied oder unklarem Takt (Live-Schlagzeug) wird nur geblendet.
+                Der Übergang beginnt auf einem Schlag. Beide Titel gehen im Tempo je zur Hälfte aufeinander zu (Tonhöhe bleibt), die Schläge werden laufend übereinandergezogen. Danach gleitet der neue Titel in etwa 20 s zurück aufs Original. Bei mehr als {$appSettings.maxTempoDiff ?? 8} % Tempo-Unterschied oder unklarem Takt (Live-Schlagzeug) wird nur geblendet.
               {:else if $appSettings.beatAlignCf}
                 Der Übergang beginnt auf einem Schlag; ohne Tempo-Angleich halten die Schläge nur bei fast gleichem Tempo.
               {:else if $appSettings.tempoMatch !== false}
@@ -523,6 +547,25 @@
               {/if}
             </div>
             <BlendSketch kind="beat" value={$appSettings.beatAlignCf} />
+          </div>
+
+          <div class="group">
+            <div class="group-title">Wie ein DJ</div>
+            <div class="row">
+              <span class="lbl">Auf Phrasen einrasten</span>
+              <button class="tog {$appSettings.phraseAlign !== false ? 'on' : ''}" aria-label="Auf Phrasen einrasten"
+                disabled={!$appSettings.beatAlignCf}
+                onclick={() => appSettings.update(s => ({...s, phraseAlign: s.phraseAlign === false}))}></button>
+            </div>
+            <div class="hint">Der Übergang beginnt auf einem Phrasenanfang (alle 16 bzw. 8 Takte, meist dort, wo ein neuer Teil des Songs beginnt) und wird dafür höchstens 8 Takte verschoben. Der neue Titel steigt ebenfalls am Anfang einer Phrase ein, Eins auf Eins. Phrasen kommen aus den Cue-Punkten von Mixed In Key, sonst aus der eigenen Messung. Selbst gezogene Mix-Zonen rasten nur auf die nächste Eins.</div>
+            <div class="row" style="margin-top:8px">
+              <span class="lbl">Bass tauschen (EQ)</span>
+              <button class="tog {$appSettings.bassSwap !== false ? 'on' : ''}" aria-label="Bass tauschen"
+                disabled={!$appSettings.beatAlignCf}
+                onclick={() => appSettings.update(s => ({...s, bassSwap: s.bassSwap === false}))}></button>
+            </div>
+            <div class="hint">Der neue Titel läuft zuerst ohne Bass mit; in der Mitte des Übergangs wird der Bass über 1–2 Takte weich getauscht — so wummern nie zwei Bassdrums gleichzeitig. Nur wenn der Übergang im Takt läuft; sonst wird wie bisher nur die Lautstärke geblendet.</div>
+            {#if !$appSettings.beatAlignCf}<div class="hint keep">Braucht „Schläge übereinanderlegen“.</div>{/if}
           </div>
 
         <!-- ── DOWNLOAD ────────────────────────────────────────────────── -->
@@ -543,6 +586,36 @@
                 Alle Downloads landen direkt im Download-Ordner
               {/if}
             </div>
+          </div>
+
+          <div class="group">
+            <div class="group-title">Verfolgte Playlists</div>
+            <div class="hint">Werden beim Start und auf Knopfdruck auf neue Titel geprüft; neue Titel werden automatisch geladen.</div>
+            {#if $followed.length}
+              <div class="follow-list">
+                {#each $followed as f (f.url)}
+                  <div class="follow-row">
+                    <i class="ti ti-bookmark-filled follow-ico" aria-hidden="true"></i>
+                    <div class="follow-main">
+                      <span class="follow-name" title={f.url}>{f.title}</span>
+                      <span class="follow-meta">
+                        {#if f.checking}<i class="ti ti-refresh spin" aria-hidden="true"></i>{' wird geprüft…'}{:else}{followAgo(f.last_check)}{/if}{#if !f.checking && f.last_check && f.last_new}{' · '}<b>{f.last_new} neu</b>{/if}{` · ${f.known} bekannt`}{FOLLOW_MODE[f.mode] ? ` · ${FOLLOW_MODE[f.mode]}` : ''}
+                      </span>
+                    </div>
+                    <button class="btn btn-icon btn-sm" onclick={() => send({ type: 'follow_check', url: f.url })} disabled={f.checking}
+                            title="Jetzt auf neue Titel prüfen" aria-label="Jetzt prüfen"><i class="ti ti-refresh"></i></button>
+                    <button class="btn btn-icon btn-sm" onclick={() => send({ type: 'follow_remove', url: f.url })}
+                            title="Nicht mehr verfolgen (geladene Titel bleiben)" aria-label="Nicht mehr verfolgen"><i class="ti ti-x"></i></button>
+                  </div>
+                {/each}
+              </div>
+              <div>
+                <button class="btn btn-sm" onclick={() => send({ type: 'follow_check' })}
+                        disabled={$followed.every(f => f.checking)}><i class="ti ti-refresh"></i> Alle jetzt prüfen</button>
+              </div>
+            {:else}
+              <div class="follow-empty">Noch keine. Beim Laden einer Playlist „Playlist verfolgen“ anhaken oder in den Downloads bei einer Playlist auf „Verfolgen“ klicken.</div>
+            {/if}
           </div>
 
           <div class="group">
@@ -1165,6 +1238,7 @@
   .tog.on { background: var(--c-accent); border-color: var(--c-accent); }
   .tog.on::after { transform: translateX(20px); background: var(--c-on-accent); }
   .tog:hover { border-color: var(--c-tx6); }
+  .tog:disabled { opacity: .4; cursor: default; }
 
   /* Auswahl mit Beispiel (Dateiname) */
   .radio-group.vertical, .vertical { display: flex; flex-direction: column; gap: var(--sp-1); }
@@ -1238,6 +1312,16 @@
     font-weight: 600; color: var(--c-tx1); white-space: nowrap;
   }
   .spin { display: inline-block; animation: spin 1s linear infinite; }
+  /* ── Verfolgte Playlists ─────────────────────────────────────────────── */
+  .follow-list { display: flex; flex-direction: column; border: 1px solid var(--c-br1); border-radius: var(--r-m); background: var(--c-bg2); }
+  .follow-row { display: flex; align-items: center; gap: var(--sp-2); padding: 6px 6px 6px 10px; }
+  .follow-row + .follow-row { border-top: 1px solid var(--c-br1); }
+  .follow-ico { color: var(--c-accent-tx); flex-shrink: 0; }
+  .follow-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .follow-name { font-size: var(--fs-body); font-weight: 600; color: var(--c-tx1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .follow-meta { font-size: var(--fs-sm); color: var(--c-tx3); }
+  .follow-meta b { color: var(--c-accent-tx); }
+  .follow-empty { font-size: var(--fs-sm); color: var(--c-tx4); padding: 8px 10px; border: 1px dashed var(--c-br2); border-radius: var(--r-m); }
   @keyframes spin { to { transform: rotate(360deg); } }
   /* ── Was ist neu ─────────────────────────────────────────────────────── */
   .cl-list { display: flex; flex-direction: column; gap: 6px; }

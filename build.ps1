@@ -3,7 +3,8 @@
 # Voraussetzungen: Python 3.11+, Node.js 20+, pip install pyinstaller
 
 param(
-    [switch]$SkipTests,     # -SkipTests   → Backend-Tests überspringen
+    [switch]$SkipTests,     # -SkipTests   → alle Tests überspringen
+    [switch]$SkipE2E,       # -SkipE2E     → nur die Oberflächen-Tests (Playwright) überspringen
     [switch]$SkipBackend,   # -SkipBackend → PyInstaller-Schritt überspringen
     [switch]$SkipFrontend   # -SkipFrontend → Vite-Build überspringen
 )
@@ -29,6 +30,27 @@ if (-not $SkipTests) {
     Pop-Location
     if ($testExit -ne 0) { Fail "Tests fehlgeschlagen — Build abgebrochen (-SkipTests zum Überspringen)" }
     Ok "alle Tests grün"
+
+    # Rechenteil von Beat-Sync, Phrasen und Bass-Tausch (Sekunden)
+    Step "Frontend-Unit-Tests..."
+    Push-Location "$root\app"
+    npm test
+    $testExit = $LASTEXITCODE
+    Pop-Location
+    if ($testExit -ne 0) { Fail "Frontend-Tests fehlgeschlagen — Build abgebrochen" }
+    Ok "Frontend-Unit-Tests grün"
+
+    # Oberfläche mit echter Wiedergabe in Electron gegen ein eigenes Test-Backend
+    # (Ports 8769/5176, nie 8765), etwa 1 Minute
+    if (-not $SkipE2E) {
+        Step "Oberflächen-Tests (Playwright)..."
+        Push-Location "$root\app"
+        npx playwright test
+        $testExit = $LASTEXITCODE
+        Pop-Location
+        if ($testExit -ne 0) { Fail "Oberflächen-Tests fehlgeschlagen — Build abgebrochen (-SkipE2E zum Überspringen)" }
+        Ok "Oberflächen-Tests grün"
+    }
 }
 
 # ── 1. Python-Backend mit PyInstaller bündeln ────────────────────────────────

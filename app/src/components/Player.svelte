@@ -4,7 +4,7 @@
   import { keyCompat } from '../lib/keys.js'
   import KeyChip from './KeyChip.svelte'
   import { library, playerState, nowPlaying, queue, waveform, waveformNext, settings, playMode, send, autoMixEnabled, appSettings, introSkipPaths, skipNextCrossfade, livePositionMs, beatGrids, waveformThird } from '../stores/ws.js'
-  import { createSync, glideRate, alignedStart } from '../lib/beatsync.js'
+  import { createSync, glideRate, barAlignedStart, snapToPhrase, swapEligible, bassSwapPlan, meetRate } from '../lib/beatsync.js'
   import Waveform from './Waveform.svelte'
 
   let elA = $state(null)
@@ -38,7 +38,13 @@
     const cfg = get(appSettings)
     if (!cfg.beatAlignCf && !cfg.tempoMatch) return null
     return createSync(oldEl, newEl, gridOf(oldPath), gridOf(newPath),
-                      { tempo: cfg.tempoMatch !== false, phase: !!cfg.beatAlignCf })
+                      { tempo: cfg.tempoMatch !== false, phase: !!cfg.beatAlignCf, maxDiff: maxTempoDiff(), meet: true })
+  }
+  function maxTempoDiff() { return (get(appSettings).maxTempoDiff ?? 8) / 100 }
+  // Uebergang abgebrochen: laufender Titel zurueck aufs Original-Tempo
+  function cancelSync() {
+    if (cfSync) cfSync.abort()
+    cfSync = null
   }
   function endSync(el) {
     if (!cfSync) return
@@ -60,6 +66,40 @@
 
   let audioCtx = null
   let gainA = null, gainB = null
+  // Bass je Deck (Low-Shelf vor der Lautstaerke): beim Uebergang laeuft der
+  // neue Titel erst ohne Bass mit, in der Mitte wird der Bass weich getauscht
+  // — so wummern nie zwei Bassdrums uebereinander.
+  let eqA = null, eqB = null
+  const BASS_KILL_DB = -30
+  let bassSwapOn = $state(false)     // Anzeige waehrend des Uebergangs
+  function eqOf(el) { return el === elA ? eqA : el === elB ? eqB : null }
+  function resetBass(el, sec = 0.04) {
+    const eq = eqOf(el)
+    if (!eq || !audioCtx) return
+    const now = audioCtx.currentTime
+    eq.gain.cancelScheduledValues(now)
+    eq.gain.setValueAtTime(eq.gain.value, now)
+    eq.gain.linearRampToValueAtTime(0, now + sec)
+  }
+  function resetAllBass() { resetBass(elA); resetBass(elB); bassSwapOn = false }
+  /** Bass-Tausch fuer einen Uebergang einplanen; false = normaler Blend. */
+  function planBassSwap(oldEl, newEl, gOld, gNew, fadeSec) {
+    const cfg = get(appSettings)
+    if (!audioCtx || !eqA || cfg.bassSwap === false || !oldEl || !newEl) return false
+    if (!swapEligible(oldEl, gOld, gNew, cfg)) return false
+    // Treffen in der Mitte: der alte Titel gleitet in den ersten 40 % auf sein Ziel-Tempo
+    const r1 = cfg.tempoMatch !== false ? meetRate(oldEl, gOld, gNew, maxTempoDiff()) : null
+    const plan = bassSwapPlan(oldEl.currentTime, oldEl.playbackRate || 1, gOld, fadeSec,
+                              r1 ? { r1, sec: 0.4 * fadeSec } : null)
+    if (!plan) return false
+    const eo = eqOf(oldEl), en = eqOf(newEl), now = audioCtx.currentTime
+    const t0 = now + plan.delay, t1 = t0 + plan.len
+    for (const eq of [eo, en]) eq.gain.cancelScheduledValues(now)
+    eo.gain.setValueAtTime(0, now); eo.gain.setValueAtTime(0, t0); eo.gain.linearRampToValueAtTime(BASS_KILL_DB, t1)
+    en.gain.setValueAtTime(BASS_KILL_DB, now); en.gain.setValueAtTime(BASS_KILL_DB, t0); en.gain.linearRampToValueAtTime(0, t1)
+    bassSwapOn = true
+    return true
+  }
   let lufsA = $state(-99)
   let lufsB = $state(-99)
 
@@ -116,8 +156,11 @@
       limiter.connect(audioCtx.destination)
       gainA = audioCtx.createGain(); gainA.connect(limiter)
       gainB = audioCtx.createGain(); gainB.connect(limiter)
-      audioCtx.createMediaElementSource(elA).connect(gainA)
-      audioCtx.createMediaElementSource(elB).connect(gainB)
+      const shelf = () => { const f = audioCtx.createBiquadFilter(); f.type = 'lowshelf'; f.frequency.value = 200; f.gain.value = 0; return f }
+      eqA = shelf(); eqA.connect(gainA)
+      eqB = shelf(); eqB.connect(gainB)
+      audioCtx.createMediaElementSource(elA).connect(eqA)
+      audioCtx.createMediaElementSource(elB).connect(eqB)
     } catch (e) { console.warn('AudioContext:', e) }
   })
 
@@ -340,6 +383,40 @@
     return Math.max(0.2, trig)
   }
 
+  // Mix-Punkt einrasten: auf einen Phrasenanfang (16/8 Takte, hoechstens
+  // 8 Takte verschoben), bei selbst gezogener Zone nur auf die naechste Eins,
+  // ohne Takt-Information wie bisher auf den naechsten Schlag.
+  function _snapTriggerMs(triggerMs) {
+    const cfg = get(appSettings)
+    if (!cfg.beatAlignCf || durMs <= 0) return triggerMs
+    const latest = durMs - cfS * 1000 - 200
+    const playingPath = cur()?.dataset.path || get(nowPlaying)?.path
+    const gC = gridOf(playingPath)
+    if (gC && gC.conf >= 0.4 && gC.phrase != null) {
+      const dragged = outroOverride && outroOverride.path === playingPath
+      const units = dragged || cfg.phraseAlign === false ? [1] : [16, 8, 1]
+      return snapToPhrase(triggerMs / 1000, gC, 0, latest / 1000, dragged ? 1 : 8, units) * 1000
+    }
+    const bpm = get(nowPlaying)?.bpm
+    if (gC && gC.conf >= 0.3) {
+      const beatMs = 60000 / gC.bpm, offMs = gC.off * 1000
+      const snapped = offMs + Math.round((triggerMs - offMs) / beatMs) * beatMs
+      if (Math.abs(snapped - triggerMs) <= beatMs) return Math.min(snapped, latest)
+    } else if (bpm > 30 && bpm < 300) {
+      const beatMs  = 60000 / bpm
+      const snapped = Math.round(triggerMs / beatMs) * beatMs
+      // Only apply if snap is within ±1 beat from base trigger
+      if (Math.abs(snapped - triggerMs) <= beatMs) return Math.min(snapped, latest)
+    }
+    return triggerMs
+  }
+  // Einstieg im naechsten Titel: auf dessen Phrasenanfang (nicht bei selbst gezogener Zone)
+  function _snapIntroSec(sec, g, dur, dragged) {
+    const cfg = get(appSettings)
+    if (!cfg.beatAlignCf || cfg.phraseAlign === false || dragged || !g || g.conf < 0.4 || !(dur > 0)) return sec
+    return snapToPhrase(sec, g, 0, dur * 0.6)
+  }
+
   $effect(() => { void $waveform;     _sfWf  = null })
   $effect(() => { void $waveformNext; _sfNWf = null })
 
@@ -351,8 +428,10 @@
   const outroBarStart = $derived.by(() => {
     if (durMs <= 0 || cfS <= 0) return -1
     void $waveform; void $appSettings.outroAggressiveness; void $appSettings.smartFade
-    void outroOverride; void $nowPlaying?.path
-    return _outroTrigger()
+    void outroOverride; void $nowPlaying?.path; void $beatGrids
+    void $appSettings.phraseAlign; void $appSettings.beatAlignCf
+    const trig = _outroTrigger()
+    return trig < 0 ? trig : Math.max(0, _snapTriggerMs(trig * durMs) / durMs)
   })
   const outroBarEnd = $derived(
     outroBarStart >= 0 ? Math.min(1, outroBarStart + _cfFrac) : -1
@@ -433,10 +512,16 @@
     const wf = $waveformNext
     const nt = nextTrack
     if (nt && introOverride && introOverride.path === nt.path) return introOverride.frac
-    if (!nt || cfS <= 0 || !sf) return 0
-    const a   = Math.max(0, Math.min(4, ia - 1))
-    const det = wf?.length > 0 ? _detectIntroLen(wf) * INTRO_SKIP[a] : 0
-    return Math.min(0.45, Math.max(det, INTRO_FRACS[a]))
+    if (!nt || cfS <= 0) return 0
+    const dur = nt.duration_sec || 0
+    void $beatGrids; void $appSettings.phraseAlign; void $appSettings.beatAlignCf
+    let frac = 0
+    if (sf) {
+      const a   = Math.max(0, Math.min(4, ia - 1))
+      const det = wf?.length > 0 ? _detectIntroLen(wf) * INTRO_SKIP[a] : 0
+      frac = Math.min(0.45, Math.max(det, INTRO_FRACS[a]))
+    }
+    return dur > 0 ? _snapIntroSec(frac * dur, gridOf(nt.path), dur, false) / dur : frac
   })
   const nextIntroEnd = $derived.by(() => {
     const nt = nextTrack
@@ -501,7 +586,8 @@
     if (cfRaf)   { clearTimeout(cfRaf); cfRaf = null }
     cfCancelled = true
     cfActive = false; cfNextIdx = -1
-    cfSync = null; _stopGlide(); blendP = 0
+    untrack(cancelSync); _stopGlide(); blendP = 0
+    untrack(resetAllBass)
 
     const c  = untrack(cur)
     const a  = untrack(alt)
@@ -550,6 +636,7 @@
 
       let syncTried = false
       const oldPath = c.dataset.path
+      untrack(() => planBassSwap(c, a, gridOf(oldPath), gridOf(track.path), fadeMs / 1000))
       function rafTick() {
         const t = Math.min(1, (performance.now() - t0) / fadeMs)
         const [fv, tv] = _fade(t, vOld, v)
@@ -559,12 +646,12 @@
           syncTried = true
           cfSync = startSync(c, a, oldPath, track.path)
         }
-        cfSync?.tick(t < 0.3)
+        cfSync?.tick(t < 0.3, t)
         // setTimeout statt requestAnimationFrame: rAF steht still, wenn das
         // Fenster minimiert oder verdeckt ist — der Uebergang blieb dann haengen
         // und beide Titel spielten weiter
         if (t < 1) cfRaf = setTimeout(rafTick, 16)
-        else { cfRaf = null; cfRafActive = false; endSync(a); _silenceAndStop(c); _cfDoneAt = performance.now() }
+        else { cfRaf = null; cfRafActive = false; endSync(a); resetBass(a, 0.08); bassSwapOn = false; _silenceAndStop(c); _cfDoneAt = performance.now() }
       }
       cfRaf = setTimeout(rafTick, 16)
     } else {
@@ -629,7 +716,8 @@
       if (cfRaf)   { clearTimeout(cfRaf); cfRaf = null }
       cfRafActive = false
       if (cfActive) { cfActive = false; cfNextIdx = -1 }
-      cfSync = null; blendP = 0; blendNextPos = 0
+      cancelSync(); blendP = 0; blendNextPos = 0
+      untrack(resetAllBass)
       const a = alt()
       if (a) {
         stopRamp(a)
@@ -675,25 +763,8 @@
     if (performance.now() - _cfDoneAt < 8000) return
 
     const trigFrac = _outroTrigger()
-    let triggerMs  = trigFrac >= 0 ? trigFrac * durMs : durMs - cfS * 1000
-
-    // Beat-align: auf den naechsten Schlag des gemessenen Taktrasters, sonst
-    // (ohne Raster) auf ein Raster aus den ganzzahligen BPM ab 0:00
-    const bpm = $nowPlaying?.bpm
-    const gC  = gridOf($nowPlaying?.path)
-    if (get(appSettings).beatAlignCf && gC && gC.conf >= 0.3) {
-      const beatMs = 60000 / gC.bpm, offMs = gC.off * 1000
-      const snapped = offMs + Math.round((triggerMs - offMs) / beatMs) * beatMs
-      if (Math.abs(snapped - triggerMs) <= beatMs) triggerMs = Math.min(snapped, durMs - cfS * 1000 - 200)
-    } else if (bpm > 30 && bpm < 300 && get(appSettings).beatAlignCf) {
-      const beatMs  = 60000 / bpm
-      const snapped = Math.round(triggerMs / beatMs) * beatMs
-      // Only apply if snap is within ±1 beat from base trigger
-      if (Math.abs(snapped - triggerMs) <= beatMs) {
-        // Don't go so late that there's no room for the crossfade
-        triggerMs = Math.min(snapped, durMs - cfS * 1000 - 200)
-      }
-    }
+    // Einrasten auf Phrase / Eins / Schlag (siehe _snapTriggerMs)
+    const triggerMs = _snapTriggerMs(trigFrac >= 0 ? trigFrac * durMs : durMs - cfS * 1000)
 
     if (pos < triggerMs - 100 || pos >= durMs - 100) return
 
@@ -726,6 +797,7 @@
     }
 
     const introFrac = _getNextIntroStart()
+    const introDragged = !!(introOverride && introOverride.path === nextTrk.path)
 
     inactive.playbackRate = 1
     inactive.src = nextUrl
@@ -750,9 +822,12 @@
       const elDur = inactive.duration
       let skipSec = (introFrac > 0.01 && elDur > 0 && isFinite(elDur))
         ? introFrac * elDur : 0
-      // Auf derselben Taktphase einsteigen wie der laufende Titel gerade steht
-      if (get(appSettings).beatAlignCf)
-        skipSec = alignedStart(cur(), skipSec, gridOf(curPath), gridOf(nextTrk.path))
+      // Auf einem Phrasenanfang des naechsten Titels einsteigen, und zwar an
+      // derselben Stelle im Takt, an der der laufende gerade steht (Eins auf Eins)
+      if (get(appSettings).beatAlignCf) {
+        skipSec = _snapIntroSec(skipSec, gridOf(nextTrk.path), elDur, introDragged)
+        skipSec = barAlignedStart(cur(), skipSec, gridOf(curPath), gridOf(nextTrk.path), 0.12, maxTempoDiff())
+      }
 
       if (skipSec > 0.05) {
         // Option A: currentTime → wait for seeked → play().
@@ -774,6 +849,7 @@
 
     const remaining = durMs - pos
     const cfMs = Math.min(cfS * 1000, remaining)
+    planBassSwap(cur(), inactive, gridOf(curPath), gridOf(nextTrk.path), cfMs / 1000)
     let elapsed = 0
     const cfCurveSnap = get(appSettings).cfCurve ?? 'cosine'
 
@@ -792,7 +868,7 @@
       if (active) active.volume = fv
       if (inact)  inact.volume  = tv
       // Springen nur, solange der neue Titel noch leise ist
-      cfSync?.tick(t < 0.3)
+      cfSync?.tick(t < 0.3, t)
       if (inact && inact.duration > 0) blendNextPos = inact.currentTime / inact.duration
       if (t >= 1) {
         clearInterval(cfTimer); cfTimer = null
@@ -814,6 +890,8 @@
       el.playbackRate = 1
       el.removeAttribute('src')
       if (gn) { gn.gain.cancelScheduledValues(audioCtx?.currentTime ?? 0); gn.gain.value = 1 }
+      const eq = eqOf(el)
+      if (eq) { eq.gain.cancelScheduledValues(audioCtx?.currentTime ?? 0); eq.gain.value = 0 }
     }, 80)
   }
 
@@ -825,7 +903,8 @@
     const oldEl = cur()
     const newEl = alt()
     loadedUrl = nextUrl
-    if (newEl) endSync(newEl)
+    if (newEl) { endSync(newEl); resetBass(newEl, 0.08) }
+    bassSwapOn = false
     blendP = 0; blendNextPos = 0
     _cfDoneAt = performance.now()
     outroOverride = null; introOverride = null
@@ -939,7 +1018,8 @@
       // Automatischer Crossfade in die kaputte Datei: abbrechen, der aktuelle
       // Titel laeuft weiter; der naechste Versuch nimmt den Titel danach.
       if (cfTimer) { clearInterval(cfTimer); cfTimer = null }
-      cfCancelled = true; cfActive = false; cfNextIdx = -1; cfSync = null
+      cfCancelled = true; cfActive = false; cfNextIdx = -1; cancelSync()
+      resetAllBass()
       const c = cur(); if (c) c.volume = volume / 100
       _silenceAndStop(el)
       return
@@ -1011,6 +1091,18 @@
 
   const pos = $derived(durMs > 0 ? posMs / durMs : 0)
 
+  // Nur beim Entwickeln: Einblick fuer automatische Tests (fehlt im fertigen Build)
+  if (import.meta.env.DEV) {
+    window.__player = {
+      get elA() { return elA }, get elB() { return elB }, get which() { return which },
+      get eqA() { return eqA?.gain.value }, get eqB() { return eqB?.gain.value },
+      get bassSwapOn() { return bassSwapOn }, get cfActive() { return cfActive }, get cfS() { return cfS },
+      get durMs() { return durMs }, get triggerMs() { return outroBarStart >= 0 ? outroBarStart * durMs : -1 },
+      get nextIntroStart() { return nextIntroStart }, grid: (p) => gridOf(p),
+      get audioTime() { return audioCtx?.currentTime ?? 0 },
+    }
+  }
+
   let centerH = $state(110)
   let deckH   = $state(0)
   let deck1H   = $state(44)
@@ -1066,6 +1158,7 @@
           {:else if $appSettings.normalizeVolume && $nowPlaying}
             <span class="lufs-warn" title="Keine Lautstärkemessung — Normalisierung nicht aktiv für diesen Track">kein LUFS-Wert</span>
           {/if}
+          {#if bassSwapOn}<span class="swap-badge" title="Übergang im Takt: Bass wird weich getauscht (Einstellungen → Blend)"><i class="ti ti-arrows-exchange" aria-hidden="true"></i> Bass</span>{/if}
           <span class="time"><b>{fmt(posMs)}</b> / {fmt(durMs)}</span>
         </span>
       </div>
@@ -1132,6 +1225,9 @@
 </div>
 
 <style>
+  .swap-badge { display: inline-flex; align-items: center; gap: 3px; font-size: var(--fs-cap); font-weight: 700;
+                letter-spacing: .04em; color: var(--c-accent-tx); padding: 0 6px; border-radius: var(--r-s);
+                border: 1px solid color-mix(in srgb, var(--c-accent) 50%, transparent); }
   .player { display: flex; flex-direction: column; padding: var(--sp-3) var(--sp-4) var(--sp-2); background: var(--c-bg); flex-shrink: 0; }
   .player-row { display: flex; align-items: flex-start; gap: var(--sp-4); }
 

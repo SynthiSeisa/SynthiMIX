@@ -2,17 +2,9 @@
   import { untrack } from 'svelte'
   import { downloads, searchResults, send, openSettings, videoCheckPending, followed } from '../stores/ws.js'
 
-  // ── Verfolgte Playlists ────────────────────────────────────────────────
-  let followOpen = $state(true)
+  // ── Verfolgte Playlists: Liste steht in den Einstellungen (Download) ──
   const isFollowed = (url) => !!url && $followed.some(f => f.url === url)
-  function followAgo(ts) {
-    if (!ts) return 'noch nie geprüft'
-    const min = Math.round((Date.now() / 1000 - ts) / 60)
-    if (min < 1) return 'gerade geprüft'
-    if (min < 60) return `vor ${min} min`
-    const h = Math.round(min / 60)
-    return h < 48 ? `vor ${h} h` : `vor ${Math.round(h / 24)} Tagen`
-  }
+  const followChecking = $derived($followed.some(f => f.checking))
 
   let input     = $state('')
   let fmt       = $state('mp3-best')
@@ -259,42 +251,18 @@
 
   <!-- Downloads -->
   <div class="list-header">
+    {#if $followed.length}
+      <button class="btn btn-ghost btn-sm follow-link" onclick={() => openSettings('download')}
+              title="Verfolgte Playlists verwalten (Einstellungen → Download)">
+        <i class="ti {followChecking ? 'ti-refresh spinner' : 'ti-bookmark-filled'}" aria-hidden="true"></i>
+        {$followed.length} verfolgt{followChecking ? ' · wird geprüft…' : ''}
+      </button>
+    {/if}
     {#if hasDone}
       <button class="btn btn-ghost btn-sm" onclick={clearCompleted}><i class="ti ti-trash"></i> Abgeschlossene leeren</button>
     {/if}
   </div>
   <div class="list">
-    {#if $followed.length}
-      <div class="follow-box">
-        <div class="follow-hdr">
-          <button class="follow-toggle" onclick={() => followOpen = !followOpen} aria-expanded={followOpen}>
-            <i class="ti ti-chevron-right fchev" class:open={followOpen} aria-hidden="true"></i>
-            <i class="ti ti-bookmark-filled" aria-hidden="true"></i>
-            Verfolgte Playlists <span class="follow-n">{$followed.length}</span>
-          </button>
-          <button class="btn btn-ghost btn-sm" onclick={() => send({ type: 'follow_check' })}
-                  title="Alle verfolgten Playlists jetzt auf neue Titel prüfen"><i class="ti ti-refresh"></i> Alle prüfen</button>
-        </div>
-        {#if followOpen}
-          {#each $followed as f (f.url)}
-            <div class="follow-row">
-              <div class="follow-main">
-                <span class="follow-title" title={f.url}>{f.title}</span>
-                <span class="follow-meta">
-                  {#if f.checking}<i class="ti ti-refresh spinner" aria-hidden="true"></i> wird geprüft…
-                  {:else}{followAgo(f.last_check)}{#if f.last_check && f.last_new} · <b>{f.last_new} neu</b>{/if}{/if}
-                  · {f.known} bekannt
-                </span>
-              </div>
-              <button class="btn btn-icon btn-sm" onclick={() => send({ type: 'follow_check', url: f.url })} disabled={f.checking}
-                      title="Jetzt auf neue Titel prüfen" aria-label="Jetzt prüfen"><i class="ti ti-refresh"></i></button>
-              <button class="btn btn-icon btn-sm" onclick={() => send({ type: 'follow_remove', url: f.url })}
-                      title="Nicht mehr verfolgen (geladene Titel bleiben)" aria-label="Nicht mehr verfolgen"><i class="ti ti-x"></i></button>
-            </div>
-          {/each}
-        {/if}
-      </div>
-    {/if}
     {#if groups.length === 0 && !searching && !$searchResults}
       <div class="empty">Link einfügen zum Herunterladen · Songname eingeben zum Suchen</div>
     {:else}
@@ -479,22 +447,8 @@
   .list-header:empty { display: none; }
   .list { flex: 1; overflow-y: auto; }
 
-  /* Verfolgte Playlists */
-  .follow-box { border-bottom: 1px solid var(--c-br1); padding: 4px 0 6px; background: var(--c-bg2); }
-  .follow-hdr { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); padding: 0 var(--sp-2) 0 var(--sp-2); }
-  .follow-toggle {
-    display: inline-flex; align-items: center; gap: 6px; border: none; background: none; cursor: pointer; padding: 4px 2px;
-    font-size: var(--fs-cap); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--c-tx3);
-  }
-  .follow-toggle .ti-bookmark-filled { color: var(--c-accent-tx); }
-  .fchev { transition: transform .12s; }
-  .fchev.open { transform: rotate(90deg); }
-  .follow-n { font-weight: 600; color: var(--c-tx4); }
-  .follow-row { display: flex; align-items: center; gap: 4px; padding: 3px var(--sp-2) 3px 30px; }
-  .follow-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-  .follow-title { font-size: var(--fs-body); font-weight: 600; color: var(--c-tx1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .follow-meta { font-size: var(--fs-sm); color: var(--c-tx3); }
-  .follow-meta b { color: var(--c-accent-tx); }
+  .follow-link { margin-right: auto; color: var(--c-tx3); }
+  .follow-link .ti-bookmark-filled { color: var(--c-accent-tx); }
   .follow-on { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-sm); color: var(--c-accent-tx); font-weight: 600; }
   .empty { padding: 40px 20px; text-align: center; color: var(--c-tx4); font-size: var(--fs-body); }
 

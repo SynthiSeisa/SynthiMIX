@@ -65,8 +65,11 @@ export const excludedFolders     = writable([])   // aus der Bibliothek ausgesch
 // Ergebnis der taeglichen Pruefung: { ytdlp: {latest, available}, spotdl: {current, latest, available},
 // ytdlp_updated: {from, to, at} } — daraus kommen Punkt am Zahnrad und Hinweise
 export const toolUpdates         = writable({})
-// Playlist-Kaestchen vor dem Laden: null | {pending, url} | {plan_id, url, format, title, total, have, new, dupes, followed}
-export const playlistPlan        = writable(null)
+// Playlist-Kaestchen vor dem Laden: Warteliste fertiger Pruefungen
+// [{plan_id, url, format, title, total, have, new, dupes, followed}]
+export const playlistPlans       = writable([])
+// Laufende Pruefungen (blockieren nichts): [{url, phase: 'list'|'search', done, total}]
+export const planChecks          = writable([])
 export const playlistChoice      = writable(null)   // null | {pending:true} | {url, format, track_title, playlist_title, count}
 // Musikvideo-Links: Warteliste der Rueckfragen und laufende Pruefungen
 export const videoChoices        = writable([])     // [{url, format, video:{title,uploader,duration}, song:{url,title,uploader,duration}}]
@@ -117,6 +120,9 @@ const APP_SETTINGS_DEFAULTS = {
   introSkipSec:       0,
   beatAlignCf:        true,
   tempoMatch:         true,    // Tempo des naechsten Titels im Uebergang angleichen
+  phraseAlign:        true,    // Uebergang auf Phrasenanfang (16/8 Takte, hoechstens 8 Takte verschoben)
+  bassSwap:           true,    // Bass weich tauschen (EQ), nur wenn der Uebergang im Takt laeuft
+  maxTempoDiff:       8,       // groesster Tempo-Unterschied fuers Angleichen in % (4-25)
   playerShowLufs:     false,   // LUFS-Stand im Player neben BPM zeigen
   dupeAllowFolders:   [],      // Ordner, in denen Kopien nicht als Duplikat zaehlen
   keyNotation:        'musical',   // Tonart als 'musical' (F♯m) oder 'camelot' (11A)
@@ -192,6 +198,29 @@ function connect() {
         break
       case 'now_playing':   nowPlaying.set(msg.track); break
       case 'downloads':     downloads.set(msg.items); break
+      case 'library_delta': {
+        // Nur geaenderte / entfernte Titel (siehe push_library im Backend)
+        const up = new Map((msg.upsert ?? []).map(t => [t.path, t]))
+        const del = new Set(msg.remove ?? [])
+        library.update(l => {
+          const out = []
+          for (const t of l) {
+            if (del.has(t.path)) continue
+            const n = up.get(t.path)
+            if (n) { out.push(n); up.delete(t.path) } else out.push(t)
+          }
+          for (const t of up.values()) out.push(t)
+          return out
+        })
+        if (del.size > 0) {
+          downloadTree.update(dt => ({
+            folders: dt.folders.map(f => ({ ...f, tracks: f.tracks.filter(t => !del.has(t.path)) })),
+            files: (dt.files ?? []).filter(t => !del.has(t.path)),
+          }))
+          send({ type: 'get_history' })
+        }
+        break
+      }
       case 'library': {
         // If paths were removed from library, also remove them from download tree
         let prevPaths
@@ -219,7 +248,8 @@ function connect() {
       case 'waveform_third':  waveformThird.set({ path: msg.path ?? '', data: msg.data ?? [] }); break
       case 'harmonic_result': harmonicResult.set({ ...msg, at: Date.now() }); break
       case 'beatgrid':
-        beatGrids.update(g => ({ ...g, [msg.path]: { bpm: msg.bpm_f || 0, off: msg.beat_off || 0, conf: msg.beat_conf || 0 } }))
+        beatGrids.update(g => ({ ...g, [msg.path]: { bpm: msg.bpm_f || 0, off: msg.beat_off || 0, conf: msg.beat_conf || 0,
+          phrase: msg.phrase_off ?? null, barBeats: msg.bar_beats || 0, phraseSrc: msg.phrase_src || '' } }))
         break
       case 'playlists':       playlists.set(msg.items ?? []); break
       case 'download_tree':   downloadTree.set(msg.tree ?? { folders: [], files: [] }); downloadTreeLoaded.set(true); break
@@ -332,9 +362,13 @@ function connect() {
       case 'excluded_folders':        excludedFolders.set(msg.items || []); break
       case 'tool_updates':            toolUpdates.set(msg.items || {}); break
       case 'watched_folder_impact':   watchedFolderImpact.set({ folder: msg.folder, tracks: msg.tracks }); break
-      case 'playlist_plan_pending':   playlistPlan.set({ pending: true, url: msg.url }); break
-      case 'playlist_plan_cancel':    playlistPlan.set(null); break
-      case 'playlist_plan':           playlistPlan.set({ ...msg, pending: false }); break
+      case 'playlist_plan_pending':   planChecks.update(l => [...l.filter(c => c.url !== msg.url), { url: msg.url, phase: 'list', done: 0, total: 0 }]); break
+      case 'playlist_plan_progress':  planChecks.update(l => l.map(c => c.url === msg.url ? { ...c, phase: msg.phase, done: msg.done, total: msg.total } : c)); break
+      case 'playlist_plan_cancel':    planChecks.update(l => l.filter(c => c.url !== msg.url)); break
+      case 'playlist_plan':
+        planChecks.update(l => l.filter(c => c.url !== msg.url))
+        playlistPlans.update(l => [...l.filter(pl => pl.url !== msg.url), msg])
+        break
       case 'playlist_choice_pending': playlistChoice.set({ pending: true }); break
       case 'playlist_choice_cancel':  playlistChoice.set(null); break
       case 'playlist_choice':         playlistChoice.set({ ...msg, pending: false }); break

@@ -67,7 +67,7 @@ class PlaylistParallelTest(BackendTest):
 
     def fake_audit(self, ids, title, titles=None, durs=None):
         titles = titles or [f"Artist {n} - {self.NAMEN[n % len(self.NAMEN)]}" for n in range(len(ids))]
-        async def audit(url):
+        async def audit(url, progress=None, known=None):
             return ([{"url": f"https://www.youtube.com/watch?v={i}", "title": t,
                       "replaced": False, "uploader": "", "duration": (durs or {}).get(i, 180 + n * 7)}
                      for n, (i, t) in enumerate(zip(ids, titles))], title)

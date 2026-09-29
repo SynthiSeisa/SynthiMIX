@@ -26,13 +26,48 @@ if "main" not in sys.modules:
         import main  # noqa: E402
     finally:
         sys.argv = _argv
-main = sys.modules["main"]
+class _Backend:
+    """Das Backend unter einem Namen: die Tests sprechen main.X an, X steckt
+    seit der Aufteilung in einem Modul von synthimix/. Lesen und Ersetzen
+    gehen an das Modul, das X definiert — die anderen Module greifen per
+    modul.X darauf zu, eine Ersetzung wirkt also ueberall."""
+
+    def __init__(self, mods):
+        object.__setattr__(self, "_mods", mods)
+
+    def _owner(self, name):
+        for m in self._mods:
+            if name in vars(m):
+                return m
+        raise AttributeError(name)
+
+    def __getattr__(self, name):
+        return getattr(self._owner(name), name)
+
+    def __setattr__(self, name, value):
+        setattr(self._owner(name), name, value)
+
+
+def _backend_modules():
+    import importlib
+    import pkgutil
+    import synthimix
+    from synthimix import core
+    mods = [core, sys.modules["main"]]
+    for info in pkgutil.iter_modules(synthimix.__path__):
+        m = importlib.import_module("synthimix." + info.name)
+        if m not in mods:
+            mods.append(m)
+    return mods
+
+
+main = _Backend(_backend_modules())
 
 _FILES = {
     "QUEUE_FILE": "queue.json", "SETTINGS_FILE": "settings.json",
     "LIB_CACHE": "library_cache.json", "HISTORY_FILE": "history.json",
     "PLAY_LOG_FILE": "play_log.json", "NOTES_FILE": "notes.json",
-    "WISHES_FILE": "wishes.json", "QUALITY_CACHE": "quality_cache.json",
+    "WISHES_FILE": "wishes.json", "QUALITY_CACHE": "quality_cache.json", "YTM_CACHE_FILE": "ytm_search_cache.json",
 }
 _LIST_STATE = ("library", "queue", "downloads", "history", "play_log", "wishes")
 
@@ -48,6 +83,8 @@ class BackendTest(unittest.TestCase):
         main.BASE_DIR = self.tmp
         main._quality_cache = {}
         main._quality_cache_dirty = False
+        main._ytm_cache = {}
+        main._ytm_cache_dirty = False
         main.PLAYLISTS_DIR = self.tmp / "playlists"
         self._saved_state = {k: main._state.get(k) for k in (
             *_LIST_STATE, "current_idx", "download_dir", "watched_folders",

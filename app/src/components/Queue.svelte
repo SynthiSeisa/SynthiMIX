@@ -308,15 +308,40 @@
     _harmTimer = setTimeout(() => harmonicNote = '', 9000)
   })
 
+  // Grosse Warteschlangen (ganzer Ordner eingereiht): nur die sichtbaren
+  // Zeilen zeichnen. Gemessen 09/2026: 2.500 Eintraege kosteten ~75 ms je
+  // Aenderung, bis 300 bleibt alles wie gehabt.
+  const VIRT_MIN = 300, VIRT_BUF = 25
+  let qScrollTop = $state(0)
+  let qViewH     = $state(600)
+  let qRowH      = $state(30)
+  const virt = $derived($queue.length > VIRT_MIN)
+  const qStart = $derived(virt ? Math.max(0, Math.floor(qScrollTop / qRowH) - VIRT_BUF) : 0)
+  const qEnd   = $derived(virt ? Math.min($queue.length, Math.ceil((qScrollTop + qViewH) / qRowH) + VIRT_BUF) : $queue.length)
+  const qVisible = $derived(virt ? $queue.slice(qStart, qEnd) : $queue)
+  function onQScroll() {
+    if (!qListEl) return
+    qScrollTop = qListEl.scrollTop
+    qViewH = qListEl.clientHeight
+  }
+  $effect(() => {
+    // Zeilenhoehe einmal messen (haengt von der Dichte ab)
+    void $queue.length
+    const r = qListEl?.querySelector('.row')
+    if (r && r.offsetHeight > 0) qRowH = r.offsetHeight
+  })
+
   const FOLLOW_IDLE_MS = 12000
   let _lastUserAct = 0
   function userActed() { _lastUserAct = Date.now() }
   function scrollToCurrent(force = false) {
     if (!qListEl) return
     if (!force && (dragFrom !== null || Date.now() - _lastUserAct < FOLLOW_IDLE_MS)) return
+    const ci = $playerState.current_idx
     const row = qListEl.querySelector('.row.active')
-    if (!row) return
-    const top = row.offsetTop - qListEl.offsetTop
+    if (!row && !(virt && ci >= 0)) return
+    // Bei langer Liste ist die aktive Zeile evtl. gar nicht gezeichnet
+    const top = row ? row.offsetTop - qListEl.offsetTop : ci * qRowH
     if (Math.abs(qListEl.scrollTop - top) > 4) qListEl.scrollTo({ top, behavior: 'smooth' })
   }
 
@@ -576,11 +601,13 @@
   {/if}
 
   <!-- Track list -->
-  <div class="queue-list" bind:this={qListEl} onwheel={userActed} ontouchmove={userActed} onpointerdown={userActed} onkeydown={userActed}>
+  <div class="queue-list" bind:this={qListEl} onscroll={onQScroll} onwheel={userActed} ontouchmove={userActed} onpointerdown={userActed} onkeydown={userActed}>
     {#if $queue.length === 0}
       <div class="empty">Queue leer · Tracks aus der Bibliothek hierher ziehen</div>
     {:else}
-      {#each $queue as track, i}
+      {#if qStart > 0}<div class="q-spacer" style="height:{qStart * qRowH}px"></div>{/if}
+      {#each qVisible as track, j}
+        {@const i = qStart + j}
         {@const active = i === $playerState.current_idx}
         {@const played = track.played && !active}
         {@const isNext = i === nextIdx}
@@ -637,6 +664,7 @@
                   title="Aus der Warteschlange entfernen" aria-label="Aus der Warteschlange entfernen"><i class="ti ti-x"></i></button>
         </div>
       {/each}
+      {#if qEnd < $queue.length}<div class="q-spacer" style="height:{($queue.length - qEnd) * qRowH}px"></div>{/if}
       <!-- drop zone after last item -->
       <div class="row-drop-end {dragOver === $queue.length ? 'drop-before' : ''}"
            ondragover={(e) => { if (dragFrom !== null) { e.preventDefault(); dragOver = $queue.length } }}

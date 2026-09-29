@@ -1,38 +1,66 @@
 <script>
-  import { playlistPlan, send } from '../stores/ws.js'
+  import { playlistPlans, planChecks, send } from '../stores/ws.js'
 
   // Vor dem Laden einer Playlist: wie viel ist schon in der Sammlung, und was
   // soll passieren? Vorher wurde still alles (oder nur Neues) geladen — und
   // im Ordner lagen dann nur 8 von 140 Titeln.
-  const plan = $derived($playlistPlan)
+  // Die Pruefung selbst laeuft im Hintergrund (Anzeige unten rechts) —
+  // frueher sperrte ein Fenster die ganze App, bis sie fertig war.
+  const plan = $derived($playlistPlans[0] ?? null)
   let follow = $state(false)
-  $effect(() => { if (plan && !plan.pending) follow = false })
+  $effect(() => { if (plan) follow = false })
 
-  const liste = $derived(plan && !plan.pending ? plan.total - plan.dupes : 0)
+  const liste = $derived(plan ? plan.total - plan.dupes : 0)
 
+  function next() { playlistPlans.update(l => l.slice(1)) }
   function pick(mode) {
     send({ type: 'download_add', url: plan.url, format: plan.format,
            plan_id: plan.plan_id, plist_mode: mode, follow })
-    playlistPlan.set(null)
+    next()
   }
-  function cancel() { playlistPlan.set(null) }
+  function cancel() { next() }
+  function abort(url) {
+    send({ type: 'playlist_plan_abort', url })
+    planChecks.update(l => l.filter(c => c.url !== url))
+  }
+  function checkText(c) {
+    if (c.phase === 'list') return c.done ? `Playlist wird eingelesen… ${c.done} Titel` : 'Playlist wird eingelesen…'
+    if (!c.total) return 'Abgleich mit deiner Sammlung…'
+    return `Song-Versionen suchen… ${c.done}/${c.total}`
+  }
   function onkey(e) { if (e.key === 'Escape' && plan) cancel() }
 </script>
 
 <svelte:window onkeydown={onkey} />
+
+{#if $planChecks.length}
+  <div class="checks" role="status" aria-live="polite">
+    {#each $planChecks as c (c.url)}
+      <div class="check">
+        <i class="ti ti-refresh spin" aria-hidden="true"></i>
+        <div class="check-body">
+          <span class="check-head">Playlist wird geprüft</span>
+          <span class="check-txt">{checkText(c)}</span>
+          {#if c.phase === 'search' && c.total}
+            <span class="check-bar"><span style="width: {Math.round(c.done / c.total * 100)}%"></span></span>
+          {/if}
+        </div>
+        <button class="btn btn-icon btn-sm" onclick={() => abort(c.url)} title="Prüfung abbrechen" aria-label="Prüfung abbrechen"><i class="ti ti-x"></i></button>
+      </div>
+    {/each}
+  </div>
+{/if}
 
 {#if plan}
   <div class="dlg-overlay" onclick={cancel} role="presentation">
     <div class="dlg panel" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Playlist laden">
 
       <div class="hdr">
-        <span class="dlg-title">{plan.pending ? 'Playlist wird geprüft…' : (plan.title || 'Playlist')}</span>
+        <span class="dlg-title">{plan.title || 'Playlist'}</span>
+        {#if $playlistPlans.length > 1}<span class="more">+{$playlistPlans.length - 1} weitere</span>{/if}
         <button class="btn btn-icon btn-sm close-btn" onclick={cancel} title="Abbrechen" aria-label="Abbrechen"><i class="ti ti-x"></i></button>
       </div>
 
-      {#if plan.pending}
-        <div class="loading"><i class="ti ti-refresh spin"></i> Titel werden mit deiner Sammlung abgeglichen…</div>
-      {:else}
         <!-- Info-Kaestchen -->
         <div class="facts" role="status">
           <span class="fact"><b>{plan.total}</b> Titel</span>
@@ -75,7 +103,6 @@
           {/if}
           <button class="btn" onclick={cancel}>Abbrechen</button>
         </div>
-      {/if}
 
     </div>
   </div>
@@ -85,7 +112,25 @@
   .panel { width: 520px; }
   .hdr { display: flex; align-items: center; gap: var(--sp-2); }
   .close-btn { margin-left: auto; }
-  .loading { display: flex; align-items: center; justify-content: center; gap: var(--sp-2); padding: var(--sp-5); font-size: var(--fs-body); color: var(--c-tx3); }
+  .more { font-size: var(--fs-sm); color: var(--c-tx4); }
+  .checks {
+    position: fixed; right: 16px; bottom: 16px; z-index: 850;
+    width: 320px; max-width: calc(100vw - 32px);
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .check {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 8px 10px 12px;
+    background: var(--c-bg5); border: 1px solid var(--c-br2);
+    border-left: 4px solid var(--c-accent); border-radius: var(--r-m);
+    box-shadow: 0 8px 26px rgba(0, 0, 0, .4);
+  }
+  .check > .spin { font-size: 18px; color: var(--c-accent-tx); flex-shrink: 0; }
+  .check-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .check-head { font-size: var(--fs-sm); font-weight: 700; color: var(--c-tx1); }
+  .check-txt { font-size: var(--fs-sm); color: var(--c-tx3); font-variant-numeric: tabular-nums; }
+  .check-bar { height: 3px; border-radius: 2px; background: var(--c-br2); overflow: hidden; margin-top: 2px; }
+  .check-bar span { display: block; height: 100%; background: var(--c-accent); transition: width .25s; }
   .spin { animation: spin 1s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .facts {
