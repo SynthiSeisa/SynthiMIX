@@ -292,6 +292,7 @@ def load_settings():
     _state["remote_autostart"]        = bool(raw.get("remote_autostart", False))
     _state["remote_services_saved"]   = dict(raw.get("remote_services_saved") or {"remote": True, "wishes": True})
     _state["followed"]                = [f for f in (raw.get("followed") or []) if isinstance(f, dict) and f.get("url")]
+    _state["followed_channels"]       = [c for c in (raw.get("followed_channels") or []) if isinstance(c, dict) and c.get("url")]
     _state["remote_key"]              = str(raw.get("remote_key", ""))
     _state["ytdlp_autoupdate"]        = bool(raw.get("ytdlp_autoupdate", True))
     _state["ytdlp_last_check"]        = int(raw.get("ytdlp_last_check", 0))
@@ -329,6 +330,7 @@ def save_settings():
         "remote_autostart":        _state.get("remote_autostart", False),
         "remote_services_saved":   _state.get("remote_services_saved", {"remote": True, "wishes": True}),
         "followed":                _state.get("followed", []),
+        "followed_channels":       _state.get("followed_channels", []),
         "remote_key":              _state.get("remote_key", ""),
         "ytdlp_autoupdate":        _state.get("ytdlp_autoupdate", True),
         "ytdlp_last_check":        _state.get("ytdlp_last_check", 0),

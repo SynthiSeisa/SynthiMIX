@@ -75,7 +75,7 @@ test('Einstellungen: DJ-Schalter und verfolgte Playlists', async () => {
   await expect(page.getByText('Bass tauschen (EQ)')).toBeVisible()
   await expect(page.getByText('Auf Phrasen einrasten')).toBeVisible()
   await page.locator('.tab-btn', { hasText: 'Download' }).click()
-  await expect(page.getByText('Verfolgte Playlists', { exact: true })).toBeVisible()
+  await expect(page.getByText('Verfolgte Playlists und Kanäle', { exact: true })).toBeVisible()
   await expect(page.getByText(/Noch keine\./)).toBeVisible()
   await page.keyboard.press('Escape')
 })
@@ -113,8 +113,9 @@ test('Uebergang: Einstieg auf der Phrase und weicher Bass-Tausch im Takt', async
   const k = (r.trig / 1000 - phrase) / (8 * bar)
   expect(Math.abs(k - Math.round(k))).toBeLessThan(0.01)
   expect(r.s.some(x => x.swap)).toBe(true)
-  const cfStart = r.s.find(x => x.cf)
-  expect(cfStart.eqNew).toBeLessThan(-29)                 // neuer Titel erst ohne Bass
+  // neuer Titel erst ohne Bass (erste Sekunde; der geplante Wert greift nach ein paar ms)
+  const first = r.s.findIndex(x => x.cf)
+  expect(Math.min(...r.s.slice(first, first + 20).map(x => x.eqNew))).toBeLessThan(-29)
   const end = r.s.filter(x => x.cf).at(-1)
   expect(end.eqNew).toBeGreaterThan(-1)                   // am Ende: Bass vom neuen Titel
   expect(end.eqOld).toBeLessThan(-29)

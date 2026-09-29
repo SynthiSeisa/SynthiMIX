@@ -24,6 +24,7 @@
     planChecks.update(l => l.filter(c => c.url !== url))
   }
   function checkText(c) {
+    if (c.kind === 'channel') return 'Playlists des Kanals werden gelesen…'
     if (c.phase === 'list') return c.done ? `Playlist wird eingelesen… ${c.done} Titel` : 'Playlist wird eingelesen…'
     if (!c.total) return 'Abgleich mit deiner Sammlung…'
     return `Song-Versionen suchen… ${c.done}/${c.total}`
@@ -39,7 +40,7 @@
       <div class="check">
         <i class="ti ti-refresh spin" aria-hidden="true"></i>
         <div class="check-body">
-          <span class="check-head">Playlist wird geprüft</span>
+          <span class="check-head">{c.kind === 'channel' ? 'Kanal wird geprüft' : 'Playlist wird geprüft'}</span>
           <span class="check-txt">{checkText(c)}</span>
           {#if c.phase === 'search' && c.total}
             <span class="check-bar"><span style="width: {Math.round(c.done / c.total * 100)}%"></span></span>

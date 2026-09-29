@@ -62,7 +62,8 @@
   }
   function onkey(e) { if (e.key === 'Escape' && !st.applying) onclose() }
   // ~1,3 s je Titel, 3 gleichzeitig
-  const fpEta = $derived(st.progress?.total ? Math.ceil((st.progress.total - st.progress.done) * 0.45 / 60) : 0)
+  // ~3 Titel je Sekunde (Grenze von AcoustID), schon erkannte kommen sofort aus dem Speicher
+  const fpEta = $derived(st.progress?.total ? Math.ceil((st.progress.total - st.progress.done) * 0.35 / 60) : 0)
   function fixSettings() { openSettings(sugg.fix_tab); onclose() }
   // Geschlossen, waehrend noch gesucht wird: nicht im Hintergrund weiterfragen
   $effect(() => () => { if (untrack(() => $titleState.busy)) send({ type: 'title_cancel' }) })
@@ -168,7 +169,7 @@
         <div class="notice info apply-row"><i class="ti ti-refresh spin"></i> Schreibe Titel: {st.applying.done} / {st.applying.total}
           <button class="btn btn-sm" onclick={() => send({ type: 'title_cancel' })}><i class="ti ti-player-stop"></i> Abbrechen</button></div>
       {:else if fp}
-        <div class="dlg-hint">{#if sugg && !sugg.error}{sugg.checked ?? 0} geprüft · {sugg.same ?? 0} passen schon · {sugg.nomatch ?? 0} nicht erkannt{sugg.cancelled ? ' · abgebrochen' : ''}.{' '}{/if}Orange = unsicher (Maus drauf zeigt warum). Klick auf einen neuen Titel zum Bearbeiten.</div>
+        <div class="dlg-hint">{#if sugg && !sugg.error}{sugg.checked ?? 0} geprüft · {sugg.same ?? 0} passen schon · {sugg.nomatch ?? 0} nicht erkannt{sugg.cached ? ` · ${sugg.cached} aus dem Speicher` : ''}{sugg.cancelled ? ' · abgebrochen' : ''}.{' '}{/if}Orange = unsicher (Maus drauf zeigt warum). Klick auf einen neuen Titel zum Bearbeiten.</div>
       {:else}
         <div class="dlg-hint">„prüfen“ = Reihenfolge vermutlich vertauscht, nicht vorausgewählt. Klick auf einen neuen Titel zum Bearbeiten.</div>
       {/if}

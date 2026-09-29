@@ -33,7 +33,8 @@ class FingerprintBatchTest(BackendTest):
             paths[3]: {"error": "Kein Match bei AcoustID gefunden"},
         }
 
-        async def fake(path):
+        async def fake(path, **kw):
+            self.assertFalse(kw.get("text_fallback", True))       # Sammel-Modus: keine Textsuchen
             return antworten[path]
         main._acoustid_identify = fake
         ws = FakeWS()
@@ -55,3 +56,30 @@ class FingerprintBatchTest(BackendTest):
         res = ws.of_type("title_suggestions")[-1]
         self.assertIn("AcoustID-Key", res["error"])
         self.assertEqual(res["fix_tab"], "services")
+
+    def test_ergebnisse_gemerkt(self):
+        paths = self._lib(("a", "track01", ""), ("b", "Unbekannt", ""))
+        calls = []
+
+        async def fake(path, **kw):
+            calls.append(path)
+            return {"title": "Levels", "artist": "Avicii", "score": 0.97, "via": "AcoustID"}                 if path == paths[0] else {"error": "Kein Match bei AcoustID gefunden"}
+        main._acoustid_identify = fake
+        self.run_async(main._fingerprint_suggest(FakeWS(), paths))
+        ws = FakeWS()
+        self.run_async(main._fingerprint_suggest(ws, paths))
+        self.assertEqual(len(calls), 2)                           # zweiter Lauf: nichts neu erkannt
+        res = ws.of_type("title_suggestions")[-1]
+        self.assertEqual(res["cached"], 2)
+        self.assertEqual([it["title"] for it in res["items"]], ["Levels"])
+        self.assertEqual(res["nomatch"], 1)
+
+    def test_takt_fuer_anfragen(self):
+        import asyncio, time
+
+        async def go():
+            gate = main._RateGate(10)
+            t0 = time.monotonic()
+            await asyncio.gather(*(gate.wait() for _ in range(6)))
+            return time.monotonic() - t0
+        self.assertGreater(self.run_async(go()), 0.45)           # 6 Anfragen bei 10/s: >= 0,5 s

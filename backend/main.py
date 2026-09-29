@@ -17,7 +17,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 from synthimix.core import _state, clients
-from synthimix import automix, beatgrid, core, download, keys, library, media, quality, remote, search, store, tags, tools
+from synthimix import automix, beatgrid, channels, core, download, keys, library, media, quality, remote, search, store, tags, tools
 
 # ── app ──────────────────────────────────────────────────────────────────────
 @asynccontextmanager
@@ -576,6 +576,10 @@ async def handle_message(ws: WebSocket, msg: dict):
                         plan["url"], fmt, entries=plan["entries"], folder=download._folder_name(plan["title"]),
                         label=plan["title"] or None, mode=msg.get("plist_mode") or "new",
                         follow_new=bool(msg.get("follow"))))
+            elif channels._channel_base(url) and not msg.get("direct"):
+                # Kanal-Link: Playlists des Kanals zur Auswahl (verfolgen)
+                if url not in download._plan_tasks:
+                    asyncio.create_task(channels._plan_channel(url, fmt, ws))
             elif choice is None and download._is_mixed_playlist_url(url):
                 asyncio.create_task(download._ask_playlist_choice(url, fmt, ws))
             elif choice != "single" and url.startswith("http") and download._is_playlist(url) and not msg.get("direct"):
@@ -637,7 +641,8 @@ async def handle_message(ws: WebSocket, msg: dict):
         await core.push_downloads()
 
     elif t == "get_followed":
-        await ws.send_text(json.dumps({"type": "followed", "items": download._follow_public()}))
+        await ws.send_text(json.dumps({"type": "followed", "items": download._follow_public(),
+                                       "channels": channels._channels_public()}))
 
     elif t == "playlist_plan_abort":
         task = download._plan_tasks.get(msg.get("url") or "")
@@ -670,6 +675,26 @@ async def handle_message(ws: WebSocket, msg: dict):
         _state["followed"] = [f for f in _state.get("followed", []) if f["url"] != url]
         store.save_settings()
         await download._push_followed()
+
+    elif t == "channel_follow":
+        asyncio.create_task(channels._channel_follow(msg))
+
+    elif t == "channel_plan_open":
+        # Auswahl der Playlists eines verfolgten Kanals erneut oeffnen
+        ch = channels._channel_of(msg.get("url") or "")
+        if ch and ch["url"] not in download._plan_tasks:
+            asyncio.create_task(channels._plan_channel(ch["url"], ch.get("fmt") or "mp3-best", ws))
+
+    elif t == "channel_set":
+        ch = channels._channel_of(msg.get("url") or "")
+        if ch:
+            if "auto_new" in msg:
+                ch["auto_new"] = bool(msg["auto_new"])
+            store.save_settings()
+            await download._push_followed()
+
+    elif t == "channel_remove":
+        await channels._channel_remove(msg.get("url") or "")
 
     elif t == "follow_check":
         url = msg.get("url")

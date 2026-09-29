@@ -652,7 +652,29 @@ async def _test_services() -> dict:
     return out
 
 
-async def _acoustid_identify(path: str) -> dict:
+class _RateGate:
+    """Hoechstens per_sec Anfragen je Sekunde, ueber alle gleichzeitigen Aufgaben."""
+
+    def __init__(self, per_sec: float):
+        self.gap = 1.0 / per_sec
+        self.next = 0.0
+        self.lock = asyncio.Lock()
+
+    async def wait(self):
+        async with self.lock:
+            now = time.monotonic()
+            at = max(now, self.next)
+            self.next = at + self.gap
+        if at > now:
+            await asyncio.sleep(at - now)
+
+
+async def _acoustid_identify(path: str, text_fallback: bool = True, fp_sem=None,
+                             api_gate: "_RateGate | None" = None, mb_gate: "_RateGate | None" = None) -> dict:
+    """Titel per Fingerprint erkennen. Fuer viele Titel (Sammel-Modus):
+    fp_sem begrenzt die gleichzeitigen fpcalc-Laeufe, api_gate/mb_gate halten die
+    Anfragegrenzen von AcoustID (3/s) und MusicBrainz (1/s) ein, text_fallback=False
+    laesst die langsamen Textsuchen weg (die trafen oft daneben)."""
     import urllib.request as _req, urllib.parse as _parse
     api_key = _state.get('acoustid_api_key', '').strip()
     if not api_key:
@@ -663,11 +685,17 @@ async def _acoustid_identify(path: str) -> dict:
         return {'error': 'fpcalc ist nicht installiert', 'fix_tab': 'services'}
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            fpcalc, '-json', path,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-            creationflags=_NO_WINDOW)
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        if fp_sem is not None:
+            await fp_sem.acquire()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                fpcalc, '-json', path,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                creationflags=_NO_WINDOW)
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        finally:
+            if fp_sem is not None:
+                fp_sem.release()
         fp_data = json.loads(out.decode(errors='replace'))
     except asyncio.TimeoutError:
         return {'error': 'fpcalc Timeout — Datei zu groß oder kaputt'}
@@ -699,6 +727,8 @@ async def _acoustid_identify(path: str) -> dict:
         except Exception as e:
             return {'error': str(e)}
 
+    if api_gate is not None:
+        await api_gate.wait()
     data = await loop.run_in_executor(None, _fetch, url)
     if 'error' in data:
         return {'error': f'AcoustID API: {data["error"]}'}
@@ -718,6 +748,8 @@ async def _acoustid_identify(path: str) -> dict:
     if rec and not rec.get('title') and rec.get('id'):
         mb_id  = rec['id']
         mb_url = f"https://musicbrainz.org/ws/2/recording/{mb_id}?inc=artists+releases+release-groups&fmt=json"
+        if mb_gate is not None:
+            await mb_gate.wait()
         mb = await loop.run_in_executor(None, _fetch, mb_url)
         if mb and 'id' in mb:
             ac = mb.get('artist-credit', [])
@@ -729,6 +761,8 @@ async def _acoustid_identify(path: str) -> dict:
             }
 
     via = 'AcoustID'
+    if not text_fallback and (not rec or not rec.get('title')):
+        return {'error': 'Kein Match bei AcoustID gefunden'}
     if not rec or not rec.get('title'):
         # Last-resort: MusicBrainz text search via existing library tags
         via = 'MusicBrainz'
@@ -796,7 +830,20 @@ async def _acoustid_identify(path: str) -> dict:
             'via': via}
 
 
-_FP_PARALLEL = 3
+# fpcalc rechnet lokal: so viele gleichzeitig wie Kerne (einer bleibt frei);
+# die Anfragen an AcoustID laufen getrennt davon im erlaubten Takt (3/s).
+_FP_PARALLEL = max(2, min(6, (os.cpu_count() or 4) - 1))
+_FP_CACHE_MATCH_DAYS = 180
+_FP_CACHE_MISS_DAYS = 30
+
+
+def _fp_cache_file():
+    return core.BASE_DIR / "fingerprint_cache.json"
+
+
+def _fp_key(lt: dict) -> str:
+    # Pfad + Laenge: bleibt gleich, wenn nur Tags geaendert werden
+    return f"{(lt.get('path') or '').lower()}|{int(round(float(lt.get('duration_sec') or 0)))}"
 _VERSION_RE = re.compile(r"\b(remix|edit|vip|bootleg|mix|rework|flip|dub|acapella|instrumental|live)\b", re.I)
 
 async def _fingerprint_suggest(ws: WebSocket, paths: list[str]):
@@ -823,21 +870,36 @@ async def _fingerprint_suggest(ws: WebSocket, paths: list[str]):
     todo = [by_path[p] for p in dict.fromkeys(paths) if p in by_path and os.path.exists(p)]
     total = len(todo)
     items: list[dict] = []
-    stats = {"done": 0, "same": 0, "nomatch": 0}
-    sem = asyncio.Semaphore(_FP_PARALLEL)
+    stats = {"done": 0, "same": 0, "nomatch": 0, "cached": 0}
+    fp_sem = asyncio.Semaphore(_FP_PARALLEL)
+    api_gate, mb_gate = _RateGate(3), _RateGate(1)
+    # Ergebnisse je Datei merken: derselbe Ordner ein zweites Mal geht sofort
+    cache = store._load_json(_fp_cache_file(), {})
+    if not isinstance(cache, dict):
+        cache = {}
+    now = time.time()
     await send("title_progress", done=0, total=total)
 
     async def one(lt):
         if _title_cancel:
             return
-        async with sem:
-            if _title_cancel:
-                return
+        key = _fp_key(lt)
+        hit = cache.get(key)
+        if hit and now - hit.get("ts", 0) < (_FP_CACHE_MISS_DAYS if hit.get("miss") else _FP_CACHE_MATCH_DAYS) * 86400:
+            r = {"error": "Kein Match bei AcoustID gefunden"} if hit.get("miss") else dict(hit["r"])
+            stats["cached"] += 1
+        else:
             try:
-                r = await _acoustid_identify(lt["path"])
+                r = await _acoustid_identify(lt["path"], text_fallback=False, fp_sem=fp_sem,
+                                             api_gate=api_gate, mb_gate=mb_gate)
             except Exception as e:
                 r = {"error": str(e)}
-            await asyncio.sleep(0.35)          # AcoustID: hoechstens 3 Anfragen je Sekunde
+            if _title_cancel:
+                return
+            if r.get("title"):
+                cache[key] = {"ts": int(time.time()), "r": {k: r.get(k) for k in ("title", "artist", "album", "score", "via")}}
+            elif r.get("error") == "Kein Match bei AcoustID gefunden":
+                cache[key] = {"ts": int(time.time()), "miss": True}
         stats["done"] += 1
         old_t, old_a = lt.get("title") or "", lt.get("artist") or ""
         new_t, new_a = (r.get("title") or "").strip(), (r.get("artist") or "").strip()
@@ -859,7 +921,14 @@ async def _fingerprint_suggest(ws: WebSocket, paths: list[str]):
         if stats["done"] % 3 == 0 or stats["done"] == total:
             await send("title_progress", done=stats["done"], total=total)
 
-    await asyncio.gather(*(one(lt) for lt in todo))
+    try:
+        await asyncio.gather(*(one(lt) for lt in todo))
+    finally:
+        try:
+            store._save_json(_fp_cache_file(), cache)
+        except Exception:
+            pass
     items.sort(key=lambda it: (not it["sure"], -it["score"]))
     await send("title_suggestions", items=items, total=total, cancelled=_title_cancel, fp=True,
-               same=stats["same"], nomatch=stats["nomatch"], checked=stats["done"])
+               same=stats["same"], nomatch=stats["nomatch"], checked=stats["done"],
+               cached=stats["cached"])

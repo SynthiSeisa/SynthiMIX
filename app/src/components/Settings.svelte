@@ -11,13 +11,17 @@
            lastfmApiKey, acoustidApiKey,
            fpcalcInstalling, fpcalcInstallError,
            spotdlInstalling, spotdlInstallError, spotdlInstallText,
-           watchedFolders, watchedFolderImpact, ytdlpAutoupdate, excludedFolders, toolUpdates, servicesTest, setupOpen, changelog, followed } from '../stores/ws.js'
+           watchedFolders, watchedFolderImpact, ytdlpAutoupdate, excludedFolders, toolUpdates, servicesTest, setupOpen, changelog, followed, followedChannels } from '../stores/ws.js'
   import { infoHints } from '../lib/infohints.js'
 
   let tab = $state('playback')
 
   // ── Verfolgte Playlists (frueher als Kasten ueber den Downloads) ─────────
   const FOLLOW_MODE = { playlist: 'als Playlist', new: 'nur neue', folder: 'kompletter Ordner' }
+  // Playlists eines Kanals stehen eingeklappt unter dem Kanal
+  let chOpen = $state(new Set())
+  const soloFollowed = $derived($followed.filter(f => !f.channel))
+  function chToggle(url) { const s = new Set(chOpen); s.has(url) ? s.delete(url) : s.add(url); chOpen = s }
   function followAgo(ts) {
     if (!ts) return 'noch nie geprüft'
     const min = Math.round((Date.now() / 1000 - ts) / 60)
@@ -589,11 +593,62 @@
           </div>
 
           <div class="group">
-            <div class="group-title">Verfolgte Playlists</div>
-            <div class="hint">Werden beim Start und auf Knopfdruck auf neue Titel geprüft; neue Titel werden automatisch geladen.</div>
-            {#if $followed.length}
+            <div class="group-title">Verfolgte Playlists und Kanäle</div>
+            <div class="hint">Werden beim Start und auf Knopfdruck auf neue Titel geprüft; neue Titel werden automatisch geladen. Einen ganzen Kanal verfolgen: Kanal-Link (z. B. youtube.com/@name) in die Download-Zeile einfügen.</div>
+            {#each $followedChannels as c (c.url)}
+              <div class="follow-list ch">
+                <div class="follow-row">
+                  <i class="ti ti-broadcast follow-ico" aria-hidden="true"></i>
+                  <div class="follow-main">
+                    <span class="follow-name" title={c.url}>{c.title}</span>
+                    <span class="follow-meta">
+                      {#if c.checking}<i class="ti ti-refresh spin" aria-hidden="true"></i>{' wird geprüft…'}{:else}{followAgo(c.last_check)}{/if}{` · ${c.playlists} Playlists`}
+                    </span>
+                  </div>
+                  <label class="ch-auto" title="Neue Playlists des Kanals automatisch verfolgen und laden — aus: nur als Vorschlag">
+                    <input type="checkbox" checked={c.auto_new} onchange={(e) => send({ type: 'channel_set', url: c.url, auto_new: e.currentTarget.checked })} /> neue automatisch
+                  </label>
+                  <button class="btn btn-icon btn-sm" onclick={() => send({ type: 'channel_plan_open', url: c.url })}
+                          title="Playlists auswählen" aria-label="Playlists auswählen"><i class="ti ti-list-check"></i></button>
+                  <button class="btn btn-icon btn-sm" onclick={() => send({ type: 'follow_check', url: c.url })} disabled={c.checking}
+                          title="Kanal jetzt prüfen (neue Playlists und Titel)" aria-label="Kanal jetzt prüfen"><i class="ti ti-refresh"></i></button>
+                  <button class="btn btn-icon btn-sm" onclick={() => send({ type: 'channel_remove', url: c.url })}
+                          title="Kanal und seine Playlists nicht mehr verfolgen (geladene Titel bleiben)" aria-label="Kanal nicht mehr verfolgen"><i class="ti ti-x"></i></button>
+                </div>
+                {#if c.pending?.length}
+                  <div class="ch-pending">
+                    <i class="ti ti-sparkles" aria-hidden="true"></i>
+                    {c.pending.length} neue Playlist{c.pending.length > 1 ? 's' : ''}: {c.pending.slice(0, 3).map(p => p.title).join(', ')}{c.pending.length > 3 ? ' …' : ''}
+                    <button class="btn btn-sm" onclick={() => send({ type: 'channel_plan_open', url: c.url })}>Auswählen</button>
+                  </div>
+                {/if}
+                {#if c.playlists}
+                  <button class="ch-expand" onclick={() => chToggle(c.url)} aria-expanded={chOpen.has(c.url)}>
+                    <i class="ti ti-chevron-right fchev" class:open={chOpen.has(c.url)} aria-hidden="true"></i>
+                    {chOpen.has(c.url) ? 'Playlists ausblenden' : `${c.playlists} Playlists anzeigen`}
+                  </button>
+                  {#if chOpen.has(c.url)}
+                    {#each $followed.filter(f => f.channel === c.url) as f (f.url)}
+                      <div class="follow-row sub">
+                        <div class="follow-main">
+                          <span class="follow-name" title={f.url}>{f.title}</span>
+                          <span class="follow-meta">
+                            {#if f.checking}<i class="ti ti-refresh spin" aria-hidden="true"></i>{' wird geprüft…'}{:else}{followAgo(f.last_check)}{/if}{#if !f.checking && f.last_check && f.last_new}{' · '}<b>{f.last_new} neu</b>{/if}{` · ${f.known} bekannt`}
+                          </span>
+                        </div>
+                        <button class="btn btn-icon btn-sm" onclick={() => send({ type: 'follow_check', url: f.url })} disabled={f.checking}
+                                title="Jetzt auf neue Titel prüfen" aria-label="Jetzt prüfen"><i class="ti ti-refresh"></i></button>
+                        <button class="btn btn-icon btn-sm" onclick={() => send({ type: 'follow_remove', url: f.url })}
+                                title="Nicht mehr verfolgen (geladene Titel bleiben)" aria-label="Nicht mehr verfolgen"><i class="ti ti-x"></i></button>
+                      </div>
+                    {/each}
+                  {/if}
+                {/if}
+              </div>
+            {/each}
+            {#if soloFollowed.length}
               <div class="follow-list">
-                {#each $followed as f (f.url)}
+                {#each soloFollowed as f (f.url)}
                   <div class="follow-row">
                     <i class="ti ti-bookmark-filled follow-ico" aria-hidden="true"></i>
                     <div class="follow-main">
@@ -609,12 +664,14 @@
                   </div>
                 {/each}
               </div>
+            {:else if !$followedChannels.length}
+              <div class="follow-empty">Noch keine. Beim Laden einer Playlist „Playlist verfolgen“ anhaken, in den Downloads bei einer Playlist auf „Verfolgen“ klicken oder einen Kanal-Link einfügen.</div>
+            {/if}
+            {#if $followed.length || $followedChannels.length}
               <div>
                 <button class="btn btn-sm" onclick={() => send({ type: 'follow_check' })}
-                        disabled={$followed.every(f => f.checking)}><i class="ti ti-refresh"></i> Alle jetzt prüfen</button>
+                        disabled={$followed.length > 0 && $followed.every(f => f.checking)}><i class="ti ti-refresh"></i> Alle jetzt prüfen</button>
               </div>
-            {:else}
-              <div class="follow-empty">Noch keine. Beim Laden einer Playlist „Playlist verfolgen“ anhaken oder in den Downloads bei einer Playlist auf „Verfolgen“ klicken.</div>
             {/if}
           </div>
 
@@ -1321,6 +1378,16 @@
   .follow-name { font-size: var(--fs-body); font-weight: 600; color: var(--c-tx1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .follow-meta { font-size: var(--fs-sm); color: var(--c-tx3); }
   .follow-meta b { color: var(--c-accent-tx); }
+  .follow-list.ch { margin-bottom: var(--sp-2); }
+  .follow-row.sub { padding-left: 34px; border-top: 1px solid var(--c-br1); }
+  .ch-auto { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-sm); color: var(--c-tx3); white-space: nowrap; cursor: pointer; }
+  .ch-pending { display: flex; align-items: center; gap: 8px; padding: 6px 10px 6px 34px; font-size: var(--fs-sm); color: var(--c-accent-tx); border-top: 1px solid var(--c-br1); }
+  .ch-pending .btn { margin-left: auto; }
+  .ch-expand { display: flex; align-items: center; gap: 6px; width: 100%; padding: 5px 10px 6px 30px; border: none; border-top: 1px solid var(--c-br1);
+               background: none; cursor: pointer; font: inherit; font-size: var(--fs-sm); color: var(--c-tx3); text-align: left; }
+  .ch-expand:hover { color: var(--c-tx1); }
+  .fchev { transition: transform .12s; }
+  .fchev.open { transform: rotate(90deg); }
   .follow-empty { font-size: var(--fs-sm); color: var(--c-tx4); padding: 8px 10px; border: 1px dashed var(--c-br2); border-radius: var(--r-m); }
   @keyframes spin { to { transform: rotate(360deg); } }
   /* ── Was ist neu ─────────────────────────────────────────────────────── */

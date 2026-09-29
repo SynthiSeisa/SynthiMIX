@@ -207,6 +207,27 @@ class PlaylistParallelTest(BackendTest):
         finally:
             main._analyze_library_meta_task = keep
 
+    def test_kanal_playlist_im_kanalordner(self):
+        # Playlist eines verfolgten Kanals: Downloads/<Kanal>/<Playlist>, als Playlist angelegt
+        async def analyse(paths=None):
+            pass
+        keep = main._analyze_library_meta_task
+        main._analyze_library_meta_task = analyse
+        main._state["followed"] = []
+        try:
+            f = {"url": "https://www.youtube.com/playlist?list=PLkanal", "title": "Party", "fmt": "mp3-best",
+                 "mode": "playlist", "channel": "https://www.youtube.com/@test", "parent": "Test: Kanal",
+                 "seen": [], "last_check": 0, "last_new": 0}
+            main._state["followed"].append(f)
+            self.fake_audit(["idaaaaaaaaa", "idbbbbbbbbb"], "Party")
+            self.run_async(main._follow_check(f))
+            folder = self.tmp / "Downloads" / "Test_ Kanal" / "Party"
+            self.assertEqual(len(list(folder.glob("*.mp3"))), 2, list((self.tmp / "Downloads").rglob("*")))
+            self.assertEqual(f["last_new"], 2)
+            self.assertTrue(any(p["name"] == "Party" for p in main._get_playlists()))
+        finally:
+            main._analyze_library_meta_task = keep
+
     def test_verfolgen_entfernen(self):
         from tests.support import FakeWS
         main._state["followed"] = [{"url": "https://www.youtube.com/playlist?list=PLx", "title": "x", "seen": []}]

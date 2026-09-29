@@ -56,6 +56,10 @@ export const wishesLoaded        = writable(false) // erste Wunschliste vom Back
 export const changelog           = writable(null)
 // Verfolgte Playlists: [{url, title, fmt, folder, last_check, last_new, known, checking}]
 export const followed            = writable([])
+// Verfolgte Kanaele: [{url, title, auto_new, last_check, last_new, playlists, pending:[{url,title}], checking}]
+export const followedChannels    = writable([])
+// Auswahl der Playlists eines Kanals: null | {plan_id, url, title, playlists:[{url,title,thumb,followed}], existing, auto_new, excluded} | {error}
+export const channelPlan         = writable(null)
 // Eigener Store: im settings-Store landen nur volume/crossfade_s, dort kam der
 // Wert nie an — der Schalter stand in 1.4.2 dadurch immer auf aus.
 export const ytdlpAutoupdate     = writable(true)
@@ -357,12 +361,16 @@ function connect() {
       case 'fpcalc_install_error':    fpcalcInstalling.set(false); fpcalcInstallError.set(msg.text ?? 'Fehler'); break
       case 'wishes':                  wishes.set(msg.items || []); wishesLoaded.set(true); break
       case 'changelog':               changelog.set(msg.items || []); break
-      case 'followed':                followed.set(msg.items || []); break
+      case 'followed':                followed.set(msg.items || []); followedChannels.set(msg.channels || []); break
+      case 'channel_plan':
+        planChecks.update(l => l.filter(c => c.url !== msg.src))
+        channelPlan.set(msg)
+        break
       case 'watched_folders':         watchedFolders.set(msg.items || []); break
       case 'excluded_folders':        excludedFolders.set(msg.items || []); break
       case 'tool_updates':            toolUpdates.set(msg.items || {}); break
       case 'watched_folder_impact':   watchedFolderImpact.set({ folder: msg.folder, tracks: msg.tracks }); break
-      case 'playlist_plan_pending':   planChecks.update(l => [...l.filter(c => c.url !== msg.url), { url: msg.url, phase: 'list', done: 0, total: 0 }]); break
+      case 'playlist_plan_pending':   planChecks.update(l => [...l.filter(c => c.url !== msg.url), { url: msg.url, kind: msg.kind ?? 'playlist', phase: 'list', done: 0, total: 0 }]); break
       case 'playlist_plan_progress':  planChecks.update(l => l.map(c => c.url === msg.url ? { ...c, phase: msg.phase, done: msg.done, total: msg.total } : c)); break
       case 'playlist_plan_cancel':    planChecks.update(l => l.filter(c => c.url !== msg.url)); break
       case 'playlist_plan':

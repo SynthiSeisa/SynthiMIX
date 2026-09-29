@@ -1,10 +1,10 @@
 <script>
   import { untrack } from 'svelte'
-  import { downloads, searchResults, send, openSettings, videoCheckPending, followed } from '../stores/ws.js'
+  import { downloads, searchResults, send, openSettings, videoCheckPending, followed, followedChannels } from '../stores/ws.js'
 
   // ── Verfolgte Playlists: Liste steht in den Einstellungen (Download) ──
   const isFollowed = (url) => !!url && $followed.some(f => f.url === url)
-  const followChecking = $derived($followed.some(f => f.checking))
+  const followChecking = $derived($followed.some(f => f.checking) || $followedChannels.some(c => c.checking))
 
   let input     = $state('')
   let fmt       = $state('mp3-best')
@@ -251,11 +251,11 @@
 
   <!-- Downloads -->
   <div class="list-header">
-    {#if $followed.length}
+    {#if $followed.length || $followedChannels.length}
       <button class="btn btn-ghost btn-sm follow-link" onclick={() => openSettings('download')}
-              title="Verfolgte Playlists verwalten (Einstellungen → Download)">
+              title="Verfolgte Playlists und Kanäle verwalten (Einstellungen → Download)">
         <i class="ti {followChecking ? 'ti-refresh spinner' : 'ti-bookmark-filled'}" aria-hidden="true"></i>
-        {$followed.length} verfolgt{followChecking ? ' · wird geprüft…' : ''}
+        {#if $followedChannels.length}{$followedChannels.length} {$followedChannels.length === 1 ? 'Kanal' : 'Kanäle'} · {/if}{$followed.length} verfolgt{followChecking ? ' · wird geprüft…' : ''}
       </button>
     {/if}
     {#if hasDone}

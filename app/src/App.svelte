@@ -24,6 +24,7 @@
   import Settings  from './components/Settings.svelte'
   import PlaylistChoiceDialog from './components/PlaylistChoiceDialog.svelte'
   import PlaylistPlanDialog from './components/PlaylistPlanDialog.svelte'
+  import ChannelPlanDialog from './components/ChannelPlanDialog.svelte'
   import VideoChoiceDialog from './components/VideoChoiceDialog.svelte'
   import DupeChoiceDialog from './components/DupeChoiceDialog.svelte'
   // Theme und Dichte (Kompakt / Komfortabel) setzen beim Import ihre
@@ -201,6 +202,7 @@
 
   <PlaylistChoiceDialog />
   <PlaylistPlanDialog />
+  <ChannelPlanDialog />
   <VideoChoiceDialog />
   <DupeChoiceDialog />
   {#if $setupOpen}<SetupWizard onclose={() => setupOpen.set(false)} />{/if}

@@ -10,7 +10,7 @@ from fastapi import WebSocket
 from pathlib import Path
 from typing import Any
 from .core import _NO_WINDOW, _state
-from . import core, library, media, search, store, tools
+from . import channels, core, library, media, search, store, tools
 
 _dl_procs: dict[int, Any] = {}  # session_id → asyncio.Process oder Liste davon (Playlist parallel)
 _DL_PARALLEL = 3                  # gleichzeitige yt-dlp-Prozesse bei Playlists
@@ -647,7 +647,7 @@ def _follow_public() -> list[dict]:
     return out
 
 async def _push_followed():
-    await core.broadcast({"type": "followed", "items": _follow_public()})
+    await core.broadcast({"type": "followed", "items": _follow_public(), "channels": channels._channels_public()})
 
 async def _follow_check(f: dict):
     url = f["url"]
@@ -681,14 +681,26 @@ async def _follow_check(f: dict):
         await _push_followed()
 
 async def _follow_check_all(urls: list[str] | None = None):
+    # Verfolgte Kanaele zuerst: neue Playlists kommen so gleich mit dran
+    if urls is None:
+        for ch in list(_state.get("followed_channels", [])):
+            await channels._channel_check(ch)
+    else:
+        extra = []
+        for u in urls:
+            ch = channels._channel_of(u)
+            if ch:
+                extra += await channels._channel_check(ch)
+        urls = list(urls) + extra
     for f in list(_state.get("followed", [])):
         if urls is None or f["url"] in urls:
             await _follow_check(f)
 
 async def _follow_startup():
     await asyncio.sleep(120)          # erst Start, Tag-Abgleich und Wiedergabe
-    if _state.get("followed"):
-        print(f"[verfolgen] pruefe {len(_state['followed'])} Playlist(s)", flush=True)
+    if _state.get("followed") or _state.get("followed_channels"):
+        print(f"[verfolgen] pruefe {len(_state.get('followed', []))} Playlist(s), "
+              f"{len(_state.get('followed_channels', []))} Kanal/Kanaele", flush=True)
         await _follow_check_all()
 
 def _dl_error_reason(msg: str) -> str:
@@ -754,6 +766,12 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
         if not title:
             return
         playlist_folder = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', title)[:80].rstrip(' .') or None
+        # Playlists eines verfolgten Kanals: Downloads/<Kanal>/<Playlist>
+        parent = (follow or {}).get("parent")
+        if playlist_folder and parent:
+            parent = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', parent)[:80].rstrip(' .')
+            if parent:
+                playlist_folder = os.path.join(parent, playlist_folder)
         slabel = title[:60]
         hdr["session_label"] = slabel
         hdr["title"] = slabel

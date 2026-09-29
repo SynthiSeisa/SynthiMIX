@@ -91,6 +91,11 @@ const ICONS = [
   // 29.09.2026: Playlist verfolgen
   ['bookmark',        'outline'],
   ['bookmark-filled', 'filled'],
+  // 29.09.2026: Bass-Tausch, Kanaele verfolgen
+  ['arrows-exchange', 'outline'],
+  ['broadcast',       'outline'],
+  ['playlist',        'outline'],
+  ['sparkles',        'outline'],
 ]
 
 function maskUrl(name, variant) {
