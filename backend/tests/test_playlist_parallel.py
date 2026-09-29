@@ -213,3 +213,100 @@ class PlaylistParallelTest(BackendTest):
         self.run_async(main.handle_message(FakeWS(), {"type": "follow_remove",
                                                       "url": "https://www.youtube.com/playlist?list=PLx"}))
         self.assertEqual(main._state["followed"], [])
+
+    # ── Playlist-Kaestchen: als Playlist anlegen / nur neue / alle ──────────
+    def _lib_and_audit(self):
+        alt = self.tmp / "Sammlung" / "Pendulum - Witchcraft.mp3"
+        alt.parent.mkdir(parents=True, exist_ok=True)
+        alt.write_bytes(b"ID3")
+        main._state["library"] = [{"path": str(alt), "title": "Pendulum - Witchcraft",
+                                   "artist": "Pendulum", "duration_sec": 253}]
+        self.fake_audit(["idaaaaaaaaa", "idccccccccc", "iddddddddd1"], "Party",
+                        titles=["Pendulum - Witchcraft (Official Video)", "Pendulum - Crush", "Pendulum - Tarantula"],
+                        durs={"idaaaaaaaaa": 262, "idccccccccc": 250, "iddddddddd1": 290})
+        return alt
+
+    def test_kaestchen_zahlen(self):
+        from tests.support import FakeWS
+        self._lib_and_audit()
+        ws = FakeWS()
+        self.run_async(main._plan_playlist("https://www.youtube.com/playlist?list=PLk", "mp3-best", ws))
+        plan = [m for m in ws.sent if m.get("type") == "playlist_plan"][0]
+        self.assertEqual((plan["total"], plan["have"], plan["new"], plan["dupes"]), (3, 1, 2, 0))
+        self.assertEqual(plan["title"], "Party")
+        self.assertIn(plan["plan_id"], main._plans)
+
+    def test_als_playlist_anlegen(self):
+        alt = self._lib_and_audit()
+        async def ablauf():
+            entries, title = await main._audit_playlist_for_videos("x")
+            return await main.run_download("https://www.youtube.com/playlist?list=PLp", "mp3-best",
+                                           entries=entries, folder="Party", label=title, mode="playlist")
+        self.run_async(ablauf())
+        folder = self.tmp / "Downloads" / "Party"
+        self.assertEqual(len(list(folder.glob("*.mp3"))), 2)                 # nur die neuen
+        m3u = (main.PLAYLISTS_DIR / "Party.m3u").read_text("utf-8").splitlines()
+        pfade = [l for l in m3u if l and not l.startswith("#")]
+        self.assertEqual(len(pfade), 3)                                      # alle drei
+        self.assertEqual(pfade[0], str(alt))                                  # Reihenfolge der Playlist
+        self.assertTrue((folder / "Party.m3u8").exists())
+        self.assertIn("Playlist mit 3 Titeln", main._state["downloads"][0]["status_text"])
+
+    def test_alle_laden(self):
+        self._lib_and_audit()
+        async def ablauf():
+            entries, title = await main._audit_playlist_for_videos("x")
+            return await main.run_download("https://www.youtube.com/playlist?list=PLa", "mp3-best",
+                                           entries=entries, folder="Party", label=title, mode="all",
+                                           follow_new=True)
+        main._state["followed"] = []
+        self.run_async(ablauf())
+        self.assertEqual(len(list((self.tmp / "Downloads" / "Party").glob("*.mp3"))), 3)
+        f = main._state["followed"][0]                                       # gleich verfolgt
+        self.assertEqual(f["mode"], "folder")
+        self.assertEqual(len(f["seen"]), 3)
+
+    # ── Kompletter Ordner: Vorhandenes verknuepfen statt neu laden ───────────
+    def test_kompletter_ordner_verknuepft(self):
+        import os
+        alt = self._lib_and_audit()
+        main._state["library"][0]["lufs"] = -8.5              # Messwerte sollen mitkommen
+        main._state["library"][0]["fid"] = main._file_id(str(alt))
+        async def ablauf():
+            entries, title = await main._audit_playlist_for_videos("x")
+            return await main.run_download("https://www.youtube.com/playlist?list=PLo", "mp3-best",
+                                           entries=entries, folder="Party", label=title, mode="folder")
+        self.run_async(ablauf())
+        folder = self.tmp / "Downloads" / "Party"
+        link = folder / alt.name
+        self.assertTrue(link.exists())
+        self.assertTrue(os.path.samefile(link, alt))          # dieselbe Datei, kein zweiter Download
+        self.assertEqual(len(list(folder.glob("*.mp3"))), 3)  # 1 verknuepft + 2 neu
+        eintrag = next(lt for lt in main._state["library"] if lt["path"] == str(link))
+        self.assertEqual(eintrag["lufs"], -8.5)
+        self.assertEqual(eintrag["fid"], main._state["library"][0]["fid"])
+        hdr = main._state["downloads"][0]
+        self.assertIn("1 verknüpft", hdr["status_text"])
+        self.assertTrue((folder / "Party.m3u8").exists())
+        # Zweiter Lauf: liegt schon da, keine zweite Verknuepfung
+        async def nochmal():
+            entries, title = await main._audit_playlist_for_videos("x")
+            return await main.run_download("https://www.youtube.com/playlist?list=PLo", "mp3-best",
+                                           entries=entries, folder="Party", label=title, mode="folder")
+        self.run_async(nochmal())
+        self.assertEqual(len(list(folder.glob("*.mp3"))), 3)
+
+    def test_link_into_kopiert_wenn_verknuepfen_nicht_geht(self):
+        import os
+        src = self.tmp / "a.mp3"; src.write_bytes(b"ID3")
+        keep = os.link
+        def kein_link(*a, **k):
+            raise OSError("anderes Laufwerk")
+        os.link = kein_link
+        try:
+            dest, how = main._link_into(str(src), str(self.tmp / "ziel"))
+        finally:
+            os.link = keep
+        self.assertEqual(how, "copy")
+        self.assertTrue(os.path.exists(dest))
+        self.assertFalse(os.path.samefile(dest, src))

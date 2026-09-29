@@ -215,6 +215,7 @@ async def lifespan(application: FastAPI):
     asyncio.create_task(_refresh_tag_meta_loop())
     asyncio.create_task(_quality_scan_loop())
     asyncio.create_task(_follow_startup())
+    asyncio.create_task(_fileid_scan_task())
     print(f"[backend] ready on ws://127.0.0.1:{_BACKEND_PORT}/ws", flush=True)
     yield
     # Beenden (auch vor einem Update): nichts Gemessenes verlieren
@@ -469,6 +470,7 @@ def load_library():
                 "beat_conf": float(t.get("beat_conf", 0))} if t.get("bpm_f") else {}),
             # "Passt so" in der Qualitaetsansicht
             **({"quality_ok": True} if t.get("quality_ok") else {}),
+            **({"fid": str(t["fid"])} if t.get("fid") else {}),
             **({"unanalyzable": True} if t.get("unanalyzable") else {}),
             **({"missing": True} if t.get("missing") else {}),
         })
@@ -983,6 +985,15 @@ def _harmonic_order(start: dict | None, tracks: list[dict], rng=None) -> tuple[l
         prev = best
     return out, boosts
 
+def _file_id(path: str) -> str:
+    """Kennung der Datei auf dem Laufwerk (Volume + Dateinummer). Zwei Pfade mit
+    derselben Kennung sind dieselbe Datei (Hardlink) — kein Duplikat."""
+    try:
+        st = os.stat(path)
+        return f"{st.st_dev}:{st.st_ino}" if st.st_ino else ""
+    except OSError:
+        return ""
+
 def _make_library_entry(path: str, probe: dict, **overrides) -> dict:
     """Bibliothekseintrag aus einem _probe_sync-Ergebnis.
 
@@ -1013,6 +1024,7 @@ def _make_library_entry(path: str, probe: dict, **overrides) -> dict:
         "play_count":   0,
         **({"energy": probe["energy"]} if probe.get("energy") else {}),
         **({"mik_cues": probe["mik_cues"]} if probe.get("mik_cues") else {}),
+        "fid":          _file_id(path),
     }
     entry.update(overrides)
     v = _quality_cache.get(_qkey(path, entry.get("duration_sec")))
@@ -1834,6 +1846,25 @@ async def _quality_scan_once():
     await broadcast({"type": "quality_scan", "done": done, "total": total, "finished": True})
     print(f"[quality] Bandbreite gemessen: {done} Titel", flush=True)
 
+
+async def _fileid_scan_task():
+    """Einmalig nach dem Start: Datei-Kennung fuer Eintraege ohne — damit
+    verknuepfte Dateien (Hardlinks) nicht als Duplikate erscheinen."""
+    await asyncio.sleep(30)
+    todo = [lt for lt in _state["library"] if lt.get("path") and not lt.get("fid") and not lt.get("missing")]
+    if not todo:
+        return
+    loop = asyncio.get_running_loop()
+    ids = await loop.run_in_executor(None, lambda: [_file_id(lt["path"]) for lt in todo])
+    n = 0
+    for lt, fid in zip(todo, ids):
+        if fid:
+            lt["fid"] = fid
+            n += 1
+    if n:
+        save_library()
+        await push_library()
+        print(f"[library] Datei-Kennung fuer {n} Titel ergaenzt", flush=True)
 
 async def _quality_scan_loop():
     """Misst im Hintergrund alle Titel ohne Wert, danach alle 10 Minuten neue."""
@@ -4316,8 +4347,18 @@ async def handle_message(ws: WebSocket, msg: dict):
         if url:
             if _is_spotify(url):
                 asyncio.create_task(run_spotify_download(url, fmt))
+            elif msg.get("plan_id") is not None:
+                # Entscheidung aus dem Playlist-Kaestchen: nur neue / alle / als Playlist
+                plan = _plans.pop(int(msg["plan_id"]), None)
+                if plan:
+                    asyncio.create_task(run_download(
+                        plan["url"], fmt, entries=plan["entries"], folder=_folder_name(plan["title"]),
+                        label=plan["title"] or None, mode=msg.get("plist_mode") or "new",
+                        follow_new=bool(msg.get("follow"))))
             elif choice is None and _is_mixed_playlist_url(url):
                 asyncio.create_task(_ask_playlist_choice(url, fmt, ws))
+            elif choice != "single" and url.startswith("http") and _is_playlist(url) and not msg.get("direct"):
+                asyncio.create_task(_plan_playlist(url, fmt, ws))
             else:
                 if choice == "single":
                     url = _strip_playlist_params(url)
@@ -6492,6 +6533,139 @@ _DL_REASON_TEXT = {
 }
 _PLACEHOLDER_TITLE_RE = re.compile(r'^\[(deleted|private|unavailable)\s+video\]$', re.I)
 
+# ── Playlist-Kaestchen: vor dem Laden pruefen und fragen ──────────────────────
+# "140 Titel · 132 schon in deiner Sammlung · 8 neu" — dann: als Playlist
+# anlegen (nur neue laden, Playlist mit allen), nur neue laden, oder alle laden.
+_plans: dict[int, dict] = {}
+_plan_counter = 0
+
+def _folder_name(title: str) -> str | None:
+    t = (title or "").strip()
+    return (re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', t)[:80].rstrip(' .') or None) if t else None
+
+def _plan_stats(entries: list[dict]) -> dict:
+    """Wie viele Titel sind neu, schon in der Sammlung, doppelt in der Playlist."""
+    hist = {h["url"]: h for h in reversed(_state.get("history", []))}
+    idx = _library_index()
+    seen_vid, seen_keys = set(), []
+    have = dupes = 0
+    for e in entries:
+        vid = _vid_of(e["url"])
+        key = _song_key(e.get("title", ""), "", e.get("duration"))
+        if (vid and vid in seen_vid) or any(_same_song(key, k) for k in seen_keys):
+            dupes += 1
+            continue
+        if vid:
+            seen_vid.add(vid)
+        seen_keys.append(key)
+        h = hist.get(e["url"])
+        if (h and os.path.exists(h.get("path", ""))) or \
+                _library_matches({"title": e.get("title", ""), "duration": e.get("duration")}, limit=1, index=idx):
+            have += 1
+    total = len(entries)
+    return {"total": total, "have": have, "dupes": dupes, "new": total - have - dupes}
+
+async def _plan_playlist(url: str, fmt: str, ws):
+    async def _send(t, **kw):
+        try: await ws.send_text(json.dumps({"type": t, **kw}))
+        except Exception: pass
+    global _plan_counter
+    await _send("playlist_plan_pending", url=url)
+    try:
+        entries, title = await _audit_playlist_for_videos(url)
+    except Exception:
+        entries, title = [], ""
+    if not entries:
+        # Pruefung ging nicht: wie frueher einfach laden
+        await _send("playlist_plan_cancel")
+        asyncio.create_task(run_download(url, fmt))
+        return
+    if not title:
+        try: title = (await _playlist_probe(url)).get("playlist_title") or ""
+        except Exception: title = ""
+    stats = await asyncio.get_running_loop().run_in_executor(None, _plan_stats, entries)
+    _plan_counter += 1
+    pid = _plan_counter
+    now = time.time()
+    for k in [k for k, v in _plans.items() if now - v["ts"] > 3600]:
+        _plans.pop(k, None)
+    _plans[pid] = {"url": url, "fmt": fmt, "title": title, "entries": entries, "ts": now}
+    await _send("playlist_plan", plan_id=pid, url=url, format=fmt, title=title,
+                followed=any(f["url"] == url for f in _state.get("followed", [])), **stats)
+
+def _playlist_tracks(entries: list[dict], lib_idx: list) -> list[tuple]:
+    """Pfade aller Titel einer Playlist in deren Reihenfolge: geladen, schon in
+    der Sammlung (Verlauf oder Abgleich) oder als doppelter Eintrag."""
+    hist = {h["url"]: h for h in reversed(_state.get("history", []))}
+    lib = {lt.get("path"): lt for lt in _state.get("library", [])}
+    out, seen = [], set()
+    for e in entries:
+        p = e.get("_path") or (e.get("_dupe_of") or {}).get("_path")
+        if not p:
+            h = hist.get(e["url"])
+            if h and os.path.exists(h.get("path", "")):
+                p = h["path"]
+        if not p:
+            m = _library_matches({"title": e.get("title", ""), "duration": e.get("duration")}, limit=1, index=lib_idx)
+            p = m[0]["path"] if m else None
+        if p and p not in seen and os.path.exists(p):
+            seen.add(p)
+            lt = lib.get(p, {})
+            out.append((p, lt.get("title") or Path(p).stem, int(lt.get("duration_sec") or e.get("duration") or -1)))
+    return out
+
+def _link_into(src: str, target_dir: str) -> tuple[str, str]:
+    """Vorhandene Datei in einen Ordner bringen, ohne neu zu laden.
+    Hardlink (gleiche Datei, kein Platz), sonst Kopie (anderes Laufwerk,
+    FAT/USB). Liefert (Pfad, "link" | "copy" | "da")."""
+    os.makedirs(target_dir, exist_ok=True)
+    dest = os.path.join(target_dir, os.path.basename(src))
+    if os.path.exists(dest):
+        # Liegt schon da — derselbe Song (frueherer Lauf), nichts tun
+        return dest, "da"
+    try:
+        os.link(src, dest)
+        return dest, "link"
+    except OSError:
+        shutil.copy2(src, dest)
+        return dest, "copy"
+
+def _add_linked_entry(src_lt: dict, dest: str, how: str):
+    """Bibliothekseintrag fuer die verknuepfte/kopierte Datei — mit allen
+    Messwerten der Quelle, damit nichts neu analysiert werden muss."""
+    if any(lt.get("path") == dest for lt in _state["library"]):
+        return
+    e = {k: v for k, v in src_lt.items() if k not in ("missing", "quality_ok")}
+    e["path"] = dest
+    e["folder"] = Path(dest).parent.name
+    e["play_count"] = 0
+    e["fid"] = src_lt.get("fid") or _file_id(src_lt.get("path", "")) if how == "link" else _file_id(dest)
+    if how == "link" and not src_lt.get("fid") and e["fid"]:
+        src_lt["fid"] = e["fid"]
+    _state["library"].append(e)
+
+def _write_m3u(dest: Path, tracks: list[tuple]):
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest, "w", encoding="utf-8") as f:
+        f.write("#EXTM3U\n")
+        for path, title, dur in tracks:
+            f.write(f"#EXTINF:{dur},{title}\n{path}\n")
+
+async def _save_as_playlist(name: str, folder: str | None, tracks: list[tuple]) -> int:
+    """SynthiMIX-Playlist (links unter "Playlisten") plus .m3u8 im Download-
+    Ordner fuer rekordbox / Virtual DJ. Liefert die Anzahl Titel."""
+    if not tracks or not name:
+        return 0
+    safe = re.sub(r'[<>:"/\\|?*]', '_', name).strip(' .')[:80] or "Playlist"
+    _write_m3u(PLAYLISTS_DIR / (safe + ".m3u"), tracks)
+    out_dir = Path(_state.get("download_dir", str(BASE_DIR / "Downloads")))
+    try:
+        _write_m3u((out_dir / folder if folder else out_dir) / (safe + ".m3u8"), tracks)
+    except Exception as e:
+        print(f"[playlist] .m3u8 nicht geschrieben: {e}", flush=True)
+    await broadcast({"type": "playlists", "items": _get_playlists()})
+    return len(tracks)
+
 # ── Playlists verfolgen ──────────────────────────────────────────────────────
 # Eine YouTube-(Music-) oder Spotify-Playlist wird beim Start und auf
 # Knopfdruck geprueft: nur neue Titel werden geladen (Studio-Version statt
@@ -6528,7 +6702,7 @@ async def _follow_check(f: dict):
             await asyncio.sleep(2)
             neu = [lt["path"] for lt in _state["library"] if lt.get("path") not in vorher]
         else:
-            await run_download(url, fmt, follow=f)
+            await run_download(url, fmt, follow=f, mode=f.get("mode") or "new")
             neu = f.pop("_new_paths", [])
             seen = list(f.get("seen") or [])
             seen += [v for v in f.pop("_seen_add", []) if v not in seen]
@@ -6575,7 +6749,8 @@ def _dl_error_reason(msg: str) -> str:
 
 async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] | None = None,
                        folder: str | None = None, label: str | None = None,
-                       follow: dict | None = None) -> str | None:
+                       follow: dict | None = None, mode: str = "new",
+                       follow_new: bool = False) -> str | None:
     """Returns the final output path on success, None on failure.
 
     entries/folder/label: fertige Titelliste statt einer Adresse (z. B.
@@ -6638,6 +6813,7 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
         "fmt":           fmt_id,
         "folder":        playlist_folder,
         "follow":        bool(follow),
+        "mode":          mode,
         "path":          None,
         "track_n":       0,
         "track_total":   0,
@@ -6751,6 +6927,7 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
             hdr["progress"] = round(state["done"] / track_total * 100)
             if ok:
                 state["final"] = path
+                (entry.get("_orig") or entry)["_path"] = path
                 if not skipped:
                     state["new"].append(path)
                     probe = await asyncio.get_running_loop().run_in_executor(None, _probe_sync, path)
@@ -6770,10 +6947,13 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
         lib_idx = await asyncio.get_running_loop().run_in_executor(None, _library_index)
         seen_vid: set = set()
         seen_keys: list = []
+        seen_keys_e: list = []                          # (Schluessel, Eintrag)
+        first_by_vid: dict = {}
         todo = []
         # Verfolgte Playlist: schon einmal verarbeitete Titel gar nicht anfassen —
         # auch wenn die Datei inzwischen geloescht wurde (dann bewusst)
         known = set((follow or {}).get("seen") or [])
+        all_entries = list(_audited_entries)          # fuer die Playlist mit allen Titeln
         if follow is not None:
             vor = len(_audited_entries)
             _audited_entries = [e for e in _audited_entries if _vid(e["url"]) not in known]
@@ -6782,22 +6962,51 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
             if not _audited_entries:
                 hdr["status"] = "done"; hdr["progress"] = 100
                 hdr["status_text"] = f"✓ nichts Neues ({vor} bekannt)"
+                if mode == "playlist":
+                    n_pl = await _save_as_playlist(label or slabel, playlist_folder,
+                                                   _playlist_tracks(all_entries, lib_idx))
+                    if n_pl:
+                        hdr["status_text"] += f" · Playlist mit {n_pl} Titeln"
                 follow["_new_paths"] = []
                 follow["_seen_add"] = []
                 _dl_procs.pop(session_id, None)
                 await push_downloads(force=True)
                 return None
+        target_dir = os.path.join(out_dir, playlist_folder) if playlist_folder else out_dir
+        lib_by_path = {lt.get("path"): lt for lt in _state["library"]}
+        linked_any = False
+
+        async def _link_existing(src_lt: dict, entry: dict) -> None:
+            nonlocal linked_any
+            dest, how = await asyncio.get_running_loop().run_in_executor(
+                None, _link_into, src_lt["path"], target_dir)
+            item = _new_track(Path(dest).stem)
+            item["path"] = dest
+            await _finish(item, entry, ok=True, skipped=True)
+            item["status_text"] = {"link": "↪ verknüpft", "copy": "⧉ kopiert"}.get(how, "✓ schon im Ordner")
+            if how in ("link", "copy"):
+                _add_linked_entry(src_lt, dest, how)
+                linked_any = True
+            state["linked"] = state.get("linked", 0) + 1
+
         for entry in _audited_entries:
             h = _hist_by_url.get(entry["url"])
             p = (h or {}).get("path", "")
-            if h and h.get("bitrate_kbps", 0) >= 192 and p and os.path.exists(p):
+            if h and h.get("bitrate_kbps", 0) >= 192 and p and os.path.exists(p) and mode != "all":
+                if mode == "folder":
+                    await _link_existing(lib_by_path.get(p) or {"path": p, "title": Path(p).stem}, entry)
+                    continue
                 item = _new_track(h.get("title") or Path(p).stem)
                 item["path"] = p
                 await _finish(item, entry, ok=True, skipped=True)
                 continue
             vid = _vid(entry["url"])
             key = _song_key(entry.get("title", ""), "", entry.get("duration"))
-            if (vid and vid in seen_vid) or any(_same_song(key, k) for k in seen_keys):
+            first = first_by_vid.get(vid) if vid else None
+            if first is None:
+                first = next((fe for k, fe in seen_keys_e if _same_song(key, k)), None)
+            if first is not None:
+                entry["_dupe_of"] = first
                 item = _new_track(entry.get("title") or "")
                 await _finish(item, entry, ok=False, skipped=True)
                 item["status_text"] = "↷ doppelt in der Playlist"
@@ -6805,9 +7014,14 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
                 continue
             if vid:
                 seen_vid.add(vid)
+                first_by_vid[vid] = entry
             seen_keys.append(key)
-            m = _library_matches({"title": entry.get("title", ""), "duration": entry.get("duration")},
-                                 limit=1, index=lib_idx)
+            seen_keys_e.append((key, entry))
+            m = [] if mode == "all" else _library_matches(
+                {"title": entry.get("title", ""), "duration": entry.get("duration")}, limit=1, index=lib_idx)
+            if m and mode == "folder":
+                await _link_existing(m[0], entry)
+                continue
             if m:
                 item = _new_track(entry.get("title") or "")
                 item["path"] = m[0]["path"]
@@ -6816,6 +7030,9 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
                 state["skipped_lib"] = state.get("skipped_lib", 0) + 1
                 continue
             todo.append(entry)
+        if linked_any:
+            save_library()
+            await push_library()
 
         async def _batch(batch: list[dict], n: int):
             if not batch or hdr not in _state["downloads"]:
@@ -6948,10 +7165,38 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
                                    if _vid(e["url"]) and e["url"] not in fehl_urls]
             follow["_new_paths"] = list(state["new"])
         vorhanden = state.get("skipped_lib", 0) + state.get("skipped_dupe", 0)
-        ok_n -= vorhanden
-        hdr["status_text"] = (f"✓ {ok_n} neu" + (f" · {vorhanden} schon da" if vorhanden else "")
+        verkn = state.get("linked", 0)
+        ok_n -= vorhanden + verkn
+        hdr["status_text"] = (f"✓ {ok_n} neu" + (f" · {verkn} verknüpft" if verkn else "")
+                              + (f" · {vorhanden} schon da" if vorhanden else "")
                               + (f" · {ersetzt} ersetzt" if ersetzt else "")
                               + (f" · {len(fehl)} nicht verfügbar" if fehl else ""))
+        if mode == "folder":
+            # Reihenfolge der Playlist fuer rekordbox / Virtual DJ
+            tracks = _playlist_tracks(all_entries, lib_idx)
+            if tracks:
+                safe = re.sub(r'[<>:"/\\|?*]', '_', label or slabel).strip(' .')[:80] or "Playlist"
+                try:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, _write_m3u, Path(target_dir) / (safe + ".m3u8"), tracks)
+                except Exception as e:
+                    print(f"[playlist] .m3u8 nicht geschrieben: {e}", flush=True)
+        if mode == "playlist":
+            # Neue Dateien sind im Index noch nicht drin — sie tragen ihren Pfad am Eintrag
+            n_pl = await _save_as_playlist(label or slabel, playlist_folder,
+                                           _playlist_tracks(all_entries, lib_idx))
+            if n_pl:
+                hdr["status_text"] += f" · Playlist mit {n_pl} Titeln"
+        if follow_new and url.startswith("http") and not any(f["url"] == url for f in _state.setdefault("followed", [])):
+            fehl_urls = {d.get("url") for d in fehl}
+            _state["followed"].append({
+                "url": url, "title": (label or slabel)[:80], "fmt": fmt_id, "folder": playlist_folder,
+                "mode": mode if mode != "all" else "folder", "added": int(time.time()),
+                "last_check": int(time.time()), "last_new": ok_n,
+                "seen": [v for v in (_vid(e["url"]) for e in all_entries if e["url"] not in fehl_urls) if v],
+            })
+            save_settings()
+            await _push_followed()
         _dl_procs.pop(session_id, None)
         await push_downloads(force=True)
         return state["final"]

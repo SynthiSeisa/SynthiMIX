@@ -754,6 +754,7 @@
         const r = qualityInfo.map.get(t.path)
         return !!r && (qualityFilter === 'all' || r.includes(qualityFilter))
       }
+      if (navMode === 'all' && linkHidden.has(t.path)) return false
       if (navMode === 'all' && hideDupesAuto) return !globalDupes.hidden.has(t.path)
       return true
     })
@@ -884,9 +885,16 @@
   // selben erlaubten Ordner werden weiter gemeldet.
   const _normDir = (p) => (p ?? '').replace(/\//g, '\\').replace(/\\$/, '').toLowerCase()
   const allowDirs = $derived(($appSettings.dupeAllowFolders ?? []).map(_normDir))
+  // Jeder direkte Unterordner eines erlaubten Ordners ist ein eigener Bereich
+  // (z. B. Playlists\\Party und Playlists\\Hochzeit): derselbe Song in zwei
+  // Unterordnern ist okay, zweimal im selben wird gemeldet.
   function allowedZone(path) {
     const pn = _normDir(path)
-    return allowDirs.find(f => pn.startsWith(f + '\\')) ?? ''
+    const root = allowDirs.find(f => pn.startsWith(f + '\\'))
+    if (!root) return ''
+    const rest = pn.slice(root.length + 1)
+    const i = rest.indexOf('\\')
+    return i < 0 ? root : root + '\\' + rest.slice(0, i)
   }
   function allowedFolderOf(path) {
     const pn = _normDir(path)
@@ -901,11 +909,25 @@
     })
   }
 
+  // Verknuepfte Dateien (Hardlinks aus "Kompletter Ordner"): dieselbe Datei
+  // unter mehreren Pfaden. Die erste in der Bibliothek zaehlt, die weiteren
+  // sind nie ein Duplikat und stehen unter "Alle Titel" nicht noch einmal.
+  const linkHidden = $derived.by(() => {
+    const first = new Map(), hidden = new Set()
+    for (const t of $library) {
+      if (!t.fid) continue
+      if (first.has(t.fid)) hidden.add(t.path)
+      else first.set(t.fid, t.path)
+    }
+    return hidden
+  })
+
   function findDupes(tracks) {
     const byKey = new Map()  // normalized key → track[]
 
     for (const t of tracks) {
       if (STEM_RE.test(t.title ?? '')) continue   // skip stems
+      if (linkHidden.has(t.path)) continue        // Verknuepfung, dieselbe Datei
       const key = dupeKey(t)
       if (!key) continue
       if (!byKey.has(key)) byKey.set(key, [])
@@ -1618,7 +1640,7 @@
       <button class="t-item {navMode === 'all' ? 'active' : ''}" onclick={() => selectNav('all')}>
         <i class="ti ti-music t-ico" aria-hidden="true"></i>
         <span class="t-name">Alle Titel</span>
-        <span class="t-count">{hideDupesAuto ? $library.length - globalDupes.hidden.size : $library.length}</span>
+        <span class="t-count">{$library.length - linkHidden.size - (hideDupesAuto ? globalDupes.hidden.size : 0)}</span>
       </button>
       <button class="t-item {navMode === 'recent' ? 'active' : ''}" onclick={() => selectNav('recent')}>
         <i class="ti ti-clock t-ico" aria-hidden="true"></i>
@@ -2473,7 +2495,7 @@
       </button>
     {:else}
       <button onclick={() => setDupeAllowed(folderCtx.path, true)}
-              title="Kopien in diesem Ordner (samt Unterordnern) gelten nicht als Duplikat, z. B. für Event- oder Playlist-Ordner">
+              title="Für Event- oder Playlist-Ordner: Jeder Unterordner gilt einzeln — derselbe Song in zwei Unterordnern ist okay, zweimal im selben wird gemeldet">
         <i class="ti ti-copy-check" aria-hidden="true"></i> Doppelte hier erlauben
       </button>
     {/if}

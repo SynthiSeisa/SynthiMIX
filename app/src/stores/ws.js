@@ -65,6 +65,8 @@ export const excludedFolders     = writable([])   // aus der Bibliothek ausgesch
 // Ergebnis der taeglichen Pruefung: { ytdlp: {latest, available}, spotdl: {current, latest, available},
 // ytdlp_updated: {from, to, at} } — daraus kommen Punkt am Zahnrad und Hinweise
 export const toolUpdates         = writable({})
+// Playlist-Kaestchen vor dem Laden: null | {pending, url} | {plan_id, url, format, title, total, have, new, dupes, followed}
+export const playlistPlan        = writable(null)
 export const playlistChoice      = writable(null)   // null | {pending:true} | {url, format, track_title, playlist_title, count}
 // Musikvideo-Links: Warteliste der Rueckfragen und laufende Pruefungen
 export const videoChoices        = writable([])     // [{url, format, video:{title,uploader,duration}, song:{url,title,uploader,duration}}]
@@ -330,6 +332,9 @@ function connect() {
       case 'excluded_folders':        excludedFolders.set(msg.items || []); break
       case 'tool_updates':            toolUpdates.set(msg.items || {}); break
       case 'watched_folder_impact':   watchedFolderImpact.set({ folder: msg.folder, tracks: msg.tracks }); break
+      case 'playlist_plan_pending':   playlistPlan.set({ pending: true, url: msg.url }); break
+      case 'playlist_plan_cancel':    playlistPlan.set(null); break
+      case 'playlist_plan':           playlistPlan.set({ ...msg, pending: false }); break
       case 'playlist_choice_pending': playlistChoice.set({ pending: true }); break
       case 'playlist_choice_cancel':  playlistChoice.set(null); break
       case 'playlist_choice':         playlistChoice.set({ ...msg, pending: false }); break
