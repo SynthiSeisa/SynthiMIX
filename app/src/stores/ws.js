@@ -54,6 +54,8 @@ export const wishesOpen          = writable(false) // Wunschliste offen (Titelle
 export const wishesLoaded        = writable(false) // erste Wunschliste vom Backend da
 // Release-Notes aller Versionen (von GitHub, offline aus dem Cache): [{tag, name, date, body}]
 export const changelog           = writable(null)
+// Verfolgte Playlists: [{url, title, fmt, folder, last_check, last_new, known, checking}]
+export const followed            = writable([])
 // Eigener Store: im settings-Store landen nur volume/crossfade_s, dort kam der
 // Wert nie an — der Schalter stand in 1.4.2 dadurch immer auf aus.
 export const ytdlpAutoupdate     = writable(true)
@@ -161,6 +163,7 @@ function connect() {
     ws.send(JSON.stringify({ type: 'check_tools' }))
     ws.send(JSON.stringify({ type: 'get_download_tree' }))
     ws.send(JSON.stringify({ type: 'get_watched_folders' }))   // Musikordner in der Navigation
+    ws.send(JSON.stringify({ type: 'get_followed' }))
   }
 
   ws.onclose = () => {
@@ -322,6 +325,7 @@ function connect() {
       case 'fpcalc_install_error':    fpcalcInstalling.set(false); fpcalcInstallError.set(msg.text ?? 'Fehler'); break
       case 'wishes':                  wishes.set(msg.items || []); wishesLoaded.set(true); break
       case 'changelog':               changelog.set(msg.items || []); break
+      case 'followed':                followed.set(msg.items || []); break
       case 'watched_folders':         watchedFolders.set(msg.items || []); break
       case 'excluded_folders':        excludedFolders.set(msg.items || []); break
       case 'tool_updates':            toolUpdates.set(msg.items || {}); break

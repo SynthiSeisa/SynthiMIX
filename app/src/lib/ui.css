@@ -224,3 +224,22 @@ input[type="checkbox"], input[type="radio"], input[type="range"] { accent-color:
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* ── Erklaerungen hinter ⓘ (lib/infohints.js) ─────────────────────────── */
+.hint.hint-tip { display: none !important; }
+.info-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; margin-left: 6px; padding: 0; vertical-align: -3px;
+  border: none; border-radius: 50%; background: none; cursor: help;
+  color: var(--c-tx4); font-size: 15px; letter-spacing: 0; text-transform: none;
+}
+.info-btn:hover, .info-btn[aria-expanded="true"] { color: var(--c-accent-tx); }
+.info-btn:focus-visible { outline: 2px solid var(--c-focus); outline-offset: 1px; }
+.info-tip {
+  position: fixed; z-index: 10000; max-width: 380px; padding: 10px 12px;
+  background: var(--c-bg5); color: var(--c-tx2); border: 1px solid var(--c-br2);
+  border-radius: var(--r-m); box-shadow: 0 10px 28px rgba(0, 0, 0, .4);
+  font-size: var(--fs-sm); line-height: 1.5; text-transform: none; letter-spacing: 0; font-weight: 400;
+}
+.info-tip-p + .info-tip-p { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--c-br1); }
+.info-tip strong, .info-tip b { color: var(--c-tx1); }

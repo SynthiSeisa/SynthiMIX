@@ -14,7 +14,7 @@
   // Der Klick fuehrt direkt auf den Tab, in dem der Hinweis steht.
   const updTab = $derived(
     $toolUpdates.ytdlp?.available || $toolUpdates.ytdlp_updated || $toolUpdates.spotdl_updated || $toolUpdates.ffmpeg_updated ? 'system'
-    : $toolUpdates.spotdl?.available ? 'download' : null)
+    : $toolUpdates.spotdl?.available ? 'services' : null)
   const updTitle = $derived(
     $toolUpdates.ytdlp?.available ? `Neue yt-dlp-Version ${$toolUpdates.ytdlp.latest}`
     : $toolUpdates.spotdl?.available ? `Neue spotdl-Version ${$toolUpdates.spotdl.latest}`
@@ -194,29 +194,6 @@
         </div>
       {/if}
     </div>
-    <div class="pop-wrap">
-      <button class="btn btn-icon btn-sm" class:is-active={helpOpen}
-              onclick={() => { helpOpen = !helpOpen; notesOpen = false }}
-              title="Tastenkürzel" aria-label="Tastenkürzel"><i class="ti ti-help"></i></button>
-      {#if helpOpen}
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="help-backdrop" onclick={() => helpOpen = false}></div>
-        <div class="pop help-panel">
-          <div class="pop-hdr">
-            <span class="eyebrow">Tastenkürzel</span>
-            <span class="pop-status"></span>
-            <button class="btn btn-icon btn-sm" onclick={() => helpOpen = false} title="Schließen" aria-label="Schließen"><i class="ti ti-x"></i></button>
-          </div>
-          {#each shortcuts as [key, desc]}
-            <div class="help-row">
-              <kbd>{key}</kbd>
-              <span>{desc}</span>
-            </div>
-          {/each}
-        </div>
-      {/if}
-    </div>
-
     <span class="tb-sep" aria-hidden="true"></span>
 
     <button class="btn btn-icon btn-sm" onclick={toggleTheme}

@@ -12,6 +12,7 @@
            fpcalcInstalling, fpcalcInstallError,
            spotdlInstalling, spotdlInstallError, spotdlInstallText,
            watchedFolders, watchedFolderImpact, ytdlpAutoupdate, excludedFolders, toolUpdates, servicesTest, setupOpen, changelog } from '../stores/ws.js'
+  import { infoHints } from '../lib/infohints.js'
 
   let tab = $state('playback')
 
@@ -68,7 +69,7 @@
   const tabNotice = $derived({
     system:   !!($toolUpdates.ytdlp?.available || $toolUpdates.ytdlp_updated || $toolUpdates.spotdl_updated
                   || $toolUpdates.ffmpeg?.available || $toolUpdates.ffmpeg_updated),
-    download: !!$toolUpdates.spotdl?.available,
+    services: !!$toolUpdates.spotdl?.available,
   })
   let toolCheckRunning = $state(false)
   function checkToolUpdates() {
@@ -239,6 +240,16 @@
     urlCopied = true
     setTimeout(() => urlCopied = false, 1800)
   }
+  let wishCopied = $state(false)
+  function copyWishUrl() {
+    navigator.clipboard.writeText($remoteStatus?.wish_url ?? '')
+    wishCopied = true
+    setTimeout(() => wishCopied = false, 1800)
+  }
+  // Fernbedienung und Musikwuensche einzeln an/aus (gemeinsamer Server)
+  const svcRemote = $derived(!!$remoteStatus?.running && ($remoteStatus?.services?.remote ?? true))
+  const svcWishes = $derived(!!$remoteStatus?.running && ($remoteStatus?.services?.wishes ?? true))
+  function toggleSvc(service, on) { send({ type: on ? 'remote_start' : 'remote_stop', service }) }
 
   let qrCanvas     = $state(null)
   let wishQrCanvas = $state(null)
@@ -304,7 +315,8 @@
       </nav>
 
       <!-- Right content -->
-      <div class="content">
+      <!-- Lange Erklaerungen liegen hinter einem ⓘ am Gruppentitel (lib/infohints.js) -->
+      <div class="content" use:infoHints>
 
         <!-- ── WIEDERGABE ──────────────────────────────────────────────── -->
         {#if tab === 'playback'}
@@ -587,6 +599,9 @@
             </div>
           </div>
 
+        <!-- ── DIENSTE ─────────────────────────────────────────────────── -->
+        {:else if tab === 'services'}
+
           <div class="group">
             <div class="group-title">Spotify-Download (via spotdl)</div>
             <div class="row">
@@ -637,9 +652,6 @@
               <button class="btn btn-sm" onclick={saveSpotifyCreds}>Speichern</button>
             </div>
           </div>
-
-        <!-- ── DIENSTE ─────────────────────────────────────────────────── -->
-        {:else if tab === 'services'}
 
           <div class="group">
             <div class="group-title">Last.fm — Radio-Modus</div>
@@ -916,60 +928,70 @@
         {:else if tab === 'remote'}
 
           <div class="group">
-            <div class="group-title">Handy-Fernbedienung</div>
-            <p class="remote-desc">Startet einen lokalen Server im WLAN. Öffne die angezeigte URL im Browser deines Handys — kein Internet, keine App nötig.</p>
+            <div class="group-title">Handy-Dienste</div>
+            <p class="remote-desc">Fernbedienung und Musikwünsche laufen über einen kleinen Server im WLAN — kein Internet, keine App. Beide lassen sich einzeln ein- und ausschalten.</p>
             <label class="row-toggle">
-              <span class="row-label">Bei Start automatisch starten</span>
+              <span class="row-label">Beim Start die zuletzt eingeschalteten wieder starten</span>
               <input type="checkbox" checked={$remoteAutostart}
                 onchange={(e) => send({ type: 'set_remote_autostart', value: e.target.checked })} />
             </label>
+            {#if $remoteStatus?.error}
+              <div class="remote-status off"><span class="remote-dot off"></span> Fehler: {$remoteStatus.error}</div>
+            {/if}
+          </div>
 
-            {#if $remoteStatus?.running}
-              <div class="remote-status on">
-                <span class="remote-dot on"></span>
-                Server läuft
-              </div>
+          <div class="group svc-card" class:on={svcRemote}>
+            <div class="group-title">Fernbedienung</div>
+            <div class="svc-head">
+              <span class="remote-status {svcRemote ? 'on' : 'off'}"><span class="remote-dot {svcRemote ? 'on' : 'off'}"></span>{svcRemote ? 'Läuft' : 'Aus'}</span>
+              <button class="btn btn-sm {svcRemote ? 'btn-danger' : 'btn-primary'}" onclick={() => toggleSvc('remote', !svcRemote)}>
+                {svcRemote ? 'Stoppen' : 'Starten'}
+              </button>
+            </div>
+            {#if svcRemote}
               <div class="remote-url">
-                <span class="url-label">URL:</span>
                 <span class="url-val" ondblclick={() => window.electron?.openPath($remoteStatus?.url)}
                       title="Doppelklick: im Browser öffnen">{$remoteStatus.url}</span>
                 <button class="btn btn-icon btn-sm" class:is-active={urlCopied} onclick={copyRemoteUrl}
                         title="In Zwischenablage kopieren" aria-label="Adresse kopieren">
                   <i class="ti {urlCopied ? 'ti-check' : 'ti-copy'}"></i>
                 </button>
+                <button class="btn btn-icon btn-sm" onclick={() => window.electron?.openPath($remoteStatus?.url)}
+                        title="Im Browser öffnen" aria-label="Im Browser öffnen"><i class="ti ti-external-link"></i></button>
               </div>
-              <div class="remote-url-actions">
-                <span class="remote-hint">Im Handy-Browser öffnen (gleiches WLAN)</span>
-                <button class="btn btn-sm" onclick={() => window.electron?.openPath($remoteStatus?.url)} title="Im Standard-Browser öffnen"><i class="ti ti-external-link"></i> Im Browser öffnen</button>
-              </div>
-              <div class="qr-row">
-                <div class="qr-wrap">
-                  <canvas bind:this={qrCanvas} class="qr-canvas"></canvas>
-                  <span class="qr-hint">FERNBEDIENUNG</span>
-                </div>
-                <div class="qr-wrap">
-                  <canvas bind:this={wishQrCanvas} class="qr-canvas"></canvas>
-                  <span class="qr-hint">MUSIKWÜNSCHE</span>
-                </div>
-              </div>
-              <div class="hint" style="text-align:center;margin-bottom:8px">
-                Der linke Code enthält einen geheimen Schlüssel — nur damit kommt man
-                auf die Fernbedienung. Wer den Wunsch-Link kürzt, landet wieder bei den
-                Wünschen. Der rechte Code führt auf die Wunsch-Seite. Zum Ausdrucken
-                sollte der Rechner im Router eine feste IP bekommen.
-              </div>
-              <div class="remote-url-actions">
-                <button class="btn btn-sm btn-danger" onclick={() => send({ type: 'remote_stop' })}>Server stoppen</button>
+              <div class="svc-qr">
+                <canvas bind:this={qrCanvas} class="qr-canvas"></canvas>
                 <button class="btn btn-sm" onclick={newRemoteKey}
-                        title="Falls der Fernbedienungs-Link in falsche Hände geraten ist">Neuen Fernbedienungs-Link</button>
+                        title="Falls der Fernbedienungs-Link in falsche Hände geraten ist">Neuen Link erzeugen</button>
               </div>
-            {:else}
-              <div class="remote-status off">
-                <span class="remote-dot off"></span>
-                {$remoteStatus?.error ? 'Fehler: ' + $remoteStatus.error : 'Gestoppt'}
-              </div>
-              <button class="btn btn-primary" onclick={() => send({ type: 'remote_start' })}>Server starten</button>
             {/if}
+            <div class="hint">Der Code enthält einen geheimen Schlüssel — nur damit kommt man auf die Fernbedienung. Wer den Link kürzt, landet bei den Musikwünschen (falls eingeschaltet).</div>
+          </div>
+
+          <div class="group svc-card" class:on={svcWishes}>
+            <div class="group-title">Musikwünsche</div>
+            <div class="svc-head">
+              <span class="remote-status {svcWishes ? 'on' : 'off'}"><span class="remote-dot {svcWishes ? 'on' : 'off'}"></span>{svcWishes ? 'Läuft' : 'Aus'}</span>
+              <button class="btn btn-sm {svcWishes ? 'btn-danger' : 'btn-primary'}" onclick={() => toggleSvc('wishes', !svcWishes)}>
+                {svcWishes ? 'Stoppen' : 'Starten'}
+              </button>
+            </div>
+            {#if svcWishes}
+              <div class="remote-url">
+                <span class="url-val" ondblclick={() => window.electron?.openPath(wishUrl)}
+                      title="Doppelklick: im Browser öffnen">{wishUrl}</span>
+                <button class="btn btn-icon btn-sm" class:is-active={wishCopied} onclick={copyWishUrl}
+                        title="In Zwischenablage kopieren" aria-label="Adresse kopieren">
+                  <i class="ti {wishCopied ? 'ti-check' : 'ti-copy'}"></i>
+                </button>
+                <button class="btn btn-icon btn-sm" onclick={() => window.electron?.openPath(wishUrl)}
+                        title="Im Browser öffnen" aria-label="Im Browser öffnen"><i class="ti ti-external-link"></i></button>
+              </div>
+              <div class="svc-qr">
+                <canvas bind:this={wishQrCanvas} class="qr-canvas"></canvas>
+              </div>
+            {/if}
+            <div class="hint">Den Code kann man ausdrucken und aufhängen. Damit er gültig bleibt, sollte der Rechner im Router eine feste IP bekommen. Ist die Seite aus, sehen Gäste „ausgeschaltet“.</div>
           </div>
 
           <div class="group">
@@ -988,9 +1010,9 @@
           <div class="group">
             <div class="group-title">Was ist neu</div>
             {#if $changelog === null}
-              <div class="hint"><i class="ti ti-refresh spin"></i> Lade die Änderungen…</div>
+              <div class="hint keep"><i class="ti ti-refresh spin"></i> Lade die Änderungen…</div>
             {:else if !$changelog.length}
-              <div class="hint">Keine Verbindung zu GitHub — die Änderungen erscheinen, sobald SynthiMIX einmal online war.</div>
+              <div class="hint keep">Keine Verbindung zu GitHub — die Änderungen erscheinen, sobald SynthiMIX einmal online war.</div>
             {:else}
               <div class="cl-list">
                 {#each $changelog as rel, i (rel.tag)}
@@ -1203,6 +1225,9 @@
   .qr-wrap { display: flex; flex-direction: column; align-items: center; gap: var(--sp-2); }
   .qr-canvas { border-radius: var(--r-m); background: #fff; }
   .qr-hint { font-size: var(--fs-cap); font-weight: 700; letter-spacing: .08em; color: var(--c-tx3); }
+  .svc-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
+  .svc-qr { display: flex; align-items: flex-end; gap: var(--sp-3); flex-wrap: wrap; }
+  .svc-card.on { border-left: 3px solid var(--c-green-tx); padding-left: var(--sp-3); }
   .info-row { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-body); color: var(--c-tx2); }
   .info-row .ti { font-size: 16px; color: var(--c-tx4); }
 

@@ -62,10 +62,15 @@ class PlaylistParallelTest(BackendTest):
         main.YTDLP, main._JS_ARGS, main._audit_playlist_for_videos, main.FFMPEG_DIR, main._ytm_songs = self._saved_tools
         super().tearDown()
 
-    def fake_audit(self, ids, title):
+    NAMEN = ["Alpha Sunrise", "Broken Mirror", "Cold Harbour", "Desert Lights", "Echo Chamber",
+             "Frozen River", "Golden Hour", "Hidden Track", "Iron Sky", "Jungle Fever"]
+
+    def fake_audit(self, ids, title, titles=None, durs=None):
+        titles = titles or [f"Artist {n} - {self.NAMEN[n % len(self.NAMEN)]}" for n in range(len(ids))]
         async def audit(url):
-            return ([{"url": f"https://www.youtube.com/watch?v={i}", "title": f"Video {i}",
-                      "replaced": False, "uploader": "", "duration": 200} for i in ids], title)
+            return ([{"url": f"https://www.youtube.com/watch?v={i}", "title": t,
+                      "replaced": False, "uploader": "", "duration": (durs or {}).get(i, 180 + n * 7)}
+                     for n, (i, t) in enumerate(zip(ids, titles))], title)
         main._audit_playlist_for_videos = audit
 
     def test_parallel_und_ordnername(self):
@@ -77,7 +82,7 @@ class PlaylistParallelTest(BackendTest):
         self.assertEqual(len(list(folder.glob("*.mp3"))), 7)
         hdr = main._state["downloads"][0]
         self.assertEqual(hdr["session_label"], "Party: Mix/2026?")
-        self.assertIn("7 Tracks", hdr["status_text"])
+        self.assertIn("7 neu", hdr["status_text"])
         tracks = [d for d in main._state["downloads"] if d["id"] != hdr["id"]]
         self.assertEqual(len(tracks), 7)
         self.assertTrue(all(t["status"] == "done" for t in tracks))
@@ -134,3 +139,77 @@ class PlaylistParallelTest(BackendTest):
         alt = [d for d in main._state["downloads"] if d.get("session") == sid and d["id"] != sid]
         self.assertEqual([d["status"] for d in alt], ["done"])  # Fehlgeschlagener ist umgezogen
         self.assertIn("1 nicht verfügbar", neu["status_text"])  # Attrappe: bleibt kaputt
+
+    # ── Derselbe Song zweimal in der Playlist, oder schon in der Bibliothek ──
+
+    def test_doppelt_in_der_playlist(self):
+        # Musikvideo und Lyric-Video desselben Songs + zweimal dieselbe ID
+        self.fake_audit(["idaaaaaaaaa", "idbbbbbbbbb", "idaaaaaaaaa", "idccccccccc"], "Liste",
+                        titles=["Pendulum - Witchcraft (Official Video)", "Pendulum - Witchcraft (Lyrics)",
+                                "Pendulum - Witchcraft (Official Video)", "Pendulum - Crush"],
+                        durs={"idaaaaaaaaa": 262, "idbbbbbbbbb": 254, "idccccccccc": 250})
+        self.run_async(main.run_download("https://www.youtube.com/playlist?list=PLd1", "mp3-best"))
+        folder = self.tmp / "Downloads" / "Liste"
+        self.assertEqual(len(list(folder.glob("*.mp3"))), 2)          # Witchcraft einmal, Crush
+        hdr = main._state["downloads"][0]
+        self.assertIn("2 neu", hdr["status_text"])
+        self.assertIn("2 schon da", hdr["status_text"])
+
+    def test_schon_in_der_bibliothek(self):
+        main._state["library"] = [{"path": str(self.tmp / "alt" / "Witchcraft.mp3"), "title": "Pendulum - Witchcraft",
+                                   "artist": "Pendulum", "duration_sec": 253}]
+        self.fake_audit(["idaaaaaaaaa", "idccccccccc"], "Liste",
+                        titles=["Pendulum - Witchcraft (Official Video)", "Pendulum - Crush"],
+                        durs={"idaaaaaaaaa": 262, "idccccccccc": 250})
+        self.run_async(main.run_download("https://www.youtube.com/playlist?list=PLd2", "mp3-best"))
+        tracks = [d for d in main._state["downloads"] if d["id"] != main._state["downloads"][0]["id"]]
+        texte = sorted(t["status_text"] for t in tracks)
+        self.assertIn("✓ schon in der Bibliothek", texte)
+        self.assertEqual(len(list((self.tmp / "Downloads" / "Liste").glob("*.mp3"))), 1)
+
+    # ── Playlist verfolgen ───────────────────────────────────────────────────
+    def test_verfolgen_laedt_nur_neues(self):
+        import os
+        from tests.support import FakeWS
+        analysiert = []
+
+        async def analyse(paths=None):
+            analysiert.append(list(paths or []))
+        keep = main._analyze_library_meta_task
+        main._analyze_library_meta_task = analyse
+        main._state["followed"] = []
+        try:
+            url = "https://www.youtube.com/playlist?list=PLfollow"
+            self.fake_audit(["idaaaaaaaaa", "idbbbbbbbbb"], "Party")
+            self.run_async(main.run_download(url, "mp3-best"))
+            sid = main._state["downloads"][0]["id"]
+            self.run_async(main.handle_message(FakeWS(), {"type": "follow_add", "url": url, "session_id": sid}))
+            f = main._state["followed"][0]
+            self.assertEqual(sorted(f["seen"]), ["idaaaaaaaaa", "idbbbbbbbbb"])
+            self.assertEqual(f["folder"], "Party")
+
+            # Ein bekannter Titel wurde geloescht, ein neuer kam dazu
+            for mp3 in (self.tmp / "Downloads" / "Party").glob("*idaaaaaaaaa*.mp3"):
+                os.remove(mp3)
+            self.fake_audit(["idaaaaaaaaa", "idbbbbbbbbb", "idccccccccc"], "Party")
+            self.run_async(main._follow_check(f))
+            files = sorted(p.name for p in (self.tmp / "Downloads" / "Party").glob("*.mp3"))
+            self.assertEqual(len(files), 2)                         # b + neu c, a bleibt weg
+            self.assertTrue(any("idccccccccc" in n for n in files))
+            self.assertEqual(f["last_new"], 1)
+            self.assertIn("idccccccccc", f["seen"])
+            self.assertEqual(len(analysiert), 1)                    # neue Titel gehen zur Analyse
+
+            # Nichts Neues: kein Download
+            self.run_async(main._follow_check(f))
+            self.assertEqual(f["last_new"], 0)
+            self.assertIn("nichts Neues", main._state["downloads"][0]["status_text"])
+        finally:
+            main._analyze_library_meta_task = keep
+
+    def test_verfolgen_entfernen(self):
+        from tests.support import FakeWS
+        main._state["followed"] = [{"url": "https://www.youtube.com/playlist?list=PLx", "title": "x", "seen": []}]
+        self.run_async(main.handle_message(FakeWS(), {"type": "follow_remove",
+                                                      "url": "https://www.youtube.com/playlist?list=PLx"}))
+        self.assertEqual(main._state["followed"], [])

@@ -22,8 +22,12 @@ class RemoteTestBase(BackendTest):
         self._outcomes = dict(main._wish_outcomes)
         main._wish_outcomes.clear()
         self._playing = main._state.get("playing", False)
+        # Seiten und Verbindungen gibt es nur bei eingeschaltetem Dienst
+        self._svc = dict(main._remote_services)
+        main._remote_services.update(remote=True, wishes=True)
 
     def tearDown(self):
+        main._remote_services.clear(); main._remote_services.update(self._svc)
         main._state["remote_key"] = self._key
         main._wish_outcomes.clear()
         main._wish_outcomes.update(self._outcomes)

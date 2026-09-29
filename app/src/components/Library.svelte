@@ -2800,13 +2800,12 @@
   .rows { flex: 1; overflow: auto; }
   .row {
     display: flex; align-items: center; height: var(--row-h); min-width: max-content;
-    border-bottom: 1px solid var(--c-br1); cursor: grab;
+    border-bottom: 1px solid var(--c-br1); cursor: default;
     font-size: var(--row-fs);
   }
   .row:hover { background: var(--c-hover); }
   .row.sel { background: var(--c-sel); box-shadow: inset 3px 0 0 var(--c-blue); }
   .row.sel:hover { background: var(--c-sel); }
-  .row:active { cursor: grabbing; }
   .row.missing { opacity: .5; }
   .row.dupe-copy .cell { color: var(--c-tx5); }
   .row.dupe-copy .c-title-text { font-weight: 400; }

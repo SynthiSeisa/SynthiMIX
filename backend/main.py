@@ -214,6 +214,7 @@ async def lifespan(application: FastAPI):
     asyncio.create_task(_ytdlp_autoupdate_loop())
     asyncio.create_task(_refresh_tag_meta_loop())
     asyncio.create_task(_quality_scan_loop())
+    asyncio.create_task(_follow_startup())
     print(f"[backend] ready on ws://127.0.0.1:{_BACKEND_PORT}/ws", flush=True)
     yield
     # Beenden (auch vor einem Update): nichts Gemessenes verlieren
@@ -228,7 +229,17 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 clients: set[WebSocket] = set()
 _remote_clients: set[WebSocket] = set()
+_wish_clients: set[WebSocket] = set()      # offene Musikwunsch-Seiten
 _remote_server: Any = None
+# Fernbedienung und Musikwunsch laufen ueber denselben Server, lassen sich aber
+# einzeln ein- und ausschalten. Der Server laeuft, solange einer an ist.
+_remote_services: dict = {"remote": False, "wishes": False}
+
+def _remote_status_msg(**extra) -> dict:
+    ip = _get_local_ip()
+    running = _remote_server is not None
+    return {"type": "remote_status", "running": running, "services": dict(_remote_services),
+            **({"ip": ip, "port": _remote_port, **_remote_urls(ip)} if running else {}), **extra}
 _remote_port = 8080
 _dl_procs: dict[int, Any] = {}  # session_id → asyncio.Process oder Liste davon (Playlist parallel)
 _DL_PARALLEL = 3                  # gleichzeitige yt-dlp-Prozesse bei Playlists
@@ -493,7 +504,7 @@ def load_library():
             _remember_cutoff(lt)
     wieder = _restore_cutoffs()
     gemessen = sum(1 for lt in deduped if lt.get("cutoff_khz") is not None)
-    print(f"[library] {len(deduped)} Titel geladen · Qualitaet gemessen: {gemessen}"
+    print(f"[library] {len(deduped)} Titel geladen - Qualitaet gemessen: {gemessen}"
           + (f" ({wieder} aus dem Messwert-Speicher)" if wieder else ""), flush=True)
     # Beim Start bekannte Problemdateien sofort ins Set laden → Race Condition vermeiden
     _unanalyzable_paths.update(t["path"] for t in deduped if t.get("unanalyzable"))
@@ -578,6 +589,8 @@ def load_settings():
     _state["auto_scan_interval_min"]  = int(raw.get("auto_scan_interval_min", 0))
     _state["favorites"]               = list(raw.get("favorites", []))
     _state["remote_autostart"]        = bool(raw.get("remote_autostart", False))
+    _state["remote_services_saved"]   = dict(raw.get("remote_services_saved") or {"remote": True, "wishes": True})
+    _state["followed"]                = [f for f in (raw.get("followed") or []) if isinstance(f, dict) and f.get("url")]
     _state["remote_key"]              = str(raw.get("remote_key", ""))
     _state["ytdlp_autoupdate"]        = bool(raw.get("ytdlp_autoupdate", True))
     _state["ytdlp_last_check"]        = int(raw.get("ytdlp_last_check", 0))
@@ -613,6 +626,8 @@ def save_settings():
         "auto_scan_interval_min":  _state.get("auto_scan_interval_min", 0),
         "favorites":               _state.get("favorites", []),
         "remote_autostart":        _state.get("remote_autostart", False),
+        "remote_services_saved":   _state.get("remote_services_saved", {"remote": True, "wishes": True}),
+        "followed":                _state.get("followed", []),
         "remote_key":              _state.get("remote_key", ""),
         "ytdlp_autoupdate":        _state.get("ytdlp_autoupdate", True),
         "ytdlp_last_check":        _state.get("ytdlp_last_check", 0),
@@ -3830,7 +3845,12 @@ async def handle_message(ws: WebSocket, msg: dict):
             "radio_enabled":           _state.get("radio_enabled", False),
         }))
         if _state.get("remote_autostart") and _remote_server is None:
-            asyncio.create_task(_start_remote_server(ws))
+            saved = _state.get("remote_services_saved") or {"remote": True, "wishes": True}
+            _remote_services.update(remote=bool(saved.get("remote")), wishes=bool(saved.get("wishes")))
+            if any(_remote_services.values()):
+                asyncio.create_task(_start_remote_server(ws))
+        else:
+            await ws.send_text(json.dumps(_remote_status_msg()))
 
     elif t == "queue_add":
         track = {
@@ -4353,6 +4373,40 @@ async def handle_message(ws: WebSocket, msg: dict):
                                     if d.get("session", d.get("id")) != sid]
         await push_downloads()
 
+    elif t == "get_followed":
+        await ws.send_text(json.dumps({"type": "followed", "items": _follow_public()}))
+
+    elif t == "follow_add":
+        # Aus einer geladenen Playlist heraus: deren Titel gelten als bekannt
+        url = (msg.get("url") or "").strip()
+        sid = msg.get("session_id")
+        if url.startswith("http") and not any(f["url"] == url for f in _state.setdefault("followed", [])):
+            hdr = next((d for d in _state["downloads"] if d.get("id") == sid), None) or {}
+            seen = []
+            for d in _state["downloads"]:
+                if d.get("session") == sid and d.get("id") != sid and d.get("status") == "done":
+                    v = _vid_of(d.get("url") or "")
+                    if v and v not in seen:
+                        seen.append(v)
+            _state["followed"].append({
+                "url": url, "title": (msg.get("title") or hdr.get("session_label") or url)[:80],
+                "fmt": msg.get("format") or hdr.get("fmt") or "mp3-best",
+                "folder": hdr.get("folder"), "added": int(time.time()),
+                "last_check": int(time.time()), "last_new": 0, "seen": seen,
+            })
+            save_settings()
+        await _push_followed()
+
+    elif t == "follow_remove":
+        url = msg.get("url") or ""
+        _state["followed"] = [f for f in _state.get("followed", []) if f["url"] != url]
+        save_settings()
+        await _push_followed()
+
+    elif t == "follow_check":
+        url = msg.get("url")
+        asyncio.create_task(_follow_check_all([url] if url else None))
+
     elif t == "download_retry_failed":
         # z. B. zuhause, wenn unterwegs vieles gesperrt war
         sid = msg.get("session_id")
@@ -4841,10 +4895,38 @@ async def handle_message(ws: WebSocket, msg: dict):
         await push_library()
 
     elif t == "remote_start":
+        # service: "remote" | "wishes"; ohne Angabe beide (wie frueher)
+        svc = msg.get("service")
+        for k in (_remote_services if not svc else [svc]):
+            if k in _remote_services:
+                _remote_services[k] = True
+        _state["remote_services_saved"] = dict(_remote_services)
+        save_settings()
         await _start_remote_server(ws)
 
     elif t == "remote_stop":
-        await _stop_remote_server()
+        svc = msg.get("service")
+        for k in (_remote_services if not svc else [svc]):
+            if k in _remote_services:
+                _remote_services[k] = False
+        # Offene Verbindungen des abgeschalteten Dienstes trennen
+        if not _remote_services["remote"]:
+            for rws in list(_remote_clients):
+                try: await rws.close(code=1001)
+                except Exception: pass
+            _remote_clients.clear()
+        if not _remote_services["wishes"]:
+            for wws in list(_wish_clients):
+                try: await wws.close(code=1001)
+                except Exception: pass
+            _wish_clients.clear()
+        if any(_remote_services.values()):
+            _state["remote_services_saved"] = dict(_remote_services)
+            save_settings()
+            await broadcast(_remote_status_msg())
+        else:
+            await _stop_remote_server()
+            await broadcast(_remote_status_msg())
 
     elif t == "remote_new_key":
         # Falls der Link in falsche Haende geraten ist: neuer Schluessel,
@@ -4856,9 +4938,7 @@ async def handle_message(ws: WebSocket, msg: dict):
             except Exception: pass
         _remote_clients.clear()
         if _remote_server is not None:
-            ip = _get_local_ip()
-            await broadcast({"type": "remote_status", "running": True,
-                             "ip": ip, "port": _remote_port, **_remote_urls(ip)})
+            await broadcast(_remote_status_msg())
 
     elif t == "set_ytdlp_autoupdate":
         _state["ytdlp_autoupdate"] = bool(msg.get("value", True))
@@ -6052,34 +6132,47 @@ def _dupe_parts(title: str, artist: str = "") -> tuple[str, str]:
     return _dupe_norm(a), _dupe_norm(song)
 
 
-def _library_matches(video: dict, limit: int = 5) -> list[dict]:
+def _song_key(title: str, artist: str, dur) -> tuple:
+    """Vergleichsschluessel eines Songs: (Kuenstler, Titel, Versionswoerter, Laenge)."""
+    a, song = _dupe_parts(title or "", artist or "")
+    return (a, song, frozenset(set(song.split()) & _VERSION_WORDS), float(dur or 0))
+
+def _same_song(k1: tuple, k2: tuple) -> float:
+    """Wie sicher derselbe Song (0 = nein, sonst Titel-Aehnlichkeit)."""
+    a, song, version, vdur = k1
+    la, ls, lversion, ldur = k2
+    if len(song) < 2 or not ls or version != lversion:
+        return 0.0
+    sm = SequenceMatcher(None, song, ls)
+    if sm.real_quick_ratio() < _DL_DUPE_SONG_SIM or sm.ratio() < _DL_DUPE_SONG_SIM:
+        return 0.0
+    if vdur and ldur and abs(vdur - ldur) > _DL_DUPE_MAX_DIFF:
+        return 0.0
+    if a and la:
+        if not (a in la or la in a or SequenceMatcher(None, a, la).ratio() >= _DL_DUPE_ARTIST_SIM):
+            return 0.0
+    elif song != ls and not (vdur and ldur and abs(vdur - ldur) <= 3):
+        return 0.0          # ohne Kuenstler: gleicher Titel, sonst muss die Laenge passen
+    return sm.ratio()
+
+def _library_index() -> list[tuple]:
+    """Vergleichsschluessel der ganzen Bibliothek, einmal berechnet — fuer
+    viele Abfragen hintereinander (Playlist mit 140 Titeln)."""
+    return [(_song_key(lt.get("title", ""), lt.get("artist") or lt.get("album_artist") or "",
+                       lt.get("duration_sec")), lt)
+            for lt in _state["library"] if lt.get("path") and not lt.get("missing")]
+
+def _library_matches(video: dict, limit: int = 5, index: list | None = None) -> list[dict]:
     """Bibliothekstitel, die derselbe Song sein duerften wie video
     ({title, artist, uploader, duration}). Beste zuerst."""
-    a, song = _dupe_parts(video.get("title", ""), video.get("artist") or "")
-    if len(song) < 2:
+    k = _song_key(video.get("title", ""), video.get("artist") or "", video.get("duration"))
+    if len(k[1]) < 2:
         return []
-    words = set(song.split())
-    version = words & _VERSION_WORDS
-    vdur = video.get("duration") or 0
     found = []
-    for lt in _state["library"]:
-        if lt.get("missing") or not lt.get("path"):
-            continue
-        la, ls = _dupe_parts(lt.get("title", ""), lt.get("artist") or lt.get("album_artist") or "")
-        if not ls or (set(ls.split()) & _VERSION_WORDS) != version:
-            continue
-        sm = SequenceMatcher(None, song, ls)
-        if sm.real_quick_ratio() < _DL_DUPE_SONG_SIM or sm.ratio() < _DL_DUPE_SONG_SIM:
-            continue
-        ldur = lt.get("duration_sec") or 0
-        if vdur and ldur and abs(vdur - ldur) > _DL_DUPE_MAX_DIFF:
-            continue
-        if a and la:
-            if not (a in la or la in a or SequenceMatcher(None, a, la).ratio() >= _DL_DUPE_ARTIST_SIM):
-                continue
-        elif song != ls and not (vdur and ldur and abs(vdur - ldur) <= 3):
-            continue        # ohne Kuenstler: gleicher Titel, sonst muss die Laenge passen
-        found.append((sm.ratio(), -abs((vdur or 0) - ldur), lt))
+    for lk, lt in (index if index is not None else _library_index()):
+        r = _same_song(k, lk)
+        if r:
+            found.append((r, -abs((k[3] or 0) - (lk[3] or 0)), lt))
     found.sort(key=lambda x: (x[0], x[1]), reverse=True)
     return [lt for _, _, lt in found[:limit]]
 
@@ -6279,7 +6372,7 @@ async def run_spotify_download(url: str, fmt_id: str = "mp3-best"):
         hdr["status_text"] = "spotdl nicht gefunden"
         hdr["error_msg"]   = "spotdl ist nicht installiert"
         # Sagt dem Frontend, welcher Einstellungen-Tab das Problem loest
-        hdr["fix_tab"]     = "download"
+        hdr["fix_tab"]     = "services"
         await push_downloads(force=True)
         return
 
@@ -6399,6 +6492,70 @@ _DL_REASON_TEXT = {
 }
 _PLACEHOLDER_TITLE_RE = re.compile(r'^\[(deleted|private|unavailable)\s+video\]$', re.I)
 
+# ── Playlists verfolgen ──────────────────────────────────────────────────────
+# Eine YouTube-(Music-) oder Spotify-Playlist wird beim Start und auf
+# Knopfdruck geprueft: nur neue Titel werden geladen (Studio-Version statt
+# Musikvideo, nichts, was schon in der Bibliothek ist), danach direkt analysiert.
+_follow_running: set[str] = set()
+
+def _vid_of(u: str) -> str:
+    m = re.search(r'(?:[?&]v=|youtu\.be/|/shorts/)([\w-]{11})', u or "")
+    return m.group(1) if m else ""
+
+def _follow_public() -> list[dict]:
+    out = []
+    for f in _state.get("followed", []):
+        g = {k: v for k, v in f.items() if k != "seen" and not k.startswith("_")}
+        g["known"] = len(f.get("seen") or [])
+        g["checking"] = f["url"] in _follow_running
+        out.append(g)
+    return out
+
+async def _push_followed():
+    await broadcast({"type": "followed", "items": _follow_public()})
+
+async def _follow_check(f: dict):
+    url = f["url"]
+    if url in _follow_running:
+        return
+    _follow_running.add(url)
+    await _push_followed()
+    try:
+        fmt = f.get("fmt") or "mp3-best"
+        if _is_spotify(url):
+            vorher = {lt.get("path") for lt in _state["library"]}
+            await run_spotify_download(url, fmt)
+            await asyncio.sleep(2)
+            neu = [lt["path"] for lt in _state["library"] if lt.get("path") not in vorher]
+        else:
+            await run_download(url, fmt, follow=f)
+            neu = f.pop("_new_paths", [])
+            seen = list(f.get("seen") or [])
+            seen += [v for v in f.pop("_seen_add", []) if v not in seen]
+            f["seen"] = seen[-5000:]
+        f["last_check"] = int(time.time())
+        f["last_new"] = len(neu)
+        if neu:
+            await asyncio.sleep(2)            # Bibliothek traegt neue Dateien nach
+            asyncio.create_task(_analyze_library_meta_task(neu))
+    except Exception as e:
+        print(f"[verfolgen] {url}: {e}", flush=True)
+    finally:
+        _follow_running.discard(url)
+        save_settings()
+        await _push_followed()
+
+async def _follow_check_all(urls: list[str] | None = None):
+    for f in list(_state.get("followed", [])):
+        if urls is None or f["url"] in urls:
+            await _follow_check(f)
+
+async def _follow_startup():
+    await asyncio.sleep(120)          # erst Start, Tag-Abgleich und Wiedergabe
+    if _state.get("followed"):
+        print(f"[verfolgen] pruefe {len(_state['followed'])} Playlist(s)", flush=True)
+        await _follow_check_all()
+
 def _dl_error_reason(msg: str) -> str:
     """yt-dlp-Fehlermeldung → Grund (Schluessel von _DL_REASON_TEXT)."""
     m = (msg or "").lower()
@@ -6417,7 +6574,8 @@ def _dl_error_reason(msg: str) -> str:
     return "other"
 
 async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] | None = None,
-                       folder: str | None = None, label: str | None = None) -> str | None:
+                       folder: str | None = None, label: str | None = None,
+                       follow: dict | None = None) -> str | None:
     """Returns the final output path on success, None on failure.
 
     entries/folder/label: fertige Titelliste statt einer Adresse (z. B.
@@ -6479,6 +6637,7 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
         "url":           url,
         "fmt":           fmt_id,
         "folder":        playlist_folder,
+        "follow":        bool(follow),
         "path":          None,
         "track_n":       0,
         "track_total":   0,
@@ -6561,7 +6720,7 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
     if _audited_entries is not None:
         track_total = len(_audited_entries)
         hdr["track_total"] = track_total
-        state = {"done": 0, "final": None, "failed": []}
+        state = {"done": 0, "final": None, "failed": [], "new": []}
         _dl_procs[session_id] = []
 
         async def _finish(item: dict, entry: dict, ok: bool, skipped: bool = False):
@@ -6593,6 +6752,7 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
             if ok:
                 state["final"] = path
                 if not skipped:
+                    state["new"].append(path)
                     probe = await asyncio.get_running_loop().run_in_executor(None, _probe_sync, path)
                     _append_history(entry["url"], item.get("title", ""), path, probe.get("bitrate_kbps", 0))
                     await broadcast(_history_payload())
@@ -6602,8 +6762,31 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
             m = re.search(r'(?:[?&]v=|youtu\.be/|/shorts/)([\w-]{11})', u or "")
             return m.group(1) if m else ""
 
-        # Schon vorhanden (Verlauf mit guter Qualitaet): gar nicht erst laden
+        # Gar nicht erst laden:
+        # - schon geladen (Verlauf mit guter Qualitaet)
+        # - derselbe Song steht ein zweites Mal in der Playlist (z. B. Musikvideo
+        #   und Lyric-Video) — sonst lagen zwei Dateien desselben Songs im Ordner
+        # - der Song ist schon in der Bibliothek
+        lib_idx = await asyncio.get_running_loop().run_in_executor(None, _library_index)
+        seen_vid: set = set()
+        seen_keys: list = []
         todo = []
+        # Verfolgte Playlist: schon einmal verarbeitete Titel gar nicht anfassen —
+        # auch wenn die Datei inzwischen geloescht wurde (dann bewusst)
+        known = set((follow or {}).get("seen") or [])
+        if follow is not None:
+            vor = len(_audited_entries)
+            _audited_entries = [e for e in _audited_entries if _vid(e["url"]) not in known]
+            track_total = len(_audited_entries)
+            hdr["track_total"] = track_total
+            if not _audited_entries:
+                hdr["status"] = "done"; hdr["progress"] = 100
+                hdr["status_text"] = f"✓ nichts Neues ({vor} bekannt)"
+                follow["_new_paths"] = []
+                follow["_seen_add"] = []
+                _dl_procs.pop(session_id, None)
+                await push_downloads(force=True)
+                return None
         for entry in _audited_entries:
             h = _hist_by_url.get(entry["url"])
             p = (h or {}).get("path", "")
@@ -6611,8 +6794,28 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
                 item = _new_track(h.get("title") or Path(p).stem)
                 item["path"] = p
                 await _finish(item, entry, ok=True, skipped=True)
-            else:
-                todo.append(entry)
+                continue
+            vid = _vid(entry["url"])
+            key = _song_key(entry.get("title", ""), "", entry.get("duration"))
+            if (vid and vid in seen_vid) or any(_same_song(key, k) for k in seen_keys):
+                item = _new_track(entry.get("title") or "")
+                await _finish(item, entry, ok=False, skipped=True)
+                item["status_text"] = "↷ doppelt in der Playlist"
+                state["skipped_dupe"] = state.get("skipped_dupe", 0) + 1
+                continue
+            if vid:
+                seen_vid.add(vid)
+            seen_keys.append(key)
+            m = _library_matches({"title": entry.get("title", ""), "duration": entry.get("duration")},
+                                 limit=1, index=lib_idx)
+            if m:
+                item = _new_track(entry.get("title") or "")
+                item["path"] = m[0]["path"]
+                await _finish(item, entry, ok=True, skipped=True)
+                item["status_text"] = "✓ schon in der Bibliothek"
+                state["skipped_lib"] = state.get("skipped_lib", 0) + 1
+                continue
+            todo.append(entry)
 
         async def _batch(batch: list[dict], n: int):
             if not batch or hdr not in _state["downloads"]:
@@ -6738,7 +6941,16 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
         ok_n = state["done"] - len(fehl)
         hdr["status"] = "done"; hdr["progress"] = 100
         hdr["failed_n"] = len(fehl)
-        hdr["status_text"] = (f"✓ {ok_n} Tracks" + (f" · {ersetzt} ersetzt" if ersetzt else "")
+        if follow is not None:
+            # Alles ausser Fehlgeschlagenem gilt als verarbeitet
+            fehl_urls = {d.get("url") for d in fehl}
+            follow["_seen_add"] = [_vid(e["url"]) for e in _audited_entries
+                                   if _vid(e["url"]) and e["url"] not in fehl_urls]
+            follow["_new_paths"] = list(state["new"])
+        vorhanden = state.get("skipped_lib", 0) + state.get("skipped_dupe", 0)
+        ok_n -= vorhanden
+        hdr["status_text"] = (f"✓ {ok_n} neu" + (f" · {vorhanden} schon da" if vorhanden else "")
+                              + (f" · {ersetzt} ersetzt" if ersetzt else "")
                               + (f" · {len(fehl)} nicht verfügbar" if fehl else ""))
         _dl_procs.pop(session_id, None)
         await push_downloads(force=True)
@@ -7677,11 +7889,21 @@ async def _process_wish(wish: dict):
 remote_app = FastAPI()
 remote_app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+def _off_page(was: str) -> HTMLResponse:
+    return HTMLResponse(
+        "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<title>SynthiMIX</title><body style=\"font-family:system-ui,sans-serif;background:#0b1220;color:#e6edf6;"
+        "display:flex;align-items:center;justify-content:center;min-height:90vh;text-align:center;padding:24px\">"
+        f"<div><h2 style=\"margin:0 0 8px\">{was} ist gerade ausgeschaltet</h2>"
+        "<p style=\"color:#93a4bb\">Der DJ kann sie in SynthiMIX wieder einschalten.</p></div>", status_code=503)
+
 @remote_app.get("/")
 async def remote_index(k: str = ""):
     # Ohne gueltigen Schluessel: freundlich auf die Wunschseite
     if not _remote_key_ok(k):
         return RedirectResponse("/wunsch")
+    if not _remote_services["remote"]:
+        return RedirectResponse("/wunsch") if _remote_services["wishes"] else _off_page("Die Fernbedienung")
     return HTMLResponse(_REMOTE_HTML.replace("__KEY__", _remote_key()))
 
 # Cover werden per ffmpeg aus der Datei geholt — das dauert, also einmal je
@@ -7931,6 +8153,8 @@ conn()
 
 @remote_app.get("/wunsch")
 async def wish_page():
+    if not _remote_services["wishes"]:
+        return _off_page("Die Musikwunsch-Seite")
     return HTMLResponse(_WISH_HTML)
 
 # Wie viele offene Wuensche ein Geraet gleichzeitig haben darf. Ohne Grenze
@@ -7941,7 +8165,11 @@ _WISH_LIMIT_PER_CLIENT = 3
 async def wish_ws(websocket: WebSocket):
     """Bewusst getrennt vom Remote: hier gibt es keine Wiedergabesteuerung."""
     global _wish_counter
+    if not _remote_services["wishes"]:
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
+    _wish_clients.add(websocket)
     who = websocket.client.host if websocket.client else "?"
     try:
         while True:
@@ -8013,6 +8241,8 @@ async def wish_ws(websocket: WebSocket):
                     asyncio.create_task(_enrich_track(lib_entry["path"]))
     except Exception:
         pass
+    finally:
+        _wish_clients.discard(websocket)
 
 def _lib_wish_id(path: str) -> str:
     """Kennung eines Bibliothekstitels fuer die Wunschseite — der Pfad selbst
@@ -8094,7 +8324,7 @@ async def remote_manifest(k: str = ""):
 
 @remote_app.websocket("/ws")
 async def remote_ws_endpoint(websocket: WebSocket):
-    if not _remote_key_ok(websocket.query_params.get("k")):
+    if not _remote_key_ok(websocket.query_params.get("k")) or not _remote_services["remote"]:
         await websocket.close(code=1008)
         return
     await websocket.accept()
@@ -8339,11 +8569,7 @@ async def _broadcast_remote_pos():
 async def _start_remote_server(requester: WebSocket):
     global _remote_server
     if _remote_server is not None:
-        ip = _get_local_ip()
-        await requester.send_text(json.dumps({
-            "type": "remote_status", "running": True,
-            "ip": ip, "port": _remote_port, **_remote_urls(ip)
-        }))
+        await broadcast(_remote_status_msg())
         return
     try:
         ip = _get_local_ip()
@@ -8363,7 +8589,7 @@ async def _start_remote_server(requester: WebSocket):
                 if _remote_server is server:
                     _remote_server = None
                     try:
-                        await broadcast({"type": "remote_status", "running": False})
+                        await broadcast(_remote_status_msg())
                     except Exception:
                         pass
 
@@ -8373,18 +8599,17 @@ async def _start_remote_server(requester: WebSocket):
         if _remote_server is None:
             # Startup fehlgeschlagen (z.B. Port belegt)
             try:
-                await requester.send_text(json.dumps({"type": "remote_status", "running": False, "error": f"Port {_remote_port} nicht verfügbar"}))
+                await requester.send_text(json.dumps(_remote_status_msg(error=f"Port {_remote_port} nicht verfügbar")))
             except Exception:
                 pass
             return
         print(f"[remote] gestartet auf http://{ip}:{_remote_port}", flush=True)
-        await broadcast({"type": "remote_status", "running": True,
-                         "ip": ip, "port": _remote_port, **_remote_urls(ip)})
+        await broadcast(_remote_status_msg())
     except Exception as e:
         print(f"[remote] Fehler beim Starten: {e}", flush=True)
         _remote_server = None
         try:
-            await requester.send_text(json.dumps({"type": "remote_status", "running": False, "error": str(e)}))
+            await requester.send_text(json.dumps(_remote_status_msg(error=str(e))))
         except Exception:
             pass
 

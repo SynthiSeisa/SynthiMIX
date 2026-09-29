@@ -88,6 +88,9 @@ const ICONS = [
   ['trending-up',     'outline'],
   ['copy-check',      'outline'],
   ['copy-off',        'outline'],
+  // 29.09.2026: Playlist verfolgen
+  ['bookmark',        'outline'],
+  ['bookmark-filled', 'filled'],
 ]
 
 function maskUrl(name, variant) {
