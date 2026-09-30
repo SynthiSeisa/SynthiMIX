@@ -1,18 +1,16 @@
 <script>
   import { onMount, untrack, tick } from 'svelte'
-  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected, qualityScan, revealPath, excludedFolders, watchedFolders, downloadDir } from '../stores/ws.js'
+  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected, qualityScan, revealPath, excludedFolders, watchedFolders, downloadDir, startQualityBatch } from '../stores/ws.js'
   import BetterVersionDialog from './BetterVersionDialog.svelte'
   import { keySortValue } from '../lib/keys.js'
   import KeyChip from './KeyChip.svelte'
   import { density } from '../lib/prefs.js'
   import DuplicateScanDialog from './DuplicateScanDialog.svelte'
   import GenreDialog from './GenreDialog.svelte'
-  import QualityBatchDialog from './QualityBatchDialog.svelte'
   import TitleDialog from './TitleDialog.svelte'
 
   let showDupeScan     = $state(false)
   let showGenres       = $state(false)
-  let batchPaths       = $state(null)    // Sammel-Ersetzen: Liste der Pfade
   let titlePaths       = $state(undefined) // Titel aufraeumen: null = alle, Liste = Auswahl
   let fpPaths          = $state(null)      // Fingerprint-Erkennung fuer mehrere Titel
   let showPlDupeScan   = $state(false)
@@ -1187,6 +1185,27 @@
   // Scroll sync: header follows rows horizontally
   let _colHeaderEl = $state(null)
   let _rowsEl      = $state(null)
+  // Titel-Spalte nimmt freien Platz rechts mit (sonst schnitt sie bei 220 px
+  // ab, waehrend daneben Platz leer blieb). Zusatzbreite nur fuer die Anzeige,
+  // die eingestellte Spaltenbreite bleibt.
+  let titleExtra = $state(0)
+  function fitTitle() {
+    if (!_colHeaderEl || !_rowsEl) return
+    if (!cols.some(c => c.key === 'title')) { if (titleExtra) titleExtra = 0; return }
+    let sum = 0
+    for (const ch of _colHeaderEl.children) sum += ch.offsetWidth
+    const natural = sum - titleExtra
+    const avail = Math.min(_rowsEl.clientWidth, _colHeaderEl.clientWidth)
+    const ex = Math.max(0, Math.floor(avail - natural))
+    if (ex !== titleExtra) titleExtra = ex
+  }
+  $effect(() => {
+    if (!_rowsEl || !_colHeaderEl) return
+    const ro = new ResizeObserver(() => fitTitle())
+    ro.observe(_rowsEl); ro.observe(_colHeaderEl)
+    return () => ro.disconnect()
+  })
+  $effect(() => { void cols; void JSON.stringify(colWidths); void navMode; tick().then(fitTitle) })
   function onRowsScroll() { if (_colHeaderEl && _rowsEl) _colHeaderEl.scrollLeft = _rowsEl.scrollLeft; qTip = null }
 
   // Hinweis zum Warnzeichen: frei schwebend, damit ihn Tabellenrand und
@@ -2032,7 +2051,7 @@
           {/if}
         </div>
         {#if qualityFilter !== 'ignored' && filtered.length}
-          <button class="btn btn-sm btn-primary" onclick={() => batchPaths = (selected.size ? filtered.filter(t => selected.has(t.path)) : filtered).map(t => t.path)}
+          <button class="btn btn-sm btn-primary" onclick={() => startQualityBatch((selected.size ? filtered.filter(t => selected.has(t.path)) : filtered).map(t => t.path))}
                   title="Für jeden Titel automatisch die beste Version suchen, Liste prüfen, dann gesammelt ersetzen">
             <i class="ti ti-list-check"></i> {selected.size ? `${selected.size} markierte` : `Alle ${filtered.length}`} automatisch ersetzen…
           </button>
@@ -2079,7 +2098,7 @@
       <div class="sel-bar">
         <span class="sel-count">{selected.size} ausgewählt</span>
         {#if navMode === 'quality'}
-          <button class="btn btn-sm btn-primary" onclick={() => batchPaths = [...selected]}><i class="ti ti-list-check"></i> Bessere Versionen suchen ({selected.size})</button>
+          <button class="btn btn-sm btn-primary" onclick={() => startQualityBatch([...selected])}><i class="ti ti-list-check"></i> Bessere Versionen suchen ({selected.size})</button>
         {/if}
       </div>
     {/if}
@@ -2099,7 +2118,7 @@
         {#each cols as col, ci}
           <button
             class="col-btn {ci === 0 ? 'col-first' : ''} {sortCol === col.key && sortShown ? 'sort-active' : ''}"
-            style="width:{colWidths[col.key]}px;flex-shrink:0;{ci === 0 ? 'text-align:left' : ''};position:relative"
+            style="width:{colWidths[col.key] + (col.key === 'title' ? titleExtra : 0)}px;flex-shrink:0;{ci === 0 ? 'text-align:left' : ''};position:relative"
             draggable="true"
             ondragstart={(e) => onColDragStart(e, col.key)}
             ondragover={(e) => onColDragOver(e, col.key)}
@@ -2210,7 +2229,7 @@
                 {/if}
                 {#each cols as col}
                   {#if col.key === 'title'}
-                    <span class="cell c-title" style="width:{colWidths.title}px" title={track.title}>
+                    <span class="cell c-title" style="width:{colWidths.title + titleExtra}px" title={track.title}>
                       <span class="c-title-text">{at.title}</span>
                       {#if (track.play_count ?? 0) > 0}<span class="pc-badge">×{track.play_count}</span>{/if}
                     </span>
@@ -2302,9 +2321,6 @@
   </div>
 {/if}
 
-{#if batchPaths}
-  <QualityBatchDialog paths={batchPaths} onclose={() => batchPaths = null} />
-{/if}
 
 {#if showGenres}
   <GenreDialog onclose={() => showGenres = false} />
@@ -2453,7 +2469,11 @@
     {:else if $acoustidApiKey}
       <button onclick={() => identifyTrack(ctxMenu.track)}>Fingerprint-Erkennung (AcoustID)</button>
     {/if}
-    <button onclick={() => openBetterVersion(ctxMenu.track)}>Bessere Version suchen</button>
+    {#if selected.size > 1 && selected.has(ctxMenu.track.path)}
+      <button onclick={() => { startQualityBatch([...selected]); closeCtx() }}>{selected.size} Titel: bessere Versionen suchen…</button>
+    {:else}
+      <button onclick={() => openBetterVersion(ctxMenu.track)}>Bessere Version suchen</button>
+    {/if}
     <button onclick={() => openMetaEdit(ctxMenu.track)}>Metadaten bearbeiten</button>
     <button onclick={() => { titlePaths = selected.size > 1 && selected.has(ctxMenu.track.path) ? [...selected] : [ctxMenu.track.path]; closeCtx() }}>
       {selected.size > 1 && selected.has(ctxMenu.track.path) ? `${selected.size} Titel` : 'Titel'} aufräumen…</button>

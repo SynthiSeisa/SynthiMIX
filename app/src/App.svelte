@@ -4,6 +4,7 @@
   import { connected, playerState, queue, send, settingsOpen, setupOpen, appSettings, library, watchedFolders } from './stores/ws.js'
   import SetupWizard from './components/SetupWizard.svelte'
   import WishToast from './components/WishToast.svelte'
+  import QualityBatchDialog from './components/QualityBatchDialog.svelte'
 
   // Einrichtung beim ersten Start: nach dem Verbinden kurz warten, bis
   // Bibliothek und Ordner da sind — wer schon Musik hat, sieht ihn nicht
@@ -207,6 +208,7 @@
   <DupeChoiceDialog />
   {#if $setupOpen}<SetupWizard onclose={() => setupOpen.set(false)} />{/if}
   <WishToast />
+  <QualityBatchDialog />
 </div>
 
 <style>

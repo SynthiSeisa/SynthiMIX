@@ -43,11 +43,23 @@
 
   // ── Dienste: je Dienst eine Karte, aufklappbar ────────────────────────────
   let svcOpen = $state(null)
+  // Nach Updates suchen (nur in der installierten App)
+  let updCheck = $state(null)        // null | 'busy' | { status, version?, message? }
+  async function checkUpdate() {
+    const w = window.electron
+    if (!w?.checkUpdate) { updCheck = { status: 'dev' }; return }
+    updCheck = 'busy'
+    try { updCheck = await w.checkUpdate() } catch (e) { updCheck = { status: 'error', message: String(e) } }
+  }
   function toggleCard(id) { svcOpen = svcOpen === id ? null : id }
   const svcState = $derived.by(() => {
     const t = $servicesTest ?? {}
     const res = (r, fallback) => r ? { cls: r.ok ? 'ok' : 'err', text: r.ok ? 'Verbunden' : 'Fehler' } : fallback
+    const tool = (ver, upd) => !ver ? { cls: 'err', text: 'Fehlt' }
+      : upd?.available ? { cls: 'busy', text: 'Update verfügbar' } : { cls: 'ok', text: 'Bereit' }
     return {
+      ytdlp: $updateProgress && $updateProgress.tool !== 'ffmpeg' ? { cls: 'busy', text: 'Wird aktualisiert…' } : tool($toolsInfo.ytdlp_version, $toolUpdates.ytdlp),
+      ffmpeg: $updateProgress?.tool === 'ffmpeg' ? { cls: 'busy', text: 'Wird aktualisiert…' } : tool($toolsInfo.ffmpeg_version, $toolUpdates.ffmpeg),
       spotify: $spotdlInstalling ? { cls: 'busy', text: 'Wird installiert…' }
         : !$toolsInfo.spotdl_version ? { cls: 'off', text: 'Nicht installiert' }
         : $toolUpdates.spotdl?.available ? { cls: 'busy', text: 'Update verfügbar' }
@@ -103,6 +115,11 @@
   $effect(() => {
     if ($settingsTab) {
       tab = $settingsTab; settingsTab.set(null)
+      // Programme stehen als Karten unter Dienste: die mit dem Update gleich aufklappen
+      if (tab === 'services') {
+        const u = untrack(() => $toolUpdates)
+        svcOpen = u.ytdlp?.available ? 'ytdlp' : u.ffmpeg?.available ? 'ffmpeg' : u.spotdl?.available ? 'spotify' : svcOpen
+      }
       // Kommt man ueber den Update-Punkt am Zahnrad, gleich zum Hinweis scrollen
       setTimeout(() => document.querySelector('.upd-note, [data-upd]')
         ?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 60)
@@ -124,9 +141,9 @@
 
   // Tabs mit offenem Update-Hinweis bekommen einen Punkt
   const tabNotice = $derived({
-    system:   !!($toolUpdates.ytdlp?.available || $toolUpdates.ytdlp_updated || $toolUpdates.spotdl_updated
-                  || $toolUpdates.ffmpeg?.available || $toolUpdates.ffmpeg_updated),
-    services: !!$toolUpdates.spotdl?.available,
+    // Programme (yt-dlp, ffmpeg, spotdl) stehen alle unter Dienste
+    services: !!($toolUpdates.ytdlp?.available || $toolUpdates.ytdlp_updated || $toolUpdates.spotdl_updated
+                  || $toolUpdates.ffmpeg?.available || $toolUpdates.ffmpeg_updated || $toolUpdates.spotdl?.available),
   })
   let toolCheckRunning = $state(false)
   function checkToolUpdates() {
@@ -433,6 +450,13 @@
                 <span class="val">{$appSettings.targetLUFS} LUFS</span>
               </div>
             {/if}
+            <div class="row">
+              <span class="lbl">Beim Übergang angleichen</span>
+              <button class="tog {$appSettings.cfLoudMatch !== false ? 'on' : ''}"
+                onclick={() => appSettings.update(s => ({...s, cfLoudMatch: s.cfLoudMatch === false}))}
+                title={$appSettings.cfLoudMatch !== false ? 'Aktiv' : 'Inaktiv'}></button>
+            </div>
+            <div class="hint">Gemessen wird der Hauptteil eines Titels (Drops, Refrains), nicht der ganze Song — ruhige Intros und Breakdowns ziehen den Wert nicht mehr nach unten. Beim Übergang steigt der neue Titel so laut ein, wie der alte gerade klingt, und gleitet dann auf seinen normalen Pegel.</div>
             <div class="hint">Den Stand im Player („≋ −8.1 → {$appSettings.targetLUFS} LUFS“) blendest du unter Darstellung → Player ein. Auf der Fernbedienung lässt sich die Angleichung weiter schalten.</div>
           </div>
 
@@ -654,6 +678,36 @@
             {#if !$appSettings.beatAlignCf}<div class="hint keep warn">Braucht „Schläge übereinanderlegen“ (Auf den Takt).</div>{/if}
           </div>
 
+          <div class="group">
+            <div class="group-title">DJ-Modus</div>
+            <div class="row">
+              <span class="lbl">Kreative Übergänge</span>
+              <button class="tog {$appSettings.djMode ? 'on' : ''}" aria-label="DJ-Modus"
+                disabled={!$appSettings.beatAlignCf}
+                onclick={() => appSettings.update(s => ({...s, djMode: !s.djMode}))}></button>
+            </div>
+            {#if $appSettings.djMode}
+              <div class="row indent">
+                <span class="lbl">Wie oft</span>
+                <div class="btn-group">
+                  {#each [[0.2, 'Selten'], [0.4, 'Ab und zu'], [0.7, 'Oft'], [1, 'Immer']] as [v, l]}
+                    <button class="btn btn-sm" class:is-active={($appSettings.djAmount ?? 0.4) === v}
+                            onclick={() => appSettings.update(s => ({ ...s, djAmount: v }))}>{l}</button>
+                  {/each}
+                </div>
+              </div>
+              {#each [['doubledrop', 'Double Drop'], ['filter', 'Filter-Übergang'], ['echo', 'Echo-Out'], ['roll', 'Loop-Roll']] as [k, l]}
+                <div class="row indent">
+                  <span class="lbl">{l}</span>
+                  <button class="tog {($appSettings.djTypes ?? {})[k] !== false ? 'on' : ''}" aria-label={l}
+                    onclick={() => appSettings.update(s => ({ ...s, djTypes: { ...(s.djTypes ?? {}), [k]: (s.djTypes ?? {})[k] === false } }))}></button>
+                </div>
+              {/each}
+            {/if}
+            <div class="hint">Nur wenn Tempo und Takt beider Titel passen. Gewählt wird passend zur Situation: Echo-Out, wenn die Tonarten nicht zusammenpassen; Double Drop, wenn in beiden Titeln ein Drop erkannt ist (die Drops fallen genau zusammen, der Bass wird auf dem Drop getauscht); sonst Filter oder Loop-Roll. Beim nächsten Titel im Player steht, was kommt — ein Klick darauf wählt eine andere Art.</div>
+            {#if !$appSettings.beatAlignCf}<div class="hint keep warn">Braucht „Schläge übereinanderlegen“ (Auf den Takt).</div>{/if}
+          </div>
+
         <!-- ── DOWNLOAD ────────────────────────────────────────────────── -->
         {:else if tab === 'download'}
 
@@ -821,8 +875,55 @@
         <!-- ── DIENSTE ─────────────────────────────────────────────────── -->
         {:else if tab === 'services'}
 
-          <div class="svc-intro">Optional — SynthiMIX läuft auch ohne. Jeder Dienst schaltet einzelne Funktionen frei.</div>
+          <div class="svc-intro">yt-dlp und ffmpeg braucht SynthiMIX selbst; die übrigen Dienste sind optional und schalten einzelne Funktionen frei.</div>
           <div class="svc-list">
+
+            <div class="svc" class:open={svcOpen === 'ytdlp'}>
+              <button class="svc-head" onclick={() => toggleCard('ytdlp')} aria-expanded={svcOpen === 'ytdlp'}>
+                <i class="ti ti-download svc-ico" aria-hidden="true"></i>
+                <span class="svc-name">yt-dlp<span class="svc-sub">lädt von YouTube, YouTube Music, SoundCloud …</span></span>
+                <span class="svc-state {svcState.ytdlp.cls}">{svcState.ytdlp.text}</span>
+                <i class="ti ti-chevron-down svc-chev" aria-hidden="true"></i>
+              </button>
+              {#if svcOpen === 'ytdlp'}
+                <div class="svc-body">
+                  <div class="row">
+                    <span class="lbl">Version</span>
+                    <span class="val {$toolsInfo.ytdlp_version ? 'st-ok' : ''}">{$toolsInfo.ytdlp_version ?? '—'}</span>
+                    <button class="btn btn-sm {$toolUpdates.ytdlp?.available ? 'btn-primary' : ''}"
+                            onclick={() => send({ type: 'update_ytdlp' })} disabled={!!$updateProgress}>
+                      <i class="ti ti-refresh"></i> {$toolUpdates.ytdlp?.available ? `Auf ${$toolUpdates.ytdlp.latest} aktualisieren` : 'Aktualisieren'}
+                    </button>
+                  </div>
+                  {#if $updateProgress && $updateProgress.tool !== 'ffmpeg'}<div class="svc-note">{$updateProgress.text}</div>{/if}
+                  <div class="svc-note">YouTube ändert regelmäßig etwas — ältere Versionen scheitern dann mit „403 Forbidden“. Neue Versionen landen im Datenordner und bleiben auch nach einem SynthiMIX-Update erhalten.</div>
+                </div>
+              {/if}
+            </div>
+
+            <div class="svc" class:open={svcOpen === 'ffmpeg'}>
+              <button class="svc-head" onclick={() => toggleCard('ffmpeg')} aria-expanded={svcOpen === 'ffmpeg'}>
+                <i class="ti ti-wave-sine svc-ico" aria-hidden="true"></i>
+                <span class="svc-name">ffmpeg<span class="svc-sub">Umwandeln, Lautheit, Waveform, Analyse</span></span>
+                <span class="svc-state {svcState.ffmpeg.cls}">{svcState.ffmpeg.text}</span>
+                <i class="ti ti-chevron-down svc-chev" aria-hidden="true"></i>
+              </button>
+              {#if svcOpen === 'ffmpeg'}
+                <div class="svc-body">
+                  <div class="row">
+                    <span class="lbl">Version</span>
+                    <span class="val {$toolsInfo.ffmpeg_version ? 'st-ok' : ''}" title={$toolsInfo.ffmpeg_version ?? ''}>{fmtFfmpeg($toolsInfo.ffmpeg_version) || '—'}</span>
+                    <button class="btn btn-sm {$toolUpdates.ffmpeg?.available ? 'btn-primary' : ''}"
+                            onclick={() => send({ type: 'update_ffmpeg' })} disabled={!!$updateProgress}
+                            title="Lädt den neuesten Build (BtbN, ca. 100–200 MB) und schaltet erst um, wenn er läuft">
+                      <i class="ti ti-refresh"></i> {$toolUpdates.ffmpeg?.available ? `Build vom ${fmtBuild($toolUpdates.ffmpeg.latest)} laden` : 'Aktualisieren'}
+                    </button>
+                  </div>
+                  {#if $updateProgress?.tool === 'ffmpeg'}<div class="svc-note">{$updateProgress.text}</div>{/if}
+                  <div class="svc-note">Mitgeliefert mit SynthiMIX. Neue Builds kommen in den Datenordner (tools/) und werden nur benutzt, wenn sie starten.</div>
+                </div>
+              {/if}
+            </div>
 
             <div class="svc" class:open={svcOpen === 'spotify'}>
               <button class="svc-head" onclick={() => toggleCard('spotify')} aria-expanded={svcOpen === 'spotify'}>
@@ -925,6 +1026,31 @@
                 </div>
               {/if}
             </div>
+          </div>
+
+          <div class="group svc-auto">
+            {#if $toolUpdates.ytdlp_updated || $toolUpdates.spotdl_updated || $toolUpdates.ffmpeg_updated}
+              <div class="notice ok upd-note">
+                Automatisch aktualisiert:
+                {[$toolUpdates.ytdlp_updated && `yt-dlp ${$toolUpdates.ytdlp_updated.from} → ${$toolUpdates.ytdlp_updated.to}`,
+                  $toolUpdates.spotdl_updated && `spotdl ${$toolUpdates.spotdl_updated.from} → ${$toolUpdates.spotdl_updated.to}`,
+                  $toolUpdates.ffmpeg_updated && `ffmpeg ${fmtBuild($toolUpdates.ffmpeg_updated.from)} → ${fmtBuild($toolUpdates.ffmpeg_updated.to)}`]
+                  .filter(Boolean).join(' · ')}
+                <button class="btn btn-sm" onclick={() => send({ type: 'dismiss_ytdlp_updated' })}>OK</button>
+              </div>
+            {/if}
+            <div class="row">
+              <span class="lbl">Programme automatisch aktuell halten</span>
+              <button class="tog {$ytdlpAutoupdate ? 'on' : ''}" aria-label="Programme automatisch aktuell halten"
+                onclick={() => send({ type: 'set_ytdlp_autoupdate', value: !$ytdlpAutoupdate })}></button>
+            </div>
+            <div class="row">
+              <span class="lbl">Nach neuen Versionen suchen</span>
+              <button class="btn btn-sm" onclick={checkToolUpdates} disabled={toolCheckRunning}>
+                <i class="ti ti-refresh" class:spin={toolCheckRunning}></i> {toolCheckRunning ? 'Prüfe…' : 'Jetzt prüfen'}
+              </button>
+            </div>
+            <div class="hint">yt-dlp und spotdl werden täglich geprüft und ersetzt, sobald kein Download läuft; ffmpeg wöchentlich, neu geladen erst, wenn der eigene Build älter als zwei Monate ist. Ohne Automatik gibt es einen Hinweis (Punkt am Zahnrad). Ein selbst installiertes spotdl bleibt unangetastet.</div>
           </div>
 
         <!-- ── DARSTELLUNG ─────────────────────────────────────────────── -->
@@ -1075,68 +1201,6 @@
             </div>
           </div>
 
-          <div class="group">
-            <div class="group-title">Tools</div>
-
-            <div class="tool-row">
-              <span class="tool-name">yt-dlp</span>
-              <span class="tool-ver">{$toolsInfo.ytdlp_version ?? '—'}</span>
-              <button class="btn btn-sm"
-                onclick={() => send({ type: 'update_ytdlp' })}
-                disabled={!!$updateProgress}>
-                <i class="ti ti-refresh"></i> Aktualisieren
-              </button>
-            </div>
-            {#if $toolUpdates.ytdlp?.available}
-              <div class="notice upd-note">
-                Neue Version {$toolUpdates.ytdlp.latest} verfügbar{$ytdlpAutoupdate ? ' — wird installiert, sobald kein Download läuft' : ''}.
-                Ältere Versionen scheitern bei YouTube früher oder später mit „403 Forbidden".
-              </div>
-            {/if}
-
-            <div class="tool-row">
-              <span class="tool-name">ffmpeg</span>
-              <span class="tool-ver" title={$toolsInfo.ffmpeg_version ?? ''}>{fmtFfmpeg($toolsInfo.ffmpeg_version)}</span>
-            </div>
-            {#if $toolUpdates.ffmpeg?.available}
-              <div class="notice upd-note">
-                Neuerer ffmpeg-Build vom {fmtBuild($toolUpdates.ffmpeg.latest)}{$ytdlpAutoupdate ? ' — wird automatisch geladen (ca. 200 MB)' : ' verfügbar'}.
-              </div>
-            {/if}
-
-            {#if $toolUpdates.ytdlp_updated || $toolUpdates.spotdl_updated || $toolUpdates.ffmpeg_updated}
-              <div class="notice ok upd-note">
-                Automatisch aktualisiert:
-                {[$toolUpdates.ytdlp_updated && `yt-dlp ${$toolUpdates.ytdlp_updated.from} → ${$toolUpdates.ytdlp_updated.to}`,
-                  $toolUpdates.spotdl_updated && `spotdl ${$toolUpdates.spotdl_updated.from} → ${$toolUpdates.spotdl_updated.to}`,
-                  $toolUpdates.ffmpeg_updated && `ffmpeg ${fmtBuild($toolUpdates.ffmpeg_updated.from)} → ${fmtBuild($toolUpdates.ffmpeg_updated.to)}`]
-                  .filter(Boolean).join(' · ')}
-                <button class="btn btn-sm" onclick={() => send({ type: 'dismiss_ytdlp_updated' })}>OK</button>
-              </div>
-            {/if}
-            <div class="row">
-              <span class="lbl">Werkzeuge automatisch aktuell halten</span>
-              <button class="tog {$ytdlpAutoupdate ? 'on' : ''}"
-                onclick={() => send({ type: 'set_ytdlp_autoupdate', value: !$ytdlpAutoupdate })}></button>
-            </div>
-            <div class="hint">
-              yt-dlp und spotdl werden täglich geprüft und ersetzt, sobald kein Download läuft —
-              YouTube ändert regelmäßig etwas, wodurch ältere Versionen mit „403 Forbidden" abbrechen.
-              ffmpeg wird wöchentlich geprüft und erst neu geladen, wenn der eigene Build mehr als
-              zwei Monate alt ist (das Paket ist groß). Ohne Automatik gibt es stattdessen einen
-              Hinweis (Punkt am Zahnrad). Ein selbst installiertes spotdl bleibt unangetastet.
-            </div>
-            <div class="row">
-              <span class="lbl">Auf Updates prüfen</span>
-              <button class="btn btn-sm" onclick={checkToolUpdates} disabled={toolCheckRunning}>
-                {toolCheckRunning ? 'Prüfe…' : 'Jetzt prüfen'}
-              </button>
-            </div>
-            {#if $updateProgress}
-              <div class="upd-status">{$updateProgress.text}</div>
-            {/if}
-          </div>
-
         <!-- ── REMOTE ─────────────────────────────────────────────────── -->
         {:else if tab === 'remote'}
 
@@ -1220,6 +1284,28 @@
         {:else if tab === 'info'}
 
           {#snippet inline(text)}{#each splitBold(text) as [b, part]}{#if b}<b>{part}</b>{:else}{part}{/if}{/each}{/snippet}
+          <div class="group">
+            <div class="group-title">Updates</div>
+            <div class="row">
+              <span class="lbl">SynthiMIX v{APP_VERSION}</span>
+              <button class="btn btn-sm" onclick={checkUpdate} disabled={updCheck === 'busy'}>
+                <i class="ti ti-refresh" class:spin={updCheck === 'busy'}></i> Nach Updates suchen
+              </button>
+            </div>
+            {#if updCheck && updCheck !== 'busy'}
+              {#if updCheck.status === 'available'}
+                <div class="hint keep">v{updCheck.version} ist da — das Update-Fenster oben zeigt, was neu ist. Herunterladen läuft im Hintergrund, installiert wird auf Knopfdruck oder beim nächsten Beenden.</div>
+              {:else if updCheck.status === 'none'}
+                <div class="hint keep">Du hast die neueste Version.</div>
+              {:else if updCheck.status === 'dev'}
+                <div class="hint keep">Nur in der installierten App.</div>
+              {:else}
+                <div class="hint keep warn">Prüfen ging nicht: {updCheck.message}</div>
+              {/if}
+            {/if}
+            <div class="hint">Geprüft wird auch von selbst: beim Start und alle 6 Stunden.</div>
+          </div>
+
           <div class="group">
             <div class="group-title">Was ist neu</div>
             {#if $changelog === null}
@@ -1362,6 +1448,7 @@
   .lbl.ellip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row select.field { width: 280px; flex-shrink: 0; }
   /* ── Dienste als Karten ─────────────────────────────────────────────── */
+  .svc-auto { margin-top: var(--sp-4); }
   .svc-intro { font-size: var(--fs-sm); color: var(--c-tx3); margin-bottom: var(--sp-3); }
   .svc-list { display: flex; flex-direction: column; gap: var(--sp-2); }
   .svc { border: 1px solid var(--c-br1); border-radius: var(--r-m); background: var(--c-bg2); }
@@ -1441,11 +1528,7 @@
   .wf-confirm { font-size: var(--fs-sm); color: var(--c-tx2); }
 
   /* Tools */
-  .tool-row { display: flex; align-items: center; gap: var(--sp-3); min-height: var(--btn-h); }
-  .tool-name { width: 72px; font-size: var(--fs-body); font-weight: 600; color: var(--c-tx1); }
-  .tool-ver { flex: 1; font-family: Consolas, 'Cascadia Mono', monospace; font-size: var(--fs-sm); color: var(--c-tx3); }
   .upd-note { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
-  .upd-status { font-size: var(--fs-sm); color: var(--c-accent-tx); }
 
   /* Darstellung */
   .key-samples { display: flex; gap: var(--sp-2); flex-wrap: wrap; font-size: var(--fs-body); }

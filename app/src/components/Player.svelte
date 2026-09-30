@@ -6,6 +6,8 @@
   import { library, playerState, nowPlaying, queue, waveform, waveformNext, settings, playMode, send, autoMixEnabled, appSettings, introSkipPaths, skipNextCrossfade, livePositionMs, beatGrids, waveformThird, mixNowRequest, requestWaveform } from '../stores/ws.js'
   import { createSync, glideRate, barAlignedStart, snapToPhrase, swapEligible, bassSwapPlan, meetRate, barLen, tempoMatch } from '../lib/beatsync.js'
   import Waveform from './Waveform.svelte'
+  import { detectDrops, doubleDropPlan, chooseTransition, rollSteps, DJ_LABEL } from '../lib/djmode.js'
+  import { loadRoller, makeRoller } from '../lib/roller.js'
 
   let elA = $state(null)
   let elB = $state(null)
@@ -91,6 +93,36 @@
 
   let audioCtx = null
   let gainA = null, gainB = null
+  // Angleichen beim Uebergang: der neue Titel steigt so laut ein, wie der
+  // alte gerade klingt, und gleitet bis zum Ende des Uebergangs auf seinen
+  // normalen Pegel (hinter der Normalisierung, eigener Knoten je Deck)
+  let matchA = null, matchB = null
+  function matchOf(el) { return el === elA ? matchA : el === elB ? matchB : null }
+  function _setMatch(el, db, tc = 0.05) {
+    const m = matchOf(el)
+    if (!m || !audioCtx) return
+    m.gain.setTargetAtTime(Math.pow(10, db / 20), audioCtx.currentTime, tc)
+  }
+  // DJ-Modus: Filter (Biquad), Loop-Roll (AudioWorklet) und Echo je Deck.
+  // Kette: Quelle → Bass-EQ → Filter → Roll → Normalisierung → Angleich → Limiter,
+  // Echo zweigt hinter der Normalisierung ab (klingt nach, wenn das Deck stumm ist).
+  let fxA = null, fxB = null, rollA = null, rollB = null, sendA = null, sendB = null
+  let echoDelay = null, echoFb = null
+  let rollerOk = $state(false)
+  function fxOf(el)   { return el === elA ? fxA : el === elB ? fxB : null }
+  function rollOf(el) { return el === elA ? rollA : el === elB ? rollB : null }
+  function sendOf(el) { return el === elA ? sendA : el === elB ? sendB : null }
+  function _resetFx(el) {
+    const f = fxOf(el), sd = sendOf(el)
+    if (!audioCtx) return
+    const now = audioCtx.currentTime
+    if (f) { f.frequency.cancelScheduledValues(now); f.type = 'lowpass'; f.frequency.setValueAtTime(22000, now) }
+    if (sd) { sd.gain.cancelScheduledValues(now); sd.gain.setValueAtTime(0, now) }
+    rollOf(el)?.port.postMessage(null)
+  }
+  function _resetMatch() {
+    for (const m of [matchA, matchB]) if (m && audioCtx) { m.gain.cancelScheduledValues(audioCtx.currentTime); m.gain.setTargetAtTime(1, audioCtx.currentTime, 0.05) }
+  }
   // Bass je Deck (Low-Shelf vor der Lautstaerke): beim Uebergang laeuft der
   // neue Titel erst ohne Bass mit, in der Mitte wird der Bass weich getauscht
   // — so wummern nie zwei Bassdrums uebereinander.
@@ -106,7 +138,7 @@
     eq.gain.setValueAtTime(eq.gain.value, now)
     eq.gain.linearRampToValueAtTime(0, now + sec)
   }
-  function resetAllBass() { resetBass(elA); resetBass(elB); bassSwapOn = false }
+  function resetAllBass() { resetBass(elA); resetBass(elB); bassSwapOn = false; _resetMatch(); _resetFx(elA); _resetFx(elB) }
   /** Bass-Tausch fuer einen Uebergang einplanen; false = normaler Blend. */
   function planBassSwap(oldEl, newEl, gOld, gNew, fadeSec) {
     const cfg = get(appSettings)
@@ -179,11 +211,33 @@
       limiter.threshold.value = -1.5; limiter.knee.value = 0; limiter.ratio.value = 20
       limiter.attack.value = 0.002;   limiter.release.value = 0.15
       limiter.connect(audioCtx.destination)
-      gainA = audioCtx.createGain(); gainA.connect(limiter)
-      gainB = audioCtx.createGain(); gainB.connect(limiter)
+      matchA = audioCtx.createGain(); matchA.connect(limiter)
+      matchB = audioCtx.createGain(); matchB.connect(limiter)
+      gainA = audioCtx.createGain(); gainA.connect(matchA)
+      gainB = audioCtx.createGain(); gainB.connect(matchB)
       const shelf = () => { const f = audioCtx.createBiquadFilter(); f.type = 'lowshelf'; f.frequency.value = 200; f.gain.value = 0; return f }
-      eqA = shelf(); eqA.connect(gainA)
-      eqB = shelf(); eqB.connect(gainB)
+      const neutral = () => { const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 22000; f.Q.value = 0.7; return f }
+      fxA = neutral(); fxA.connect(gainA)
+      fxB = neutral(); fxB.connect(gainB)
+      eqA = shelf(); eqA.connect(fxA)
+      eqB = shelf(); eqB.connect(fxB)
+      // Echo: eine Verzoegerung mit Rueckkopplung fuer beide Decks
+      echoDelay = audioCtx.createDelay(4); echoFb = audioCtx.createGain(); echoFb.gain.value = 0.5
+      const echoHp = audioCtx.createBiquadFilter(); echoHp.type = 'highpass'; echoHp.frequency.value = 250
+      echoDelay.connect(echoFb); echoFb.connect(echoDelay); echoDelay.connect(echoHp); echoHp.connect(limiter)
+      sendA = audioCtx.createGain(); sendA.gain.value = 0; gainA.connect(sendA); sendA.connect(echoDelay)
+      sendB = audioCtx.createGain(); sendB.gain.value = 0; gainB.connect(sendB); sendB.connect(echoDelay)
+      // Loop-Roll: Worklet laedt nebenher und wird dann zwischen Filter und Pegel gehaengt
+      const ctx = audioCtx
+      loadRoller(ctx).then(ok => {
+        if (!ok || ctx !== audioCtx) return
+        try {
+          rollA = makeRoller(ctx); rollB = makeRoller(ctx)
+          fxA.disconnect(); fxA.connect(rollA); rollA.connect(gainA)
+          fxB.disconnect(); fxB.connect(rollB); rollB.connect(gainB)
+          rollerOk = true
+        } catch (e) { console.warn('Loop-Roll:', e) }
+      })
       audioCtx.createMediaElementSource(elA).connect(eqA)
       audioCtx.createMediaElementSource(elB).connect(eqB)
       untrack(() => applySink())
@@ -269,7 +323,8 @@
   })
 
   $effect(() => {
-    const lufs = $nowPlaying?.lufs
+    const np = $nowPlaying
+    const lufs = lufsOf(np)
     if (!lufs || lufs <= -90) return
     // untrack: don't re-run when 'which' flips — during _finishCrossfade the deck
     // swaps before the backend sends now_playing, so cur() would point to the new
@@ -284,7 +339,7 @@
   $effect(() => {
     const idx  = cfNextIdx
     if (idx < 0) return
-    const lufs = $queue[idx]?.lufs
+    const lufs = lufsOf($queue[idx])
     if (!lufs || lufs <= -90) return
     const a = alt()
     if (a) setElLufs(a, lufs)
@@ -304,6 +359,37 @@
     if (!ms || ms < 0) return '0:00'
     const s = Math.floor(ms / 1000)
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2,'0')}`
+  }
+
+  // Lautheit des Hauptteils (Bibliothek) vor dem Wert ueber den ganzen Titel
+  const mainByPath = $derived(new Map($library.filter(t => t.lufs_main != null).map(t => [t.path, t.lufs_main])))
+  function lufsOf(t) {
+    if (!t) return -99
+    const m = untrack(() => mainByPath).get(t.path)
+    return m ?? t.lufs ?? -99
+  }
+
+  // Pegel einer Stelle der Waveform (Energie-Mittel, dB) und des Hauptteils
+  function _wfDb(wf, a, b) {
+    const n = wf.length, i0 = Math.max(0, Math.floor(a * n)), i1 = Math.min(n, Math.ceil(b * n))
+    if (i1 - i0 < 3) return null
+    let e = 0
+    for (let i = i0; i < i1; i++) e += wf[i] * wf[i]
+    return 10 * Math.log10(e / (i1 - i0) + 1e-9)
+  }
+  function _wfMainDb(wf) {
+    const v = [...wf].sort((x, y) => x - y).slice(Math.floor(wf.length / 2))
+    let e = 0
+    for (const x of v) e += x * x
+    return 10 * Math.log10(e / Math.max(1, v.length) + 1e-9)
+  }
+  /** Wie viel dB der neue Titel beim Einstieg angehoben/abgesenkt wird (±4). */
+  function _blendMatchDb(wfO, wfI, o0, oLen, i0, iLen) {
+    if (!wfO?.length || !wfI?.length || !(oLen > 0) || !(iLen > 0)) return 0
+    const lo = _wfDb(wfO, o0, o0 + oLen), li = _wfDb(wfI, i0, i0 + iLen)
+    if (lo == null || li == null) return 0
+    const d = (lo - _wfMainDb(wfO)) - (li - _wfMainDb(wfI))
+    return Math.max(-4, Math.min(4, Math.round(d * 10) / 10))
   }
 
   function normFactor(lufs) {
@@ -493,7 +579,7 @@
 
   // Outro grey "mix" bar on the current track: [trigger, trigger + crossfade]
   // Die Zone steht immer da (auch ohne Smart Fade), damit man sie ziehen kann
-  const outroBarStart = $derived.by(() => {
+  const _baseOutroStart = $derived.by(() => {
     if (durMs <= 0 || cfEff <= 0) return -1
     void $waveform; void $appSettings.outroAggressiveness; void $appSettings.smartFade
     void outroOverride; void $nowPlaying?.path; void $beatGrids
@@ -501,9 +587,10 @@
     const trig = _outroTrigger()
     return trig < 0 ? trig : Math.max(0, _snapTriggerMs(trig * durMs) / durMs)
   })
-  const outroBarEnd = $derived(
-    outroBarStart >= 0 ? Math.min(1, outroBarStart + _cfFrac) : -1
-  )
+  // Mit DJ-Modus zeigt die Zone, wo der kreative Uebergang wirklich liegt
+  const outroBarStart = $derived(djPlan?.zoneOut ? djPlan.zoneOut[0] : _baseOutroStart)
+  const outroBarEnd = $derived(djPlan?.zoneOut ? djPlan.zoneOut[1]
+    : _baseOutroStart >= 0 ? Math.min(1, _baseOutroStart + _cfFrac) : -1)
 
   // ── Welcher Titel kommt als naechstes ─────────────────────────────────────
   // Eine Stelle fuer Anzeige, Vorbereitung und tatsaechliches Abspielen.
@@ -584,7 +671,7 @@
   //   START = where track 2 begins playing (seeks to this position)
   //   END   = start + cfEff (bar is always exactly one crossfade wide)
   //   Level 1 (soft) → bar at 0:00; Level 5 (aggressive) → bar before the drop
-  const nextIntroStart = $derived.by(() => {
+  const _baseIntroStart = $derived.by(() => {
     const sf = $appSettings.smartFade
     const ia = $appSettings.introAggressiveness ?? $appSettings.fadeAggressiveness ?? 3
     const wf = $waveformNext
@@ -623,12 +710,86 @@
     const st = Math.max(0, _snapTrigger(trig * dur * 1000, dur * 1000, cf, t.path, ovFrac != null, bpm) / (dur * 1000))
     return [st, Math.min(1, st + cfFrac)]
   }
+  const nextIntroStart = $derived(djPlan?.zoneIn ? djPlan.zoneIn[0] : _baseIntroStart)
   const nextIntroEnd = $derived.by(() => {
+    if (djPlan?.zoneIn) return djPlan.zoneIn[1]
     const nt = nextTrack
     if (!nt || cfEff <= 0) return -1
     const dur = nt.duration_sec || 180
-    return Math.min(0.95, nextIntroStart + cfEff / dur)
+    return Math.min(0.95, _baseIntroStart + cfEff / dur)
   })
+
+  // ── DJ-Modus: Plan fuer den Uebergang zum naechsten Titel ─────────────────
+  const DJ_LEAD = 2                                  // Takte Vorlauf bei Echo/Roll
+  const DJ_TAIL = { echo: 2, roll: 0.5 }             // Takte nach der Grenze
+  let djOverride = $state({})                        // "lauf|naechst" -> Art (von Hand)
+  let _djLastType = $state('blend')
+  let djMenu = $state(null)                          // {x, y} des offenen Menues
+  function toggleDjMenu(e) {
+    e.stopPropagation()
+    if (djMenu) { djMenu = null; return }
+    const r = e.currentTarget.getBoundingClientRect()
+    djMenu = { x: Math.max(8, r.right - 170), y: r.bottom + 4 }
+  }
+  const libByPath = $derived(new Map($library.map(t => [t.path, t])))
+  const curDrops = $derived.by(() => {
+    void $beatGrids
+    const p = $nowPlaying?.path, g = gridOf(p)
+    return p && g && durMs > 0 ? detectDrops($waveform, g, durMs / 1000, libByPath.get(p)?.mik_cues) : []
+  })
+  const nextDrops = $derived.by(() => {
+    void $beatGrids
+    const t = nextTrack, g = gridOf(t?.path)
+    return t && g && t.duration_sec > 0 ? detectDrops($waveformNext, g, t.duration_sec, libByPath.get(t.path)?.mik_cues) : []
+  })
+  const djPlan = $derived.by(() => {
+    const cfg = $appSettings
+    const np = $nowPlaying, nt = nextTrack
+    if (!np?.path || !nt?.path || durMs <= 0 || cfEff <= 0) return null
+    void $beatGrids
+    const gC = gridOf(np.path), gN = gridOf(nt.path)
+    const key = np.path + '|' + nt.path
+    const maxD = (cfg.maxTempoDiff ?? 8) / 100
+    const eligible = !!(cfg.beatAlignCf && gC && gN && gC.conf >= 0.4 && gN.conf >= 0.4 && tempoMatch(gC.bpm, gN.bpm, maxD))
+    const bucket = Math.floor(posMs / 4000)          // nicht bei jedem Bild neu rechnen
+    const nDur = nt.duration_sec || 0
+    const dd = eligible && nDur > 0
+      ? doubleDropPlan({ drops: curDrops, g: gC, dur: durMs / 1000 }, { drops: nextDrops, g: gN, dur: nDur }, maxD, bucket * 4 - 2)      // Start darf nur schon vorbei sein, nicht kurz bevorstehen
+      : null
+    const dragged = outroOverride?.path === np.path || introOverride?.path === nt.path
+    const ddOk = !!dd && !dragged
+    const ov = djOverride[key]
+    let type
+    if (ov) type = ov
+    else if (!cfg.djMode) type = 'blend'
+    else type = chooseTransition({ amount: cfg.djAmount ?? 0.4, types: cfg.djTypes ?? {} },
+      { seed: key, eligible, keyClash: uebergang.level === 'clash', ddPossible: ddOk, lastType: untrack(() => _djLastType) })
+    if (type !== 'blend' && !eligible) type = 'blend'
+    if (type === 'doubledrop' && !ddOk) type = 'blend'
+    if (type === 'roll' && !rollerOk) type = 'echo'
+    const plan = { type, auto: !ov, eligible, ddOk, dd, key }
+    const barC = gC ? barLen(gC) : 0, barN = gN ? barLen(gN) : 0
+    const dC = durMs / 1000
+    if (type === 'doubledrop') {
+      plan.zoneOut = [dd.trig / dC, Math.min(1, (dd.trig + dd.len * barC) / dC)]
+      plan.zoneIn = [dd.intro / nDur, Math.min(0.99, (dd.intro + dd.len * barN) / nDur)]
+    } else if ((type === 'echo' || type === 'roll') && _baseOutroStart >= 0 && nDur > 0) {
+      const B = _baseOutroStart * dC, tail = DJ_TAIL[type]
+      const I = Math.max(_baseIntroStart * nDur, DJ_LEAD * barN)
+      plan.B = B; plan.I = I
+      plan.zoneOut = [Math.max(0, (B - DJ_LEAD * barC) / dC), Math.min(1, (B + tail * barC) / dC)]
+      plan.zoneIn = [(I - DJ_LEAD * barN) / nDur, Math.min(0.99, (I + tail * barN) / nDur)]
+    }
+    return plan
+  })
+  function pickDj(type) {
+    const key = djPlan?.key
+    if (!key) return
+    const o = { ...djOverride }
+    if (type === 'auto') delete o[key]; else o[key] = type
+    djOverride = o
+    djMenu = null
+  }
 
   // Mix-Zonen im Farbband: der naechste Titel zeigt auch schon, wo er
   // ausgemischt wird, der Titel danach (rueckt beim Uebergang nach) beides —
@@ -785,13 +946,13 @@
       cfRafActive = true
       a.playbackRate = 1
       a.src = url; a.dataset.path = track.path; a.volume = 0; a.load(); a.play().catch(() => {})
-      setElLufs(a, track.lufs ?? -99)
+      setElLufs(a, lufsOf(track))
       which = untrack(() => which) === 'A' ? 'B' : 'A'
 
       // LUFS-Angleichung für manuellen Crossfade (Mix Now / load-effect-Weg):
       // setTimeout(0) läuft nach dem Svelte-Microtask für setElLufs,
       // sodass unser Gain-Override den $effect überschreibt.
-      const _mixNextLufs = track.lufs ?? -99
+      const _mixNextLufs = lufsOf(track)
       const _mixCurLufs  = c === elA ? lufsA : lufsB
       const _mixSettings = get(appSettings)
       if (_mixNextLufs > -90 && _mixCurLufs > -90 && !_mixSettings.normalizeVolume) {
@@ -838,7 +999,7 @@
       const el = untrack(cur)
       if (el) {
         el.playbackRate = 1
-        el.src = url; el.dataset.path = track.path; el.volume = v; el.load(); setElLufs(el, track.lufs ?? -99)
+        el.src = url; el.dataset.path = track.path; el.volume = v; el.load(); setElLufs(el, lufsOf(track))
         if (untrack(() => $playerState.playing)) el.play().catch(() => {})
       }
     }
@@ -941,7 +1102,24 @@
 
     const trigFrac = _outroTrigger()
     // Einrasten auf Phrase / Eins / Schlag (siehe _snapTriggerMs)
-    const triggerMs = _snapTriggerMs(trigFrac >= 0 ? trigFrac * durMs : durMs - cfEff * 1000)
+    let triggerMs = _snapTriggerMs(trigFrac >= 0 ? trigFrac * durMs : durMs - cfEff * 1000)
+
+    // DJ-Modus: Double Drop beginnt 16 Takte vor dem Drop, Echo/Roll 2 Takte
+    // vor der Grenze. Liegt der Start schon hinter uns: normaler Uebergang.
+    const q0 = get(queue), n0 = _nextIdx()
+    const plan = djPlan
+    let dj = plan && plan.key === (cur()?.dataset.path || get(nowPlaying)?.path) + '|' + q0[n0]?.path ? plan.type : 'blend'
+    const gCur = gridOf(cur()?.dataset.path || get(nowPlaying)?.path)
+    const barC = gCur ? barLen(gCur) : 0
+    const djB = triggerMs / 1000                      // Grenze fuer Echo/Roll
+    if (dj === 'doubledrop' && plan.dd) {
+      if (pos > plan.dd.trig * 1000 + 1500) dj = 'blend'
+      else triggerMs = plan.dd.trig * 1000
+    } else if ((dj === 'echo' || dj === 'roll') && barC > 0) {
+      const t0 = (djB - DJ_LEAD * barC) * 1000
+      if (t0 < pos - 1500) dj = 'blend'
+      else triggerMs = t0
+    } else if (dj !== 'filter') dj = 'blend'
 
     if (pos < triggerMs - 100 || pos >= durMs - 100) return
 
@@ -950,6 +1128,7 @@
     if (nextIdx < 0 || nextIdx >= q.length) return
     const nextTrk = q[nextIdx]
     if (!nextTrk?.path) return
+    _djLastType = dj
 
     cfActive     = true
     cfNextIdx    = nextIdx
@@ -958,13 +1137,13 @@
     const inactive = alt()
     if (!inactive) { cfActive = false; return }
 
-    setElLufs(inactive, nextTrk.lufs ?? -99)
+    setElLufs(inactive, lufsOf(nextTrk))
 
     // LUFS-Angleichung: eingehendes Deck auf denselben Pegel wie aktives Deck bringen.
     // Wenn normalizeVolume aktiv ist, erledigt das bereits der Gain-$effect.
     // Ohne Normalisierung gleichen wir manuell an – Gain wird im canplay-Handler gesetzt,
     // da der $effect (ausgelöst durch setElLufs oben) zuvor als Microtask abläuft.
-    const _nextLufs = nextTrk.lufs ?? -99
+    const _nextLufs = lufsOf(nextTrk)
     const _curLufs  = which === 'A' ? lufsA : lufsB
     const _cfSettings = get(appSettings)
     let _cfMatchGain = null
@@ -973,8 +1152,12 @@
       _cfMatchGain = Math.pow(10, db / 20)
     }
 
-    const introFrac = _getNextIntroStart()
-    const introDragged = !!(introOverride && introOverride.path === nextTrk.path)
+    const _nd = nextTrk.duration_sec || 0
+    const introFrac = dj === 'doubledrop' && _nd > 0 ? plan.dd.intro / _nd
+      : (dj === 'echo' || dj === 'roll') && plan.zoneIn ? plan.zoneIn[0]
+      : _getNextIntroStart()
+    // DJ-Einstiege liegen schon auf dem Takt des Drops/der Phrase: nicht verschieben
+    const introDragged = !!(introOverride && introOverride.path === nextTrk.path) || (dj !== 'blend' && dj !== 'filter')
 
     inactive.playbackRate = 1
     inactive.src = nextUrl
@@ -1025,12 +1208,67 @@
     }, { once: true })
 
     const remaining = durMs - pos
-    const cfMs = Math.min(cfEff * 1000, remaining)
-    planBassSwap(cur(), inactive, gridOf(curPath), gridOf(nextTrk.path), cfMs / 1000)
+    const rateC = cur()?.playbackRate || 1
+    let cfMs = Math.min(cfEff * 1000, remaining)
+    if (dj === 'doubledrop') cfMs = Math.min(remaining, plan.dd.len * barC * 1000 / rateC)
+    else if (dj === 'echo' || dj === 'roll') cfMs = Math.min(remaining, (DJ_LEAD + DJ_TAIL[dj]) * barC * 1000 / rateC)
+    // Geplante Ereignisse auf der Zeitachse des laufenden Titels: werden erst
+    // kurz vorher auf die Audio-Uhr gelegt (das Tempo gleitet waehrend des
+    // Uebergangs, eine Zeit von jetzt aus waere am Drop schon daneben)
+    const djEvents = []
+    let djEnd = Infinity, djCut = false
+    if (dj === 'doubledrop') {
+      // Neuer Titel ohne Bass bis zum Drop, dort hart tauschen
+      const eo = eqOf(cur()), en = eqOf(inactive), now = audioCtx?.currentTime ?? 0
+      if (eo && en) {
+        eo.gain.cancelScheduledValues(now); en.gain.cancelScheduledValues(now)
+        eo.gain.setValueAtTime(0, now); en.gain.setValueAtTime(BASS_KILL_DB, now)
+        bassSwapOn = true
+        djEvents.push({ at: plan.dd.drop1, fn: (tA) => {
+          eo.gain.setValueAtTime(0, tA); eo.gain.linearRampToValueAtTime(BASS_KILL_DB, tA + 0.03)
+          en.gain.setValueAtTime(BASS_KILL_DB, tA); en.gain.linearRampToValueAtTime(0, tA + 0.03)
+        } })
+      }
+      djEnd = plan.dd.drop1 + plan.dd.post * barC
+    } else if (dj === 'echo' || dj === 'roll') {
+      resetAllBass()
+      const mi = matchOf(inactive), mo = matchOf(cur()), now = audioCtx?.currentTime ?? 0
+      if (mi) { mi.gain.cancelScheduledValues(now); mi.gain.setValueAtTime(0, now) }
+      const beat = barC / 4
+      const oldEl = cur()
+      djEvents.push({ at: djB - (dj === 'roll' ? barC : beat), fn: (tA, rate) => {
+        const beatR = beat / rate, tB = tA + (dj === 'roll' ? 4 : 1) * beatR
+        if (dj === 'echo') {
+          const sd = sendOf(oldEl)
+          echoDelay.delayTime.setValueAtTime(Math.min(3.9, beatR), tA)
+          echoFb.gain.setValueAtTime(0.5, tA)
+          if (sd) { sd.gain.setValueAtTime(1, tA); sd.gain.setValueAtTime(0, tB) }
+        } else {
+          const sr = audioCtx.sampleRate, fr = (x) => Math.round(x * sr)
+          rollOf(oldEl)?.port.postMessage({ start: fr(tA), end: fr(tB),
+            steps: rollSteps(4).map(st => ({ at: fr(tA + st.at * beatR), len: Math.max(64, fr(st.len * beatR)) })) })
+        }
+        // Auf der Grenze: alter Titel aus, neuer Titel voll da
+        if (mo) mo.gain.setTargetAtTime(0, tB, 0.004)
+        if (mi) mi.gain.setTargetAtTime(1, tB - 0.002, 0.003)
+        djCut = true
+      } })
+      djEnd = djB + DJ_TAIL[dj] * barC
+    } else {
+      planBassSwap(cur(), inactive, gridOf(curPath), gridOf(nextTrk.path), cfMs / 1000)
+    }
+    if (dj === 'filter') {
+      const fi = fxOf(inactive), now = audioCtx?.currentTime ?? 0
+      if (fi) { fi.type = 'lowpass'; fi.frequency.cancelScheduledValues(now); fi.frequency.setValueAtTime(200, now) }
+    }
     let elapsed = 0
     const cfCurveSnap = get(appSettings).cfCurve ?? 'cosine'
 
     stopRamp(cur()); stopRamp(inactive)
+    const _nDur = nextTrk.duration_sec || 0
+    const matchDb = dj === 'doubledrop' || dj === 'echo' || dj === 'roll' ? 0
+      : get(appSettings).cfLoudMatch === false || durMs <= 0 || !(_nDur > 0) ? 0
+      : _blendMatchDb(get(waveform), get(waveformNext), pos / durMs, cfMs / durMs, introFrac, cfMs / 1000 / _nDur)
     if (thirdTrack?.path && get(waveformThird).path !== thirdTrack.path)
       requestWaveform('waveform_third', thirdTrack.path)
     cfStartAt = performance.now(); cfLenMs = cfMs; blendNextPos = introFrac
@@ -1041,13 +1279,47 @@
       const active = cur()
       const inact  = alt()
       const v      = volume / 100
-      const [fv, tv] = _fade(t, v, v, cfCurveSnap)
+      let [fv, tv] = _fade(t, v, v, cfCurveSnap)
+      // Faellige Ereignisse (Drop, Echo, Roll) auf die Audio-Uhr legen
+      if (active && audioCtx) for (const e of djEvents) {
+        if (e.done) continue
+        const rate = active.playbackRate || 1
+        const dt = (e.at - active.currentTime) / rate
+        if (dt < 0.35) { e.done = true; e.fn(audioCtx.currentTime + Math.max(0.005, dt), rate) }
+      }
+      let done = t >= 1
+      if (dj === 'doubledrop' && active) {
+        const dd = plan.dd, ct = active.currentTime
+        if (ct < dd.drop1) {
+          // neuer Titel kommt leise dazu (Anlauf), alter bleibt voll
+          const u = Math.max(0, (ct - dd.trig) / (dd.drop1 - dd.trig))
+          fv = v; tv = v * 0.85 * Math.sqrt(Math.min(1, u / 0.5))
+        } else {
+          // Drop: beide zusammen, je ~2 dB leiser (zwei volle Titel addieren
+          // sich), nur der Bass des neuen — dann blendet der alte aus und der
+          // neue kommt wieder auf voll
+          const w = Math.min(1, (ct - dd.drop1) / (dd.post * barC))
+          const DD = 0.79                               // ≈ −2 dB
+          fv = w < 0.5 ? v * DD : v * DD * Math.max(0, 1 - (w - 0.5) / 0.5)
+          tv = v * (w < 0.5 ? DD : DD + (1 - DD) * (w - 0.5) / 0.5)
+        }
+        done = ct >= djEnd || elapsed >= cfMs * 1.15
+      } else if (dj === 'echo' || dj === 'roll') {
+        fv = v; tv = v                                   // geschaltet wird ueber den Angleich-Knoten
+        done = (active && active.currentTime >= djEnd) || elapsed >= cfMs * 1.2
+      } else if (dj === 'filter' && audioCtx) {
+        const now = audioCtx.currentTime, fo = fxOf(active), fi = fxOf(inact)
+        if (fo) { fo.type = 'highpass'; fo.frequency.setTargetAtTime(20 * Math.pow(1200 / 20, Math.max(0, (t - 0.2) / 0.8)), now, 0.05) }
+        if (fi) { fi.type = 'lowpass'; fi.frequency.setTargetAtTime(200 * Math.pow(20000 / 200, Math.min(1, t / 0.7)), now, 0.05) }
+      }
       if (active) active.volume = fv
       if (inact)  inact.volume  = tv
+      // Angleichen: erste 40 % halten, dann auf 0 dB zurueck
+      if (matchDb && inact) _setMatch(inact, t < 0.4 ? matchDb : matchDb * (1 - (t - 0.4) / 0.6))
       // Springen nur, solange der neue Titel noch leise ist
-      cfSync?.tick(t < 0.3, t)
+      cfSync?.tick(dj === 'doubledrop' ? t < 0.08 : (dj === 'echo' || dj === 'roll') ? !djCut : t < 0.3, t)
       if (inact && inact.duration > 0) blendNextPos = inact.currentTime / inact.duration
-      if (t >= 1) {
+      if (done) {
         clearInterval(cfTimer); cfTimer = null
         _finishCrossfade(nextIdx, nextUrl, nextTrk.path)
       }
@@ -1069,6 +1341,7 @@
       if (gn) { gn.gain.cancelScheduledValues(audioCtx?.currentTime ?? 0); gn.gain.value = 1 }
       const eq = eqOf(el)
       if (eq) { eq.gain.cancelScheduledValues(audioCtx?.currentTime ?? 0); eq.gain.value = 0 }
+      _resetFx(el)
     }, 80)
   }
 
@@ -1082,6 +1355,9 @@
     loadedUrl = nextUrl
     if (newEl) { endSync(newEl); resetBass(newEl, 0.08) }
     bassSwapOn = false
+    _resetMatch()
+    if (newEl) _resetFx(newEl)
+    if (oldEl) { const sd = sendOf(oldEl); if (sd && audioCtx) { sd.gain.cancelScheduledValues(audioCtx.currentTime); sd.gain.setValueAtTime(0, audioCtx.currentTime) } }
     blendP = 0; blendNextPos = 0
     _cfDoneAt = performance.now()
     outroOverride = nextOutroOverride?.path === nextPath ? nextOutroOverride : null
@@ -1276,7 +1552,10 @@
       get eqA() { return eqA?.gain.value }, get eqB() { return eqB?.gain.value },
       get bassSwapOn() { return bassSwapOn }, get cfActive() { return cfActive }, get cfS() { return cfS }, get cfEff() { return cfEff },
       get durMs() { return durMs }, get triggerMs() { return outroBarStart >= 0 ? outroBarStart * durMs : -1 },
-      get nextIntroStart() { return nextIntroStart }, get nextOutroZone() { return nextOutroZone }, grid: (p) => gridOf(p),
+      get nextIntroStart() { return nextIntroStart }, get nextOutroZone() { return nextOutroZone },
+      get match() { return [matchA?.gain.value, matchB?.gain.value] },
+      get djPlan() { return djPlan }, get drops() { return [curDrops, nextDrops] }, get rollerOk() { return rollerOk },
+      pickDj: (t) => pickDj(t), get fx() { return [fxA?.type, fxA?.frequency.value, fxB?.type, fxB?.frequency.value] }, lufsOf: (t) => lufsOf(t), grid: (p) => gridOf(p),
       get audioTime() { return audioCtx?.currentTime ?? 0 }, get sinkId() { return audioCtx?.sinkId ?? null },
     }
   }
@@ -1288,6 +1567,22 @@
   let deck2H   = $state(48)
   const WF1_H = 60, WF2_H = 28
 </script>
+
+<svelte:window onclick={() => { if (djMenu) djMenu = null }} onkeydown={(e) => { if (e.key === 'Escape' && djMenu) djMenu = null }} />
+
+<!-- Auswahl des Uebergangs: ganz aussen, sonst schneidet der Deck-Bereich (eigene Ebene fuer die Animation) es ab -->
+{#if djMenu && djPlan}
+  <div class="dj-menu" role="menu" style="left:{djMenu.x}px;top:{djMenu.y}px" onclick={(e) => e.stopPropagation()}>
+    <button role="menuitem" class:sel={djPlan.auto} onclick={() => pickDj('auto')}>Automatisch</button>
+    {#each ['blend', 'filter', 'echo', 'roll', 'doubledrop'] as t}
+      {@const off = t !== 'blend' && (!djPlan.eligible || (t === 'doubledrop' && !djPlan.ddOk) || (t === 'roll' && !rollerOk))}
+      <button role="menuitem" class:sel={!djPlan.auto && djPlan.type === t} disabled={off}
+              title={off ? (t === 'doubledrop' && djPlan.eligible ? 'Keine passenden Drops erkannt' : 'Tempo oder Takt passen nicht') : ''}
+              onclick={() => pickDj(t)}>{DJ_LABEL[t]}</button>
+    {/each}
+  </div>
+{/if}
+
 
 <audio bind:this={elA} ontimeupdate={onTimeUpdate} onloadedmetadata={onLoadedMetadata} onended={onEnded} onerror={onMediaError}></audio>
 <audio bind:this={elB} ontimeupdate={onTimeUpdate} onloadedmetadata={onLoadedMetadata} onended={onEnded} onerror={onMediaError}></audio>
@@ -1327,11 +1622,11 @@
           {:else if $nowPlaying}<span class="bpm-pending">BPM wird gemessen…</span>{/if}
           <!-- LUFS nur auf Wunsch (Einstellungen → Darstellung) -->
           {#if !$appSettings.playerShowLufs}
-          {:else if $nowPlaying?.lufs && $nowPlaying.lufs > -90}
+          {:else if lufsOf($nowPlaying) > -90}
             {#if $appSettings.normalizeVolume}
-              <span class="m-num norm-on" title="Lautstärke-Angleichung an: {$nowPlaying.lufs.toFixed(1)} LUFS wird auf {$appSettings.targetLUFS} LUFS gebracht (Einstellungen → Wiedergabe)"><b>≋</b> {$nowPlaying.lufs.toFixed(1)} → {$appSettings.targetLUFS} LUFS</span>
+              <span class="m-num norm-on" title="Lautstärke-Angleichung an: der Hauptteil ({lufsOf($nowPlaying).toFixed(1)} LUFS) wird auf {$appSettings.targetLUFS} LUFS gebracht (Einstellungen → Wiedergabe)"><b>≋</b> {lufsOf($nowPlaying).toFixed(1)} → {$appSettings.targetLUFS} LUFS</span>
             {:else}
-              <span class="m-num" title="Lautstärke-Angleichung aus (Einstellungen → Wiedergabe)">{$nowPlaying.lufs.toFixed(1)} LUFS</span>
+              <span class="m-num" title="Lautstärke-Angleichung aus (Einstellungen → Wiedergabe)">{lufsOf($nowPlaying).toFixed(1)} LUFS</span>
             {/if}
           {:else if $appSettings.normalizeVolume && $nowPlaying}
             <span class="lufs-warn" title="Keine Lautstärkemessung — Normalisierung nicht aktiv für diesen Track">kein LUFS-Wert</span>
@@ -1357,13 +1652,21 @@
           <div class="deck2" bind:clientHeight={deck2H} style={blendP > 0 ? `transform:translateY(${-blendP * (deck1H + nextBarH + 12)}px)` : ''}>
             <div class="next-bar" bind:clientHeight={nextBarH} style={blendP > 0 ? `opacity:${1 - Math.min(1, blendP * 2)}` : ''}>
               <span class="eyebrow next-label">Nächster</span>
-              <span class="next-title">{nextTrack.title}{nextTrack.artist ? ' · ' + nextTrack.artist : ''}</span>
+              <span class="next-title" title={nextTrack.title + (nextTrack.artist ? ' · ' + nextTrack.artist : '')}>{nextTrack.title}{nextTrack.artist ? ' · ' + nextTrack.artist : ''}</span>
               {#if nextKey}
                 <KeyChip key={nextKey.key} src={nextKey.key_src} compat={uebergang.level === 'unknown' ? null : uebergang} hint="Übergang: " ring boost={!!nextTrack.energy_boost} />
               {/if}
               {#if nextBpm}
                 <span class="next-bpm" class:far={nextTempo && !nextTempo.ok}
                       title={!nextTempo ? 'Tempo des nächsten Titels' : nextTempo.ok ? `Tempo wird im Übergang angeglichen (${nextTempo.pct} %)` : `Mehr als ${nextTempo.lim} % Tempo-Unterschied — der Übergang wird nur geblendet (Einstellungen → Blend)`}>{Math.round(nextBpm)} BPM</span>
+              {/if}
+              {#if $appSettings.djMode && djPlan && blendP === 0}
+                <span class="dj-wrap">
+                  <button class="dj-chip" class:on={djPlan.type !== 'blend'} onclick={toggleDjMenu}
+                          title="Übergang zum nächsten Titel (DJ-Modus) — klicken zum Ändern">
+                    {DJ_LABEL[djPlan.type]}{#if !djPlan.auto}<i class="ti ti-pin" aria-hidden="true"></i>{/if}
+                  </button>
+                </span>
               {/if}
               <span class="next-dur">{fmt(nextTrack.duration_sec * 1000)}</span>
             </div>
@@ -1457,6 +1760,27 @@
   .next-bar { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
   .next-label { flex-shrink: 0; }
   .next-title { flex: 1; min-width: 0; font-size: var(--fs-body); color: var(--c-tx2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dj-wrap { position: relative; flex-shrink: 0; }
+  .dj-chip {
+    display: inline-flex; align-items: center; gap: 3px; height: 20px; padding: 0 7px;
+    border-radius: 10px; border: 1px solid var(--c-br2); background: none; cursor: pointer;
+    font: 600 var(--fs-cap) 'Segoe UI', system-ui, sans-serif; color: var(--c-tx3); white-space: nowrap;
+  }
+  .dj-chip.on { color: var(--c-accent-tx); border-color: color-mix(in srgb, var(--c-accent) 55%, transparent); }
+  .dj-chip:hover { background: var(--c-hover); }
+  .dj-chip .ti { font-size: 11px; }
+  .dj-menu {
+    position: fixed; z-index: 900; width: 170px;
+    display: flex; flex-direction: column; padding: 4px;
+    background: var(--c-bg5); border: 1px solid var(--c-br2); border-radius: var(--r-m); box-shadow: 0 10px 28px rgba(0,0,0,.45);
+  }
+  .dj-menu button {
+    text-align: left; height: 28px; padding: 0 10px; border: none; background: none; border-radius: var(--r-s);
+    font: inherit; font-size: var(--fs-body); color: var(--c-tx2); cursor: pointer;
+  }
+  .dj-menu button:hover:not(:disabled) { background: var(--c-hover); color: var(--c-tx1); }
+  .dj-menu button.sel { color: var(--c-accent-tx); font-weight: 600; }
+  .dj-menu button:disabled { color: var(--c-tx5); cursor: default; }
   .next-bpm { flex-shrink: 0; font-size: var(--fs-sm); color: var(--c-tx2); font-variant-numeric: tabular-nums; }
   .next-bpm.far { color: var(--c-warn-tx); }
   .next-dur { flex-shrink: 0; font-size: var(--fs-sm); color: var(--c-tx3); font-variant-numeric: tabular-nums; }

@@ -35,6 +35,7 @@ async def lifespan(application: FastAPI):
     asyncio.create_task(tools._ytdlp_autoupdate_loop())
     asyncio.create_task(media._refresh_tag_meta_loop())
     asyncio.create_task(quality._quality_scan_loop())
+    asyncio.create_task(media._loud_main_loop())
     asyncio.create_task(download._follow_startup())
     asyncio.create_task(library._fileid_scan_task())
     print(f"[backend] ready on ws://127.0.0.1:{core._BACKEND_PORT}/ws", flush=True)
@@ -156,6 +157,11 @@ async def handle_message(ws: WebSocket, msg: dict):
             "acoustid_api_key":        _state.get("acoustid_api_key", ""),
             "radio_enabled":           _state.get("radio_enabled", False),
         }))
+        # Zuletzt erfolgreiche Tests (gleicher Key) — sonst stand nach jedem
+        # Neustart nur "Key eingetragen" da und man musste neu testen
+        known = store.known_service_tests()
+        if known:
+            await ws.send_text(json.dumps({"type": "services_test", **known}))
         if _state.get("remote_autostart") and remote._remote_server is None:
             saved = _state.get("remote_services_saved") or {"remote": True, "wishes": True}
             remote._remote_services.update(remote=bool(saved.get("remote")), wishes=bool(saved.get("wishes")))
@@ -657,6 +663,7 @@ async def handle_message(ws: WebSocket, msg: dict):
 
     elif t == "test_services":
         res = await tags._test_services()
+        store.remember_service_tests(res)
         await ws.send_text(json.dumps({"type": "services_test", **res}))
 
     elif t == "set_radio":
@@ -1313,6 +1320,9 @@ async def handle_message(ws: WebSocket, msg: dict):
 
     elif t == "update_ytdlp":
         asyncio.create_task(tools._update_ytdlp(ws))
+
+    elif t == "update_ffmpeg":
+        asyncio.create_task(tools._update_ffmpeg(ws))
 
     elif t == "check_tool_updates":
         asyncio.create_task(tools._tools_check_once(force=True))

@@ -20,7 +20,7 @@ test.beforeAll(async () => {
   await page.evaluate(async () => {
     const url = performance.getEntriesByType('resource').map(e => e.name).find(n => n.includes('/src/stores/ws.js'))
     const m = await import(url)
-    m.appSettings.update(s => ({ ...s, cfUnit: 'bars', cfBars: 4 }))
+    m.appSettings.update(s => ({ ...s, cfUnit: 'bars', cfBars: 4, djMode: false }))
   })
 })
 
@@ -86,9 +86,13 @@ test('Einstellungen: DJ-Schalter und verfolgte Playlists', async () => {
   await expect(page.getByText('Gleichzeitige Downloads')).toBeVisible()
   // Dienste als Karten, Details aufklappbar
   await page.locator('.tab-btn', { hasText: 'Dienste' }).click()
-  await expect(page.locator('.svc')).toHaveCount(3)
+  // yt-dlp, ffmpeg, Spotify, Last.fm, AcoustID — Programme stehen hier statt unter System
+  await expect(page.locator('.svc')).toHaveCount(5)
   await page.locator('.svc-head', { hasText: 'AcoustID' }).click()
   await expect(page.getByText('Application-Key', { exact: true })).toBeVisible()
+  await page.locator('.svc-head', { hasText: 'yt-dlp' }).click()
+  await expect(page.locator('.svc.open .svc-body').getByText('Version', { exact: true })).toBeVisible()
+  await expect(page.getByText('Programme automatisch aktuell halten')).toBeVisible()
   // Ausgabegeraet und Uebergangslaenge
   await page.locator('.tab-btn', { hasText: 'Wiedergabe' }).click()
   await expect(page.getByLabel('Ausgabegerät')).toBeVisible()

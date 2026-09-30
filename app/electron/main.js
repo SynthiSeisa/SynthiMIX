@@ -177,8 +177,10 @@ app.whenReady().then(() => {
     registerMediaKeys()
     if (app.isPackaged) {
       setupAutoUpdater()
-      // Update-Check 10 Sekunden nach Start (Backend muss erst hochfahren)
+      // Update-Check 10 Sekunden nach Start (Backend muss erst hochfahren),
+      // danach alle 6 Stunden — die App laeuft beim Auflegen oft die ganze Nacht
       setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 10000)
+      setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 6 * 3600 * 1000)
     }
   }, process.env.YTDL_DEV ? 0 : 1200)
 
@@ -199,6 +201,19 @@ app.on('window-all-closed', () => {
 // Update herunterladen / installieren
 ipcMain.on('download-update', () => autoUpdater.downloadUpdate().catch(() => {}))
 ipcMain.on('install-update',  () => autoUpdater.quitAndInstall())
+// "Nach Updates suchen" (Einstellungen → Info). Ist eins da, meldet sich
+// zusaetzlich das Update-Fenster wie beim automatischen Check.
+ipcMain.handle('check-update', async () => {
+  if (!app.isPackaged) return { status: 'dev' }
+  try {
+    const r = await autoUpdater.checkForUpdates()
+    const v = r?.updateInfo?.version
+    const avail = r?.isUpdateAvailable ?? (!!v && v !== app.getVersion())
+    return avail ? { status: 'available', version: v } : { status: 'none', version: app.getVersion() }
+  } catch (e) {
+    return { status: 'error', message: String(e?.message ?? e).slice(0, 200) }
+  }
+})
 
 // Window controls
 ipcMain.on('win-minimize', () => mainWindow?.minimize())

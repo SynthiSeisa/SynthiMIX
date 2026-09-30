@@ -24,20 +24,35 @@ def _extract_art_sync(path: str) -> str | None:
         pass
     return None
 
-def _compute_lufs_sync(path: str) -> float:
-    """LUFS via ebur128, mit astats-Fallback für zu kurze/ungewöhnliche Dateien."""
+_S_RE = re.compile(r"S:\s*(-?[\d.]+)")
+
+def _main_loudness(stderr: str) -> float | None:
+    """Lautheit des Hauptteils: Energie-Mittel der lauteren Haelfte der
+    Kurzzeit-Lautheit (3-s-Fenster, alle 0,1 s). Ruhige Intros und Breakdowns
+    zaehlen so nicht mit — ueber den ganzen Song gemessen wurden Titel mit
+    langen ruhigen Teilen zu stark angehoben, der Drop knallte dann."""
+    vals = [float(x) for x in _S_RE.findall(stderr)]
+    vals = sorted(v for v in vals[30:] if v > -70)      # erste 3 s: Fenster fuellt sich
+    if len(vals) < 20:
+        return None
+    top = vals[len(vals) // 2:]
+    return round(10 * math.log10(sum(10 ** (v / 10) for v in top) / len(top)), 1)
+
+def _measure_loudness_sync(path: str) -> tuple[float, float | None]:
+    """(LUFS ueber den ganzen Titel, Lautheit des Hauptteils oder None)."""
     name = Path(path).name
     print(f"[lufs] starte Analyse: '{name}'", flush=True)
     try:
         r = subprocess.run(
             [core.FFMPEG, "-nostdin", "-i", path,
-             "-filter:a", "ebur128=framelog=quiet", "-f", "null", "-"],
+             "-filter:a", "ebur128=framelog=info", "-f", "null", "-"],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300, creationflags=_NO_WINDOW)
-        m = re.search(r"I:\s+([-\d.]+)\s+LUFS", r.stderr)
+        m = re.findall(r"I:\s+([-\d.]+)\s+LUFS", r.stderr)
         if m:
-            val = round(float(m.group(1)), 1)
-            print(f"[lufs] OK '{name}' → {val} LUFS", flush=True)
-            return val
+            val = round(float(m[-1]), 1)
+            main = _main_loudness(r.stderr)
+            print(f"[lufs] OK '{name}' → {val} LUFS (Hauptteil {main})", flush=True)
+            return val, main
 
         # Fallback: astats für sehr kurze Dateien oder wenn ebur128 kein Ergebnis liefert
         # Schätze LUFS aus RMS-dB (astats mean_volume)
@@ -52,7 +67,7 @@ def _compute_lufs_sync(path: str) -> float:
             if math.isfinite(rms_db) and rms_db > -90:
                 val = round(rms_db - 3.0, 1)
                 print(f"[lufs] Fallback (astats) '{name}' → {val} LUFS", flush=True)
-                return val
+                return val, None
 
         name = Path(path).name
         last_lines = [l for l in r.stderr.splitlines() if l.strip()][-5:]
@@ -61,14 +76,67 @@ def _compute_lufs_sync(path: str) -> float:
         # Dekodierungsfehler (moov, Invalid data) → permanent → -97.0
         if "No such file" in stderr_text or "no such file" in stderr_text.lower():
             print(f"[lufs] NICHT GEFUNDEN '{name}'", flush=True)
-            return -98.0
+            return -98.0, None
         print(f"[lufs] FEHLER '{name}' (rc={r.returncode}):", flush=True)
         for ln in last_lines:
             print(f"  ffmpeg: {ln}", flush=True)
-        return -97.0
+        return -97.0, None
     except Exception as e:
         print(f"[lufs] Exception bei '{Path(path).name}': {e}", flush=True)
-        return -98.0
+        return -98.0, None
+
+def _compute_lufs_sync(path: str) -> float:
+    return _measure_loudness_sync(path)[0]
+
+
+_LOUD_PARALLEL = 1          # laeuft auch waehrend des Auflegens: sanft
+
+async def _loud_main_once():
+    pending = [lt for lt in _state["library"]
+               if lt.get("path") and lt.get("lufs_main") is None and not lt.get("missing")
+               and not lt.get("unanalyzable") and (lt.get("duration_sec") or 0) >= 30]
+    if not pending:
+        return
+    loop = asyncio.get_running_loop()
+    sem = asyncio.Semaphore(_LOUD_PARALLEL)
+    done = 0
+    print(f"[lufs] Hauptteil messen: {len(pending)} Titel", flush=True)
+
+    async def one(lt):
+        nonlocal done
+        async with sem:
+            path = lt["path"]
+            if not os.path.exists(path):
+                return                           # Laufwerk fehlt: spaeter nochmal
+            lufs, main = await loop.run_in_executor(None, _measure_loudness_sync, path)
+            if main is None:
+                if lufs == -97.0:
+                    lt["unanalyzable"] = True
+                return
+            lt["lufs_main"] = main
+            if lt.get("lufs", -99) <= -90 and lufs > -90:
+                lt["lufs"] = lufs
+            done += 1
+            if done % 25 == 0:
+                store.schedule_save()
+            if done % 100 == 0:
+                await core.push_library()
+
+    await asyncio.gather(*(one(lt) for lt in pending))
+    store.save_library()
+    await core.push_library()
+    print(f"[lufs] Hauptteil gemessen: {done} Titel", flush=True)
+
+async def _loud_main_loop():
+    """Misst im Hintergrund die Lautheit des Hauptteils (einmal je Titel),
+    danach alle 10 Minuten fuer neue Titel."""
+    await asyncio.sleep(90)       # Start, Tag-Abgleich und Qualitaet gehen vor
+    while True:
+        try:
+            await _loud_main_once()
+        except Exception as e:
+            print(f"[lufs] Hauptteil: {e}", flush=True)
+        await asyncio.sleep(600)
 
 def _estimate_bpm_sync(path: str) -> int:
     """BPM via onset-energy autocorrelation (60-180 BPM range)."""
@@ -131,7 +199,7 @@ def _make_library_entry(path: str, probe: dict, **overrides) -> dict:
     key = keys._parse_key(probe.get("key")) or ""
     entry = {
         "path":         path,
-        "title":        probe.get("title") or p.stem,
+        "title":        store._complete_title(probe.get("title") or p.stem, path),
         "artist":       probe.get("artist", "") or "",
         "album_artist": probe.get("album_artist", "") or "",
         "album":        probe.get("album", "") or "",
@@ -570,9 +638,11 @@ async def _analyze_library_meta_task(only_paths: list[str] | None = None):
             need_key  = not lt.get("key") and lt.get("key_src") != "none"
             try:
                 if need_lufs:
-                    lufs = await loop.run_in_executor(None, _compute_lufs_sync, path)
+                    lufs, main = await loop.run_in_executor(None, _measure_loudness_sync, path)
                     if lufs > -90:
                         lt["lufs"] = lufs
+                        if main is not None:
+                            lt["lufs_main"] = main
                         changed = True
                     elif lufs == -97.0:
                         # Echter Dekodierfehler → dauerhaft überspringen
@@ -669,7 +739,11 @@ async def _enrich_track(path: str, force: bool = False):
     cached_duration = (entry or {}).get("duration_sec", 0)
 
     art      = cached_art  if (cached_art  and not force) else await loop.run_in_executor(None, _extract_art_sync,    path)
-    lufs     = cached_lufs if (cached_lufs > -90 and not force) else await loop.run_in_executor(None, _compute_lufs_sync, path)
+    main     = None
+    if cached_lufs > -90 and not force:
+        lufs = cached_lufs
+    else:
+        lufs, main = await loop.run_in_executor(None, _measure_loudness_sync, path)
     bpm      = cached_bpm  if ((cached_bpm and not force) or not _state.get("bpm_analysis", True)) else await loop.run_in_executor(None, _estimate_bpm_sync, path)
     duration = cached_duration if (cached_duration > 0 and not force) else (await loop.run_in_executor(None, _probe_sync, path)).get("duration_sec", 0)
 
@@ -691,12 +765,15 @@ async def _enrich_track(path: str, force: bool = False):
             path, probe,
             duration_sec=duration or probe.get("duration_sec", 0),
             lufs=lufs if lufs > -90 else -99.0,
-            bpm=bpm or probe.get("bpm", 0))
+            bpm=bpm or probe.get("bpm", 0),
+            **({"lufs_main": main} if main is not None else {}))
         _state["library"].append(lib_entry)
         lib_changed = True
     elif lib_entry is not None:
         if lufs > -90 and lib_entry.get("lufs", -99) <= -90:
             lib_entry["lufs"] = lufs;     lib_changed = True
+        if main is not None and (force or lib_entry.get("lufs_main") is None):
+            lib_entry["lufs_main"] = main; lib_changed = True
         elif lufs == -97.0:
             # Echter Dekodierfehler → dauerhaft markieren
             lib_entry["unanalyzable"] = True
@@ -863,6 +940,7 @@ async def _normalize_files(paths: list, target_lufs: float, target_tp: float, ws
                 for lt in _state["library"]:
                     if lt.get("path") == path:
                         lt["lufs"] = target_lufs
+                        lt.pop("lufs_main", None)       # misst der Hintergrund neu
                         break
             else:
                 errors += 1

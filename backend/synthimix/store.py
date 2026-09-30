@@ -100,14 +100,15 @@ def save_queue():
 _MOJIBAKE_C1 = ('€‚ƒ„…†‡'
                 'ˆ‰Š‹ŒŽ‘’“”'
                 '•–—˜™š›œžŸ')
-_MOJIBAKE_RUN_RE = re.compile(f'(?:[ÃÂ][ -¿{_MOJIBAKE_C1}]|â€[{_MOJIBAKE_C1}])+')
+# Auch Emojis (4 Byte: "ðŸ‡¦" statt der Flagge)
+_MOJIBAKE_RUN_RE = re.compile(f'(?:[ÃÂ][ -¿{_MOJIBAKE_C1}]|â€[{_MOJIBAKE_C1}]|[ðñòóô][ -¿{_MOJIBAKE_C1}]{{3}})+')
 
 def _fix_mojibake(s: str) -> str:
     """Repair UTF-8 text that was previously misdecoded as cp1252 (e.g. ffprobe
     output read without an explicit encoding) — 'fÃ¼hl' → 'fühl'. Only the
     corrupted run is re-encoded, so legitimate Unicode elsewhere (e.g. a real
     curly apostrophe) in the same string is left untouched."""
-    if not s or ('Ã' not in s and 'â€' not in s):
+    if not s or ('Ã' not in s and 'â€' not in s and 'ð' not in s):
         return s
     def _repl(m):
         chunk = m.group(0)
@@ -116,6 +117,25 @@ def _fix_mojibake(s: str) -> str:
         except (UnicodeEncodeError, UnicodeDecodeError):
             return chunk
     return _MOJIBAKE_RUN_RE.sub(_repl, s)
+
+# Alte ID3v1-Tags fassen nur 30 Zeichen; manche Programme haben daraus den
+# ID3v2-Titel uebernommen ("Ivy Lab - Sunday Crunk (Mefjus"). Der Dateiname
+# hat dann meist den vollen Titel.
+_TRACKNO_RE = re.compile(r'^\s*\d{1,3}\s*[.\-_)]\s*')
+
+def _complete_title(title: str, path: str) -> str:
+    """Nach 30 Zeichen abgeschnittenen Titel aus dem Dateinamen ergaenzen."""
+    if not title or len(title) != 30 or not path:
+        return title
+    stem = _TRACKNO_RE.sub('', Path(path).stem)
+    i = stem.lower().find(title.lower())
+    if i < 0:
+        return title
+    rest = stem[i + len(title):]
+    # "-1-1-1" (Kopie) oder nur Ziffern/Leerzeichen: kein abgeschnittener Titel
+    if not re.search(r'[^\W\d_]', rest):
+        return title
+    return stem[i:].strip()
 
 def load_library():
     raw = _load_json(core.LIB_CACHE, None)
@@ -132,7 +152,7 @@ def load_library():
     mojibake_fixed = False
     for t in raw:
         orig_title = t.get("title", "")
-        fixed_title = _fix_mojibake(orig_title)
+        fixed_title = _complete_title(_fix_mojibake(orig_title), str(t.get("path") or ""))
         if fixed_title != orig_title:
             mojibake_fixed = True
         normalised.append({
@@ -158,6 +178,8 @@ def load_library():
             "play_count":   int(t.get("play_count", 0)),
             # Obere Grenzfrequenz (Qualitaetspruefung); fehlt = noch nicht gemessen
             **({"cutoff_khz": float(t["cutoff_khz"])} if t.get("cutoff_khz") is not None else {}),
+            # Lautheit des Hauptteils (nur die lautere Haelfte), fuer die Angleichung
+            **({"lufs_main": float(t["lufs_main"])} if t.get("lufs_main") is not None else {}),
             # Mixed In Key: Energie-Level 1-10 und Cue-Punkte (ms)
             **({"energy": int(t["energy"])} if t.get("energy") else {}),
             **({"mik_cues": [int(c) for c in t["mik_cues"]][:16]} if t.get("mik_cues") else {}),
@@ -302,6 +324,7 @@ def load_settings():
     _state["ytdlp_last_check"]        = int(raw.get("ytdlp_last_check", 0))
     _state["ffmpeg_last_check"]       = int(raw.get("ffmpeg_last_check", 0))
     _state["tool_updates"]            = dict(raw.get("tool_updates", {}) or {})
+    _state["service_ok"]              = dict(raw.get("service_ok", {}) or {})
     _state["normalize_volume"]        = bool(raw.get("normalize_volume", True))
     _state["target_lufs"]             = float(raw.get("target_lufs", -10.0))
     _state["spotify_client_id"]       = str(raw.get("spotify_client_id", ""))
@@ -313,6 +336,35 @@ def load_settings():
     # in den Einstellungen war nach jedem Neustart wieder weg.
     _state["repeat"]                  = int(raw.get("repeat", 0)) % 3
     _state["shuffle"]                 = bool(raw.get("shuffle", False))
+
+# Erfolgreiche Dienst-Tests merken — gebunden an den Key (nur ein Hash wird
+# gespeichert): wird der Key geaendert, gilt der alte Test nicht mehr.
+_SVC_KEYS = {"lastfm": "lastfm_api_key", "acoustid": "acoustid_api_key", "spotify": "spotify_client_id"}
+
+def _svc_fp(name: str) -> str:
+    import hashlib
+    return hashlib.sha1((_state.get(_SVC_KEYS[name]) or "").strip().encode()).hexdigest()[:12]
+
+def remember_service_tests(res: dict):
+    ok = _state.setdefault("service_ok", {})
+    for name in _SVC_KEYS:
+        r = res.get(name)
+        if not r:
+            continue
+        if r.get("ok"):
+            ok[name] = {"fp": _svc_fp(name), "ts": int(time.time())}
+        else:
+            ok.pop(name, None)
+    save_settings()
+
+def known_service_tests() -> dict:
+    from datetime import datetime
+    out = {}
+    for name, v in (_state.get("service_ok") or {}).items():
+        if name in _SVC_KEYS and (_state.get(_SVC_KEYS[name]) or "").strip() and v.get("fp") == _svc_fp(name):
+            when = datetime.fromtimestamp(v.get("ts", 0)).strftime("%d.%m.%Y")
+            out[name] = {"ok": True, "text": f"Verbunden (zuletzt getestet am {when}).", "saved": True}
+    return out
 
 def save_settings():
     _save_json(core.SETTINGS_FILE, {
@@ -347,6 +399,7 @@ def save_settings():
         "spotify_client_secret":   _state.get("spotify_client_secret", ""),
         "lastfm_api_key":          _state.get("lastfm_api_key", ""),
         "acoustid_api_key":        _state.get("acoustid_api_key", ""),
+        "service_ok":              _state.get("service_ok", {}),
         "radio_enabled":           _state.get("radio_enabled", False),
         "repeat":                  _state.get("repeat", 0),
         "shuffle":                 _state.get("shuffle", False),

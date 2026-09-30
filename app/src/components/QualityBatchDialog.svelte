@@ -1,6 +1,6 @@
 <script>
   import { untrack } from 'svelte'
-  import { qualityBatch, qualityReplace, send } from '../stores/ws.js'
+  import { qualityBatch, qualityBatchOpen, qualityReplace, send } from '../stores/ws.js'
 
   // Viele Titel auf einmal ersetzen: Das Backend sucht je Titel automatisch
   // die beste Version (Song-Version zuerst, gleiche Fassung, kleinste
@@ -8,21 +8,15 @@
   // Kuenstler bekannt) nicht. Dann nacheinander ersetzen — wie beim
   // Einzel-Ersetzen: gleicher Name und Pfad, Tags bleiben, alte Datei in den
   // Papierkorb.
-  let { paths, onclose } = $props()
-
+  // Gestartet wird ueber startQualityBatch() (ws.js). Das Fenster laesst sich
+  // jederzeit schliessen: Suche und Ersetzen laufen im Hintergrund weiter.
   const CUE_TOL = 2
   const st = $derived($qualityBatch)
+  const paths = $derived(st.paths ?? [])
   const items = $derived(paths.map(p => st.items?.[p]).filter(Boolean))
   const found = $derived(items.filter(it => it.candidate))
   let pick = $state({})         // Pfad -> angehakt?
 
-  $effect(() => {
-    untrack(() => {
-      qualityBatch.set({ phase: 'search', done: 0, total: paths.length, items: {} })
-      qualityReplace.update(m => { const n = { ...m }; for (const p of paths) delete n[p]; return n })
-      send({ type: 'quality_batch', paths })
-    })
-  })
   // Neue Treffer: sichere vorauswaehlen, eigene Haken behalten
   $effect(() => {
     const list = found
@@ -54,17 +48,49 @@
     for (const it of found) p[it.path] = on
     pick = p
   }
-  function onkey(e) { if (e.key === 'Escape' && st.phase !== 'replace') onclose() }
+  // Ausblenden: laeuft weiter. Verwerfen: Vorschlaege weg, Anzeige verschwindet.
+  function hide() { qualityBatchOpen.set(false) }
+  function discard() {
+    if (running) send({ type: 'quality_batch_cancel' })
+    qualityBatchOpen.set(false)
+    qualityBatch.set({})
+    pick = {}
+  }
+  const open = $derived($qualityBatchOpen && paths.length > 0)
+  function onkey(e) { if (e.key === 'Escape' && open) hide() }
 </script>
 
 <svelte:window onkeydown={onkey} />
 
-<div class="dlg-overlay" onclick={() => st.phase !== 'replace' && onclose()} role="presentation">
+{#if !$qualityBatchOpen && paths.length && (running || st.phase === 'review' || st.phase === 'finished')}
+  <!-- Klein unten rechts, solange das Fenster zu ist -->
+  <div class="bg" role="status" aria-live="polite">
+    {#if running}<i class="ti ti-refresh spin" aria-hidden="true"></i>{:else}<i class="ti ti-check done" aria-hidden="true"></i>{/if}
+    <button class="bg-body" onclick={() => qualityBatchOpen.set(true)} title="Fenster öffnen">
+      <span class="bg-head">{st.phase === 'replace' ? 'Bessere Versionen werden eingesetzt' : 'Bessere Versionen'}</span>
+      <span class="bg-txt">
+        {#if st.phase === 'search'}Suche {st.done ?? 0} / {st.total} …
+        {:else if st.phase === 'replace'}Ersetze {(st.done ?? 0) + 1} / {st.total}
+        {:else if st.phase === 'review'}{found.length} Vorschläge — ansehen
+        {:else}{st.result?.ok ?? 0} ersetzt — ansehen{/if}
+      </span>
+      {#if running}<span class="bg-bar"><span style="width: {Math.round((st.done ?? 0) / Math.max(1, st.total) * 100)}%"></span></span>{/if}
+    </button>
+    {#if running}
+      <button class="btn btn-icon btn-sm" onclick={() => send({ type: 'quality_batch_cancel' })} title="Abbrechen" aria-label="Abbrechen"><i class="ti ti-x"></i></button>
+    {:else}
+      <button class="btn btn-icon btn-sm" onclick={discard} title="Verwerfen" aria-label="Verwerfen"><i class="ti ti-x"></i></button>
+    {/if}
+  </div>
+{/if}
+
+{#if open}
+<div class="dlg-overlay" onclick={hide} role="presentation">
   <div class="dlg panel" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Bessere Versionen suchen">
 
     <div class="hdr">
       <span class="dlg-title">Bessere Versionen für {paths.length} Titel</span>
-      <button class="btn btn-icon btn-sm close-btn" onclick={onclose} disabled={st.phase === 'replace'} title="Schließen" aria-label="Schließen"><i class="ti ti-x"></i></button>
+      <button class="btn btn-icon btn-sm close-btn" onclick={hide} title={running ? 'Im Hintergrund weiterlaufen lassen' : 'Schließen'} aria-label="Schließen"><i class="ti ti-x"></i></button>
     </div>
 
     <div class="status">
@@ -135,7 +161,11 @@
         <div class="dlg-hint">Gleicher Name und Ordner, gleiches Format, alle Tags bleiben. Alte Dateien kommen in den Papierkorb.</div>
       {/if}
       <div class="dlg-actions">
-        <button class="btn" onclick={onclose} disabled={st.phase === 'replace'}>{st.phase === 'finished' ? 'Fertig' : 'Abbrechen'}</button>
+        {#if running}
+          <button class="btn" onclick={hide}>Im Hintergrund weiter</button>
+        {:else}
+          <button class="btn" onclick={discard}>{st.phase === 'finished' ? 'Fertig' : 'Verwerfen'}</button>
+        {/if}
         {#if st.phase !== 'finished'}
           <button class="btn btn-primary" onclick={replaceAll} disabled={!chosen.length || running}>
             <i class="ti ti-refresh"></i> {chosen.length} ersetzen
@@ -145,8 +175,25 @@
     </div>
   </div>
 </div>
+{/if}
 
 <style>
+  .bg {
+    position: fixed; right: 16px; bottom: 16px; z-index: 840;
+    width: 320px; max-width: calc(100vw - 32px);
+    display: flex; align-items: center; gap: 10px; padding: 10px 8px 10px 12px;
+    background: var(--c-bg5); border: 1px solid var(--c-br2);
+    border-left: 4px solid var(--c-accent); border-radius: var(--r-m);
+    box-shadow: 0 8px 26px rgba(0, 0, 0, .4);
+  }
+  .bg > .spin, .bg > .done { font-size: 18px; color: var(--c-accent-tx); flex-shrink: 0; }
+  .bg > .done { color: var(--c-green-tx); }
+  .bg-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; text-align: left;
+             background: none; border: none; padding: 0; cursor: pointer; font: inherit; color: inherit; }
+  .bg-head { font-size: var(--fs-sm); font-weight: 700; color: var(--c-tx1); }
+  .bg-txt { font-size: var(--fs-sm); color: var(--c-tx3); font-variant-numeric: tabular-nums; }
+  .bg-bar { height: 3px; border-radius: 2px; background: var(--c-br2); overflow: hidden; margin-top: 2px; }
+  .bg-bar span { display: block; height: 100%; background: var(--c-accent); transition: width .25s; }
   .panel { width: min(900px, 94vw); height: min(84vh, 720px); padding: 0; gap: 0; display: flex; flex-direction: column; }
   .hdr { display: flex; align-items: center; padding: var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-5); border-bottom: 1px solid var(--c-br1); }
   .close-btn { margin-left: auto; }

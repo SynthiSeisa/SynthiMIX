@@ -55,6 +55,36 @@ def _find_spotdl_cmd() -> list[str] | None:
             pass
     return None
 
+# spotdl.exe entpackt sich bei jedem Start erst (~46 MB). Nach einem Neustart
+# oder Update, wenn der Virenscanner sie neu prueft, dauerte "--version" laenger
+# als die 8 s von frueher — dann stand "Nicht installiert" da, obwohl die Datei
+# im Datenordner lag. Jetzt: laenger warten, Ergebnis je Datei merken, und eine
+# vorhandene Datei gilt immer als installiert.
+_spotdl_ver_cache: dict = {}
+
+def _spotdl_version_sync() -> str | None:
+    spotdl = _find_spotdl_cmd()
+    if not spotdl:
+        return None
+    try:
+        st = os.stat(spotdl[0]) if len(spotdl) == 1 else None
+        key = (spotdl[0], st.st_size, int(st.st_mtime)) if st else tuple(spotdl)
+    except OSError:
+        key = tuple(spotdl)
+    if key in _spotdl_ver_cache:
+        return _spotdl_ver_cache[key]
+    try:
+        r = subprocess.run(spotdl + ["--version"], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=45, creationflags=_NO_WINDOW)
+        m = re.search(r'(\d+\.\d+[\.\d]*)', r.stdout + r.stderr)
+        ver = m.group(1) if m else "installiert"
+        _spotdl_ver_cache[key] = ver
+        return ver
+    except Exception as e:
+        print(f"[spotdl] Version nicht lesbar ({e.__class__.__name__}) — Datei ist aber da", flush=True)
+        return "installiert"
+
 async def _check_tools(ws: WebSocket):
     loop = asyncio.get_running_loop()
     info: dict = {}
@@ -73,18 +103,7 @@ async def _check_tools(ws: WebSocket):
             info["ffmpeg_version"] = m.group(1) if m else first[:40]
         except Exception:
             info["ffmpeg_version"] = None
-        try:
-            spotdl = _find_spotdl_cmd()
-            if spotdl:
-                r = subprocess.run(spotdl + ["--version"], capture_output=True,
-                                   text=True, encoding="utf-8", errors="replace",
-                                   timeout=8, creationflags=_NO_WINDOW)
-                m = re.search(r'(\d+\.\d+[\.\d]*)', r.stdout + r.stderr)
-                info["spotdl_version"] = m.group(1) if m else "installiert"
-            else:
-                info["spotdl_version"] = None
-        except Exception:
-            info["spotdl_version"] = None
+        info["spotdl_version"] = _spotdl_version_sync()
         info["fpcalc_found"] = bool(core._find_fpcalc())
     await loop.run_in_executor(None, _sync)
     try:
@@ -203,19 +222,6 @@ def _spotdl_asset_url() -> str:
     except Exception:
         pass
     return _SPOTDL_FALLBACK
-
-def _spotdl_version_sync() -> str:
-    cmd = _find_spotdl_cmd()
-    if not cmd:
-        return ""
-    try:
-        r = subprocess.run(cmd + ["--version"], capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=20,
-                           creationflags=_NO_WINDOW)
-        m = re.search(r'(\d+\.\d+[\.\d]*)', r.stdout + r.stderr)
-        return m.group(1) if m else ""
-    except Exception:
-        return ""
 
 def _spotdl_latest_tag() -> str:
     try:
@@ -387,6 +393,36 @@ async def _ffmpeg_check(tu: dict, now: int, force: bool = False):
             tu["ffmpeg_updated"] = {"from": lokal_date, "to": latest["date"], "at": now}
             await core.broadcast({"type": "tools_info", "ffmpeg_version": await loop.run_in_executor(None, _ffmpeg_version_sync, None)})
 
+async def _update_ffmpeg(ws: WebSocket | None = None):
+    """ffmpeg von Hand auf den neuesten Build bringen (Dienste → ffmpeg)."""
+    loop = asyncio.get_running_loop()
+    async def _send(text, pct):
+        if ws is None:
+            print(f"[ffmpeg] {text}", flush=True); return
+        try: await ws.send_text(json.dumps({"type": "update_progress", "text": text, "pct": pct, "tool": "ffmpeg"}))
+        except Exception: pass
+    await _send("Suche neuesten Build…", 0)
+    latest = await loop.run_in_executor(None, _ffmpeg_latest_sync)
+    if not latest:
+        await _send("❌ Keine Verbindung zu GitHub", -1); return False
+    lokal = core._ffmpeg_build_date(await loop.run_in_executor(None, _ffmpeg_version_sync, None))
+    if lokal and lokal >= latest["date"]:
+        await _send("✓ Schon der neueste Build", 100); return True
+    size = f" (~{round(latest.get('size', 0) / 1e6)} MB)" if latest.get("size") else ""
+    await _send(f"Lade Build {latest['date']}{size}…", 10)
+    folder = await loop.run_in_executor(None, _install_ffmpeg_sync, latest)
+    if not folder:
+        await _send("❌ Laden oder Entpacken fehlgeschlagen", -1); return False
+    core.FFMPEG  = str(Path(folder) / "ffmpeg.exe")
+    core.FFPROBE = str(Path(folder) / "ffprobe.exe")
+    tu = _state.setdefault("tool_updates", {})
+    tu["ffmpeg"] = {"current": latest["date"], "latest": latest["date"], "available": False}
+    store.save_settings()
+    await core.broadcast({"type": "tool_updates", "items": tu})
+    await core.broadcast({"type": "tools_info", "ffmpeg_version": await loop.run_in_executor(None, _ffmpeg_version_sync, None)})
+    await _send(f"✓ ffmpeg-Build {latest['date']} installiert", 100)
+    return True
+
 def _ytdlp_version_sync() -> str:
     try:
         r = subprocess.run([core.YTDLP, "--version"], capture_output=True, text=True,
@@ -450,7 +486,8 @@ async def _tools_check_once(force: bool = False):
     if await loop.run_in_executor(None, _find_spotdl_cmd):
         s_lokal   = await loop.run_in_executor(None, _spotdl_version_sync)
         s_neueste = await loop.run_in_executor(None, _spotdl_latest_tag)
-        if s_lokal and s_neueste:
+        # "installiert" = Version nicht lesbar (Start zu langsam): nicht vergleichen
+        if s_lokal and s_lokal != "installiert" and s_neueste:
             tu["spotdl"] = {"current": s_lokal, "latest": s_neueste.lstrip("v"),
                             "available": _is_newer(s_neueste, s_lokal)}
             # Nur die von SynthiMIX geladene Exe selbst ersetzen — ein per pip

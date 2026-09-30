@@ -13,8 +13,8 @@
   // Nur ein Punkt am Zahnrad — beim Auflegen soll kein Fenster aufgehen.
   // Der Klick fuehrt direkt auf den Tab, in dem der Hinweis steht.
   const updTab = $derived(
-    $toolUpdates.ytdlp?.available || $toolUpdates.ytdlp_updated || $toolUpdates.spotdl_updated || $toolUpdates.ffmpeg_updated ? 'system'
-    : $toolUpdates.spotdl?.available ? 'services' : null)
+    $toolUpdates.ytdlp?.available || $toolUpdates.ffmpeg?.available || $toolUpdates.spotdl?.available
+    || $toolUpdates.ytdlp_updated || $toolUpdates.spotdl_updated || $toolUpdates.ffmpeg_updated ? 'services' : null)
   const updTitle = $derived(
     $toolUpdates.ytdlp?.available ? `Neue yt-dlp-Version ${$toolUpdates.ytdlp.latest}`
     : $toolUpdates.spotdl?.available ? `Neue spotdl-Version ${$toolUpdates.spotdl.latest}`
@@ -223,7 +223,7 @@
       <div class="upd-body">
         {#if updateReady}
           <div class="upd-title">Update bereit</div>
-          <div class="upd-sub">SynthiMIX <strong>v{updateVersion}</strong> wurde heruntergeladen und kann jetzt installiert werden.</div>
+          <div class="upd-sub">SynthiMIX <strong>v{updateVersion}</strong> wurde heruntergeladen. Jetzt installieren (SynthiMIX startet neu) — oder einfach weiterspielen: beim nächsten Beenden wird es automatisch installiert.</div>
         {:else if updateDownloading}
           <div class="upd-title">Wird heruntergeladen&#8230;</div>
           <div class="upd-sub">SynthiMIX <strong>v{updateVersion}</strong>{updateSize ? ` · ${formatSize(updateSize)}` : ''}</div>
@@ -242,7 +242,7 @@
       {/if}
       <div class="upd-actions">
         {#if updateReady}
-          <button class="btn" onclick={() => updateDismissed = true}>Später</button>
+          <button class="btn" onclick={() => updateDismissed = true}>Beim Beenden</button>
           <button class="btn btn-primary" onclick={() => win.installUpdate?.()}>Jetzt installieren &amp; neu starten</button>
         {:else if updateDownloading}
           <button class="btn" onclick={() => updateDismissed = true}>Im Hintergrund</button>

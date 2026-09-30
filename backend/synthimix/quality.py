@@ -276,6 +276,7 @@ async def _quality_replace(path: str, url: str, ws: WebSocket):
         lt["duration_sec"] = dur
         lt["bitrate_kbps"] = probe.get("bitrate_kbps") or 0
         lt["lufs"]         = -99.0
+        lt.pop("lufs_main", None)
         lt["mtime"]        = int(os.path.getmtime(path))
         lt["meta_rev"]     = media._TAG_META_REV
         lt.pop("unanalyzable", None)

@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store'
+import { writable, get } from 'svelte/store'
 
 export const connected   = writable(false)
 // Paths that should have intro skipped on next playback (client-side one-shot flags)
@@ -95,6 +95,18 @@ export const revealPath          = writable(null)   // Bibliothek springt zu die
 export const genreState          = writable({})
 // Sammel-Ersetzen: {phase, done, total, current, items:{[path]: {title, duration, candidate, sure}}, finished, result}
 export const qualityBatch        = writable({})
+// Fenster der Sammelsuche offen? Geschlossen laeuft die Suche im Hintergrund
+// weiter (kleine Anzeige unten rechts) und das Fenster kommt wieder, wenn die
+// Vorschlaege fertig sind.
+export const qualityBatchOpen    = writable(false)
+export function startQualityBatch(paths) {
+  const cur = get(qualityBatch)
+  if (cur.phase === 'search' || cur.phase === 'replace') { qualityBatchOpen.set(true); return }
+  qualityBatch.set({ phase: 'search', done: 0, total: paths.length, items: {}, paths })
+  qualityReplace.update(m => { const n = { ...m }; for (const p of paths) delete n[p]; return n })
+  send({ type: 'quality_batch', paths })
+  qualityBatchOpen.set(true)
+}
 export const servicesTest        = writable(null)   // {lastfm, acoustid, fpcalc, spotify: {ok, text}}
 export const titleState          = writable({})
 export const setupOpen           = writable(false)  // Einrichtungs-Assistent     // Titel aufraeumen: {busy, progress, suggestions, applying, applied}
@@ -124,6 +136,10 @@ export const remoteAutostart   = writable(false)
 // ── appSettings — persisted in localStorage ───────────────────────────────────
 const APP_SETTINGS_DEFAULTS = {
   normalizeVolume: true,
+  cfLoudMatch:     true,
+  djMode:          true,       // kreative Uebergaenge (Double Drop, Filter, Echo, Roll)
+  djAmount:        0.4,        // Anteil der passenden Uebergaenge, die kreativ werden
+  djTypes:         { doubledrop: true, filter: true, echo: true, roll: true },       // beim Uebergang den Einstieg an den alten Titel angleichen
   targetLUFS:      -10,
   bpmAnalysis:     true,
   smartFade:          true,
@@ -403,8 +419,8 @@ function connect() {
       case 'dupe_choice':             dupeChoices.update(l => [...l, msg]); break
       case 'quality_batch_progress':  qualityBatch.update(s => ({ ...s, phase: msg.phase, done: msg.done, total: msg.total, current: msg.current ?? '' })); break
       case 'quality_batch_item':      qualityBatch.update(s => ({ ...s, items: { ...(s.items ?? {}), [msg.path]: msg } })); break
-      case 'quality_batch_done':      qualityBatch.update(s => ({ ...s, phase: 'review', cancelled: msg.cancelled })); break
-      case 'quality_batch_replaced':  qualityBatch.update(s => ({ ...s, phase: 'finished', result: msg })); break
+      case 'quality_batch_done':      qualityBatch.update(s => ({ ...s, phase: 'review', cancelled: msg.cancelled })); qualityBatchOpen.set(true); break
+      case 'quality_batch_replaced':  qualityBatch.update(s => ({ ...s, phase: 'finished', result: msg })); qualityBatchOpen.set(true); break
       case 'services_test':           servicesTest.set(msg); break
       case 'title_progress':          titleState.update(s => ({ ...s, progress: { done: msg.done, total: msg.total } })); break
       case 'title_suggestions':       titleState.update(s => ({ ...s, busy: false, progress: null, suggestions: msg })); break
