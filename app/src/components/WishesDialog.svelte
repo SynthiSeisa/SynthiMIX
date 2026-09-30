@@ -54,6 +54,11 @@
                 {w.title}
                 {#if (w.count ?? 1) > 1}<span class="w-cnt">{w.count}× gewünscht</span>{/if}
               </div>
+              {#if w.names?.length || w.note}
+                <div class="w-from">
+                  {#if w.names?.length}<b>{w.names.join(', ')}</b>{/if}{#if w.note}{w.names?.length ? ': ' : ''}„{w.note}“{/if}
+                </div>
+              {/if}
               <div class="w-meta">
                 <span class="w-state s-{w.status}">
                   <i class="ti {w.status === 'bereit' ? 'ti-check' : w.status === 'fehler' ? 'ti-alert-triangle' : 'ti-download'}"></i>
@@ -96,6 +101,8 @@
 
   .w-row { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-5); border-bottom: 1px solid var(--c-br1); }
   .w-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .w-from { font-size: var(--fs-sm); color: var(--c-tx2); margin: 2px 0 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .w-from b { color: var(--c-blue-tx, var(--c-accent-tx)); font-weight: 600; }
   .w-title { font-size: var(--fs-lg); font-weight: 600; color: var(--c-tx1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .w-cnt { margin-left: var(--sp-2); font-size: var(--fs-sm); font-weight: 600; color: var(--c-accent-tx); }
   .w-meta { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-sm); }

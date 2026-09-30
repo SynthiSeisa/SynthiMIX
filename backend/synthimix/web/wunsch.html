@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Musikwunsch</title>
+<link rel="icon" type="image/png" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<meta name="theme-color" content="#0a0e18">
+<style>
+/* Grundsystem von SynthiMIX als eigene Variablen — die Seite laeuft ohne die App.
+   Handy: Schrift ab 13px, Klickziele ab 44px. */
+:root{
+  --bg:#0a0e18;--bg2:#080c16;--surf:#0e1624;--surf2:#131d2e;--hover:#101828;
+  --br1:#121e30;--br2:#1e2e44;--br3:#2a3e5c;
+  --tx1:#ecf2ff;--tx2:#d4e0f2;--tx3:#b0c6dc;--tx4:#8ba6c4;
+  --accent:#e07800;--accent-tx:#ff9a33;--on-accent:#0a0e18;--act-bg:#1a1206;
+  --green-tx:#6fcf7c;--green-bg:#0e1a10;--green-br:#2a6a30;
+  --red-tx:#ff7b7b;--red-bg:#1a0808;--red-br:#8a3030;
+  --blue-tx:#7fb0ec;--blue-bg:#0e1a2c;--blue-br:#2a5888;
+  --glow1:rgba(224,120,0,.28);--glow2:rgba(59,130,246,.22);
+  --r-m:10px;--r-l:16px;--fs-sm:13px;--fs-body:15px;--fs-lg:17px;
+  color-scheme:dark;
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --bg:#f6f2ec;--bg2:#efe9e1;--surf:#ffffff;--surf2:#faf7f3;--hover:#ece6de;
+    --br1:#e2dcd3;--br2:#cfc8be;--br3:#a39b91;
+    --tx1:#0a0806;--tx2:#1e1a14;--tx3:#4a443c;--tx4:#6a6258;
+    --accent:#b35400;--accent-tx:#9a4700;--on-accent:#ffffff;--act-bg:#fff1dc;
+    --green-tx:#1a7030;--green-bg:#eaf6ec;--green-br:#8ac098;
+    --red-tx:#b82020;--red-bg:#fff0f0;--red-br:#d89a9a;
+    --blue-tx:#1a5cb0;--blue-bg:#e8f0fb;--blue-br:#93b6e0;
+    --glow1:rgba(179,84,0,.16);--glow2:rgba(26,92,176,.12);
+    color-scheme:light;
+  }
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-text-size-adjust:100%}
+body{background:var(--bg);color:var(--tx2);font:var(--fs-body)/1.45 'Segoe UI',system-ui,-apple-system,sans-serif;
+  padding-bottom:calc(32px + env(safe-area-inset-bottom,0px));-webkit-tap-highlight-color:transparent}
+button{font:inherit;cursor:pointer;border:none}
+button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--accent-tx);outline-offset:2px}
+.wrap{max-width:560px;margin:0 auto;padding:0 16px}
+
+/* Kopf mit weichem Farbschimmer */
+.hero{position:relative;overflow:hidden;padding:calc(28px + env(safe-area-inset-top,0px)) 20px 26px;text-align:center;
+  background:radial-gradient(120% 90% at 15% 0%,var(--glow1),transparent 60%),radial-gradient(110% 90% at 90% 10%,var(--glow2),transparent 55%),var(--bg2);
+  border-bottom:1px solid var(--br1)}
+.logo{font-weight:800;font-size:var(--fs-lg);letter-spacing:.02em;color:var(--accent-tx)}.logo span{color:var(--blue-tx)}
+h1{font-size:28px;line-height:1.15;font-weight:800;color:var(--tx1);margin-top:10px;letter-spacing:-.01em}
+.lead{font-size:var(--fs-body);color:var(--tx3);margin-top:8px}
+
+/* Laeuft gerade — mit kleinem Equalizer */
+.np{display:none;margin-top:-14px;position:relative;padding:14px 16px;border-radius:var(--r-l);background:var(--surf);border:1px solid var(--br2);
+  box-shadow:0 10px 30px rgba(0,0,0,.18)}
+.np-l{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:var(--green-tx)}
+.eq{display:inline-flex;align-items:flex-end;gap:2px;height:12px}
+.eq i{display:block;width:3px;background:currentColor;border-radius:1px;animation:eq 1s ease-in-out infinite}
+.eq i:nth-child(2){animation-delay:-.4s}.eq i:nth-child(3){animation-delay:-.7s}
+@keyframes eq{0%,100%{height:3px}50%{height:12px}}
+@media (prefers-reduced-motion:reduce){.eq i{animation:none;height:8px}}
+.np-t{font-size:var(--fs-lg);font-weight:700;color:var(--tx1);margin-top:4px;word-break:break-word}
+.np-a{color:var(--tx3);font-weight:400}
+.np-n{margin-top:10px;padding-top:10px;border-top:1px solid var(--br1);font-size:var(--fs-sm);color:var(--tx3)}
+.np-n b{font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:12px;color:var(--tx4);display:block;margin-bottom:2px}
+.np-n div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--tx2)}
+
+/* Suche */
+.search{position:relative;margin-top:18px}
+.search svg{position:absolute;left:15px;top:50%;transform:translateY(-50%);width:20px;height:20px;color:var(--tx4);pointer-events:none}
+.inp{width:100%;min-height:54px;border-radius:var(--r-l);border:1.5px solid var(--br3);background:var(--surf);color:var(--tx1);font-size:17px;padding:0 16px 0 46px}
+.inp::placeholder{color:var(--tx4)}
+.inp:focus{border-color:var(--accent);outline:none;box-shadow:0 0 0 4px var(--act-bg)}
+.note{font-size:var(--fs-sm);color:var(--tx4);margin:10px 4px 0;line-height:1.5}
+.msg{display:flex;gap:10px;align-items:flex-start;margin-top:14px;padding:14px 16px;border-radius:var(--r-l);font-weight:600;line-height:1.4;
+  color:var(--green-tx);background:var(--green-bg);border:1px solid var(--green-br)}
+.msg::before{content:"\2713";font-size:18px;line-height:1.1;font-weight:800}
+.msg.no{color:var(--red-tx);background:var(--red-bg);border-color:var(--red-br)}
+.msg.no::before{content:"!"}
+
+/* Ergebnisse */
+.res{margin-top:14px;border-radius:var(--r-l);background:var(--surf);border:1px solid var(--br1);overflow:hidden}
+.res:empty{display:none}
+.r{display:flex;align-items:center;gap:12px;min-height:68px;padding:10px 12px 10px 16px;border-bottom:1px solid var(--br1)}
+.r:last-child{border-bottom:none}
+.r-i{flex:1;min-width:0}
+.r-t{font-weight:600;color:var(--tx1);line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.r-s{font-size:var(--fs-sm);color:var(--tx3);margin-top:3px}
+.tag{display:inline-block;font-size:12px;font-weight:700;padding:1px 8px;border-radius:999px;margin-right:4px}
+.t-lib{color:var(--green-tx);background:var(--green-bg);border:1px solid var(--green-br)}
+.t-playing{color:var(--on-accent);background:var(--green-tx)}
+.t-queued{color:var(--accent-tx);border:1px solid var(--accent)}
+.t-played{color:var(--tx3);background:var(--hover)}
+.t-wished{color:var(--blue-tx);border:1px solid var(--blue-br);background:var(--blue-bg)}
+.b{flex-shrink:0;min-height:44px;padding:0 16px;border-radius:999px;font-weight:700;background:var(--accent);color:var(--on-accent)}
+.b:active{transform:scale(.96)}
+.b:disabled{background:var(--hover);color:var(--tx4)}
+.empty{text-align:center;padding:22px 10px;font-size:var(--fs-sm);color:var(--tx4)}
+
+/* Eigene Wuensche */
+.mine{display:none;margin-top:22px}
+.mine-h{font-size:12px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:var(--tx4);margin:0 4px 8px}
+.mine-l{border-radius:var(--r-l);background:var(--surf);border:1px solid var(--br1);overflow:hidden}
+.mi{display:flex;align-items:center;gap:10px;min-height:52px;padding:8px 14px;border-bottom:1px solid var(--br1)}
+.mi:last-child{border-bottom:none}
+.mi-t{flex:1;min-width:0;color:var(--tx1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pill{flex-shrink:0;font-size:12px;font-weight:700;padding:3px 10px;border-radius:999px;color:var(--tx3);background:var(--hover)}
+.pill.ok{color:var(--green-tx);background:var(--green-bg)}
+.pill.no{color:var(--red-tx);background:var(--red-bg)}
+.pill.now{color:var(--on-accent);background:var(--green-tx)}
+
+/* Wunsch absenden: Blatt von unten */
+.bg{position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.5);opacity:0;pointer-events:none;transition:opacity .2s}
+.sheet{position:fixed;left:0;right:0;bottom:0;z-index:21;max-width:560px;margin:0 auto;background:var(--surf);border-radius:20px 20px 0 0;
+  border-top:1px solid var(--br2);padding:10px 18px calc(18px + env(safe-area-inset-bottom,0px));transform:translateY(105%);
+  transition:transform .24s cubic-bezier(.2,.8,.2,1)}
+body.ask .bg{opacity:1;pointer-events:auto}
+body.ask .sheet{transform:none}
+.grip{width:40px;height:4px;border-radius:2px;background:var(--br3);margin:0 auto 14px}
+.sh-k{font-size:12px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:var(--accent-tx)}
+.sh-t{font-size:var(--fs-lg);font-weight:700;color:var(--tx1);margin-top:2px;word-break:break-word}
+label{display:block;font-size:var(--fs-sm);font-weight:600;color:var(--tx3);margin:14px 2px 6px}
+label span{font-weight:400;color:var(--tx4)}
+.f{width:100%;min-height:48px;border-radius:var(--r-m);border:1.5px solid var(--br3);background:var(--surf2);color:var(--tx1);font:inherit;font-size:16px;padding:10px 14px}
+textarea.f{min-height:76px;resize:none;line-height:1.4}
+.f:focus{border-color:var(--accent);outline:none}
+.cnt{text-align:right;font-size:12px;color:var(--tx4);margin-top:4px}
+.go{width:100%;min-height:52px;margin-top:14px;border-radius:var(--r-m);background:var(--accent);color:var(--on-accent);font-size:var(--fs-lg);font-weight:800}
+.go:active{transform:scale(.98)}
+.cancel{width:100%;min-height:44px;margin-top:6px;border-radius:var(--r-m);background:none;color:var(--tx3);font-weight:600}
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="logo">Synthi<span>MIX</span></div>
+  <h1>Was m&#246;chtest du h&#246;ren?</h1>
+  <p class="lead">Such dir einen Titel aus &#8212; der DJ sieht deinen Wunsch sofort.</p>
+</header>
+
+<div class="wrap">
+  <div class="np" id="np">
+    <div class="np-l" id="npL"><span class="eq"><i></i><i></i><i></i></span>L&#228;uft gerade</div>
+    <div class="np-t" id="npT"></div>
+    <div class="np-n" id="npN"></div>
+  </div>
+
+  <div class="search">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="7"/><path d="M21 21l-6-6"/></svg>
+    <input class="inp" id="q" type="search" placeholder="Titel oder K&#252;nstler" autocomplete="off" enterkeyhint="search" aria-label="Titel oder K&#252;nstler suchen">
+  </div>
+  <div id="note" class="note" role="status">Titel mit &#8222;sofort da&#8220; kann der DJ gleich spielen.</div>
+  <div id="res" class="res"></div>
+
+  <div class="mine" id="mine"><div class="mine-h">Deine W&#252;nsche</div><div class="mine-l" id="mineL"></div></div>
+</div>
+
+<div class="bg" onclick="closeAsk()"></div>
+<form class="sheet" id="ask" onsubmit="return sendWish(event)" aria-labelledby="askT">
+  <div class="grip"></div>
+  <div class="sh-k">Dein Wunsch</div>
+  <div class="sh-t" id="askT"></div>
+  <label for="nm">Dein Name <span>(freiwillig)</span></label>
+  <input class="f" id="nm" maxlength="30" autocomplete="given-name" placeholder="z. B. Anna">
+  <label for="nt">Nachricht an den DJ <span>(freiwillig)</span></label>
+  <textarea class="f" id="nt" maxlength="80" placeholder="z. B. f&#252;r das Brautpaar &#9829;" oninput="document.getElementById('ntc').textContent=this.value.length+'/80'"></textarea>
+  <div class="cnt" id="ntc">0/80</div>
+  <button class="go" type="submit">Wunsch senden</button>
+  <button class="cancel" type="button" onclick="closeAsk()">Abbrechen</button>
+</form>
+
+<script>
+var ws,_t,_busy={},_rs=[],_pick=null
+/* Eigene Wuensche merkt sich das Handy (12 Stunden) — so sieht der Gast,
+   ob sein Titel angenommen wurde und wann er ungefaehr laeuft. */
+function mineLoad(){try{var a=JSON.parse(localStorage.getItem('synthimix-wuensche')||'[]');var g=Date.now()-12*3600e3;return a.filter(function(x){return x.at>g})}catch(e){return[]}}
+function mineAdd(id){if(!id)return;var a=mineLoad().filter(function(x){return x.id!==id});a.push({id:id,at:Date.now()});try{localStorage.setItem('synthimix-wuensche',JSON.stringify(a.slice(-20)))}catch(e){}}
+function info(){if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'wish_info',ids:mineLoad().map(function(x){return x.id})}))}
+setInterval(info,15000)
+document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible'){conn();info()}})
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function clock(ts){var d=new Date(ts*1000);return('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2)}
+function inClock(sec){return clock(Date.now()/1000+sec)}
+function both(t){return t.title+(t.artist&&t.title.indexOf(t.artist)<0?' · '+t.artist:'')}
+
+function showInfo(m){
+  var np=document.getElementById('np'),nx=m.next||[]
+  np.style.display=(m.now||nx.length)?'block':'none'
+  document.getElementById('npL').style.display=m.now?'':'none'
+  document.getElementById('npT').innerHTML=m.now?esc(m.now.title)+(m.now.artist&&m.now.title.indexOf(m.now.artist)<0?' <span class=np-a>· '+esc(m.now.artist)+'</span>':''):''
+  document.getElementById('npN').innerHTML=nx.length?'<b>Danach</b>'+nx.map(function(t){return'<div>'+esc(both(t))+'</div>'}).join(''):''
+  document.getElementById('npN').style.display=nx.length?'':'none'
+  var mine=m.mine||[]
+  document.getElementById('mine').style.display=mine.length?'block':'none'
+  document.getElementById('mineL').innerHTML=mine.map(function(w){
+    var t='wartet auf den DJ',c=''
+    if(w.state==='queued'){t='um '+inClock(w.in_sec||0)+' Uhr';c='ok'}
+    else if(w.state==='playing'){t='l&#228;uft jetzt!';c='now'}
+    else if(w.state==='played'){t='lief um '+clock(w.at||0);c='ok'}
+    else if(w.state==='accepted'){t='angenommen';c='ok'}
+    else if(w.state==='rejected'){t='leider nicht';c='no'}
+    else if(w.state==='failed'){t='nicht verf&#252;gbar';c='no'}
+    return'<div class=mi><span class=mi-t>'+esc(w.title)+'</span><span class="pill '+c+'">'+t+'</span></div>'
+  }).join('')
+}
+function conn(){
+  if(ws&&(ws.readyState===0||ws.readyState===1))return
+  ws=new WebSocket('ws://'+location.host+'/wunsch/ws')
+  ws.onopen=info
+  ws.onclose=function(){setTimeout(conn,2000)}
+  ws.onerror=function(){ws.close()}
+  ws.onmessage=function(e){
+    var m=JSON.parse(e.data)
+    if(m.type==='wish_results')show(m.results||[],m.final!==false)
+    else if(m.type==='wish_info')showInfo(m)
+    else if(m.type==='wish_ack'){
+      mineAdd(m.id);info()
+      note('<div class=msg><span>'+esc(m.title||'Dein Wunsch')+' ist beim DJ angekommen. Unter &#8222;Deine W&#252;nsche&#8220; siehst du, wann er l&#228;uft.</span></div>')
+      document.getElementById('res').innerHTML='';document.getElementById('q').value=''
+    }
+    else if(m.type==='wish_deny'){_busy={};note('<div class="msg no">'+esc(m.text||'Das ging nicht.')+'</div>');show(_rs,true)}
+  }
+}
+function note(h){document.getElementById('note').innerHTML=h}
+document.getElementById('q').oninput=function(){
+  var v=this.value.trim()
+  clearTimeout(_t)
+  if(v.length<2){document.getElementById('res').innerHTML='';return}
+  _t=setTimeout(function(){
+    document.getElementById('res').innerHTML='<div class=empty>Suche&#8230;</div>'
+    if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'wish_search',query:v}))
+  },400)
+}
+function show(rs,final){
+  _rs=rs
+  var el=document.getElementById('res')
+  if(!rs.length){el.innerHTML='<div class=empty>'+(final?'Nichts gefunden &#8212; anders schreiben?':'Suche&#8230;')+'</div>';return}
+  el.innerHTML=rs.map(function(r,i){
+    var s=r.status||{},tag='',dis=''
+    if(s.state==='playing'){tag='<span class="tag t-playing">l&#228;uft gerade</span>';dis=' disabled'}
+    else if(s.state==='queued'){tag='<span class="tag t-queued">kommt um '+inClock(s.in_sec||0)+'</span>';dis=' disabled'}
+    else if(s.state==='played'){tag='<span class="tag t-played">lief um '+clock(s.at||0)+'</span>'}
+    else if(s.state==='wished'){tag='<span class="tag t-wished">schon gew&#252;nscht'+(s.count>1?' ('+s.count+'&#215;)':'')+'</span>';dis=' disabled'}
+    else if(r.lib)tag='<span class="tag t-lib">sofort da</span>'
+    var k=r.url||r.lib
+    return'<div class=r><div class=r-i><div class=r-t>'+esc(r.title)+'</div><div class=r-s>'+tag+esc(r.uploader||'')+'</div></div>'+
+      '<button class=b'+(dis||(_busy[k]?' disabled':''))+' onclick="ask('+i+')">'+(_busy[k]?'&#10003;':'W&#252;nschen')+'</button></div>'
+  }).join('')+(final?'':'<div class=empty>Suche weiter&#8230;</div>')
+}
+function ask(i){
+  var r=_rs[i];if(!r)return
+  _pick=r
+  document.getElementById('askT').textContent=r.title
+  try{document.getElementById('nm').value=localStorage.getItem('synthimix-name')||''}catch(e){}
+  document.getElementById('nt').value='';document.getElementById('ntc').textContent='0/80'
+  document.body.classList.add('ask')
+}
+function closeAsk(){document.body.classList.remove('ask');_pick=null}
+function sendWish(e){
+  e.preventDefault()
+  var r=_pick;if(!r)return false
+  var k=r.url||r.lib;if(_busy[k])return false
+  var name=document.getElementById('nm').value.trim(),text=document.getElementById('nt').value.trim()
+  try{localStorage.setItem('synthimix-name',name)}catch(x){}
+  _busy[k]=1
+  var msg=r.lib?{type:'wish_add',lib:r.lib,title:r.title}:{type:'wish_add',url:r.url,title:r.title}
+  msg.name=name;msg.note=text
+  if(ws&&ws.readyState===1)ws.send(JSON.stringify(msg))
+  closeAsk();show(_rs,true)
+  return false
+}
+conn()
+</script>
+</body>
+</html>

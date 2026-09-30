@@ -44,6 +44,7 @@ async def lifespan(application: FastAPI):
         store.save_library()
         store._save_quality_cache()
         search._save_ytm_cache()
+        media._save_wf_cache()
     except Exception:
         pass
 
@@ -52,6 +53,64 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 
 # ── message handler ───────────────────────────────────────────────────────────
+_DL_AUDIO_EXT = {'.mp3', '.opus', '.m4a', '.flac', '.wav', '.ogg', '.aac', '.wma'}
+
+def _download_tree_sync(dl_dir: Path) -> dict:
+    """Ordnerbaum des Download-Ordners (4 Ebenen tief). os.scandir: unter
+    Windows liefert es Typ und Zeiten gleich mit, ohne eigene Abfrage je Datei."""
+    def entries(path):
+        try:
+            with os.scandir(path) as it:
+                items = list(it)
+        except OSError:
+            return [], []
+        dirs = sorted((e for e in items if e.is_dir() and not e.name.startswith('.')), key=lambda e: e.name.lower())
+        files = []
+        for e in items:
+            if e.is_file() and os.path.splitext(e.name)[1].lower() in _DL_AUDIO_EXT:
+                try:
+                    files.append({"path": e.path, "name": os.path.splitext(e.name)[0], "mtime": e.stat().st_mtime})
+                except OSError:
+                    pass
+        return dirs, files
+
+    def folder(path: str, name: str, depth: int) -> dict:
+        dirs, files = entries(path)
+        return {"name": name, "path": path,
+                "tracks": sorted(files, key=lambda x: x["name"].lower()),
+                "folders": [folder(d.path, d.name, depth + 1) for d in dirs] if depth < 4 else []}
+
+    tree = {"folders": [], "files": []}
+    if dl_dir.exists():
+        dirs, files = entries(str(dl_dir))
+        tree["folders"] = [folder(d.path, d.name, 0) for d in dirs]
+        tree["files"] = sorted(files, key=lambda x: x["name"].lower())
+    return tree
+
+async def _send_download_tree(ws: WebSocket):
+    dl_dir = Path(_state.get("download_dir", str(core.BASE_DIR / "Downloads")))
+    tree = await asyncio.get_running_loop().run_in_executor(None, _download_tree_sync, dl_dir)
+    try:
+        await ws.send_text(json.dumps({"type": "download_tree", "tree": tree}))
+    except Exception:
+        pass
+
+async def _send_waveform(ws: WebSocket, kind: str, path: str):
+    """waveform / waveform_next / waveform_third (Titel nach dem naechsten:
+    gleitet waehrend des Uebergangs mit hoch)."""
+    data = await media.compute_waveform(path) if path else []
+    try:
+        await ws.send_text(json.dumps({"type": kind, "path": path, "data": data}))
+    except Exception:
+        pass
+
+async def _send_changelog(ws: WebSocket):
+    items = await asyncio.get_running_loop().run_in_executor(None, tools._changelog_sync)
+    try:
+        await ws.send_text(json.dumps({"type": "changelog", "items": items}))
+    except Exception:
+        pass
+
 async def handle_message(ws: WebSocket, msg: dict):
     t = msg.get("type")
 
@@ -82,6 +141,7 @@ async def handle_message(ws: WebSocket, msg: dict):
             "loudnorm_target":         _state.get("loudnorm_target", -14.0),
             "loudnorm_tp":             _state.get("loudnorm_tp", -1.5),
             "playlist_folder_enabled": _state.get("playlist_folder_enabled", True),
+            "dl_parallel":             _state.get("dl_parallel", 3),
             "dl_filename_format":      _state.get("dl_filename_format", "title"),
             "download_dir":            _state.get("download_dir", str(core.BASE_DIR / "Downloads")),
             "auto_scan_interval_min":  _state.get("auto_scan_interval_min", 0),
@@ -417,6 +477,7 @@ async def handle_message(ws: WebSocket, msg: dict):
             "loudnorm_target":          _state.get("loudnorm_target", -14.0),
             "loudnorm_tp":              _state.get("loudnorm_tp", -1.5),
             "playlist_folder_enabled":  _state.get("playlist_folder_enabled", True),
+            "dl_parallel":              _state.get("dl_parallel", 3),
             "dl_filename_format":       _state.get("dl_filename_format", "title"),
             "download_dir":             _state.get("download_dir", str(core.BASE_DIR / "Downloads")),
             "auto_scan_interval_min":   _state.get("auto_scan_interval_min", 0),
@@ -430,7 +491,7 @@ async def handle_message(ws: WebSocket, msg: dict):
                 ("volume", 80), ("crossfade_s", 8.0), ("bpm_analysis", True),
                 ("scan_recursive", True), ("auto_mix", True), ("loudnorm_on_dl", False),
                 ("loudnorm_target", -10.0), ("loudnorm_tp", -1.5),
-                ("playlist_folder_enabled", True), ("dl_filename_format", "title"),
+                ("playlist_folder_enabled", True), ("dl_filename_format", "title"), ("dl_parallel", 3),
                 ("download_dir", str(core.BASE_DIR / "Downloads")), ("auto_scan_interval_min", 0),
             ]:
                 if key in data:
@@ -449,35 +510,26 @@ async def handle_message(ws: WebSocket, msg: dict):
                 "loudnorm_target":         _state.get("loudnorm_target", -14.0),
                 "loudnorm_tp":             _state.get("loudnorm_tp", -1.5),
                 "playlist_folder_enabled": _state.get("playlist_folder_enabled", True),
+                "dl_parallel":             _state.get("dl_parallel", 3),
                 "dl_filename_format":      _state.get("dl_filename_format", "title"),
                 "download_dir":            _state.get("download_dir", str(core.BASE_DIR / "Downloads")),
                 "auto_scan_interval_min":  _state.get("auto_scan_interval_min", 0),
             }))
 
-    elif t == "get_waveform":
-        path = msg.get("path", "")
-        data = await media.compute_waveform(path)
-        await ws.send_text(json.dumps({"type": "waveform", "path": path, "data": data}))
+    elif t in ("get_waveform", "get_waveform_next", "get_waveform_third"):
+        # Nebenher: frueher wartete jede weitere Anfrage des Fensters, bis die
+        # Waveform fertig war. Die Oberflaeche prueft den Pfad der Antwort.
+        asyncio.create_task(_send_waveform(ws, t[4:], msg.get("path", "")))
 
     elif t == "get_changelog":
-        items = await asyncio.get_running_loop().run_in_executor(None, tools._changelog_sync)
-        await ws.send_text(json.dumps({"type": "changelog", "items": items}))
+        # Fragt GitHub — bei langsamer Leitung Sekunden. Nicht in der Reihe warten.
+        asyncio.create_task(_send_changelog(ws))
 
     elif t == "get_beatgrid":
         path = msg.get("path", "")
         if path:
             asyncio.create_task(beatgrid._send_beatgrid(ws, path))
 
-    elif t == "get_waveform_third":
-        # Titel nach dem naechsten: gleitet waehrend des Uebergangs mit hoch
-        path = msg.get("path", "")
-        data = await media.compute_waveform(path)
-        await ws.send_text(json.dumps({"type": "waveform_third", "path": path, "data": data}))
-
-    elif t == "get_waveform_next":
-        path = msg.get("path", "")
-        data = await media.compute_waveform(path)
-        await ws.send_text(json.dumps({"type": "waveform_next", "path": path, "data": data}))
 
     elif t == "scan_library":
         folder = msg.get("folder", "")
@@ -675,6 +727,10 @@ async def handle_message(ws: WebSocket, msg: dict):
         _state["followed"] = [f for f in _state.get("followed", []) if f["url"] != url]
         store.save_settings()
         await download._push_followed()
+
+    elif t == "mix_now":
+        # Von der Fernbedienung: Uebergang zum naechsten Titel auf der naechsten Eins
+        await core.broadcast({"type": "mix_now"})
 
     elif t == "channel_follow":
         asyncio.create_task(channels._channel_follow(msg))
@@ -874,13 +930,24 @@ async def handle_message(ws: WebSocket, msg: dict):
                     "bpm": lt.get("bpm") or qt.get("bpm") or 0,
                     "bpm_f": lt.get("bpm_f") or 0,
                     "lufs": lt.get("lufs", qt.get("lufs", -99))}
-        future = [(i, q[i]) for i in range(ci + 1, len(q)) if not q[i].get("played")]
+        sel = msg.get("indices")
+        if isinstance(sel, list) and sel:
+            # Nur die markierten Titel, auf ihren bisherigen Plaetzen; der laufende
+            # bleibt stehen. Anschluss an den Titel direkt vor dem ersten markierten.
+            pos = sorted({i for i in sel if isinstance(i, int) and 0 <= i < len(q) and i != ci})
+            future = [(i, q[i]) for i in pos]
+            ref = pos[0] - 1 if pos else -1
+            start_i = ref if 0 <= ref < len(q) else ci
+        else:
+            future = [(i, q[i]) for i in range(ci + 1, len(q)) if not q[i].get("played")]
+            start_i = ci
+        cur_path = q[ci].get("path") if 0 <= ci < len(q) else None
         boosts: set[int] = set()
         if len(future) > 1:
             idxs, items = zip(*future)
             infos = [info(qt) for qt in items]
             back = {id(x): qt for x, qt in zip(infos, items)}
-            start = info(q[ci]) if 0 <= ci < len(q) else None
+            start = info(q[start_i]) if 0 <= start_i < len(q) else None
             order, boosts = await asyncio.get_running_loop().run_in_executor(None, keys._harmonic_order, start, infos)
             for n, (i, x) in enumerate(zip(idxs, order)):
                 qt = back[id(x)]
@@ -889,6 +956,8 @@ async def handle_message(ws: WebSocket, msg: dict):
                 else:
                     qt.pop("energy_boost", None)
                 q[i] = qt
+            if cur_path:
+                _state["current_idx"] = next((i for i, t in enumerate(q) if t.get("path") == cur_path), ci)
             store.save_queue()
             await core.push_queue()
         unknown = sum(1 for _, qt in future if not keys._key_to_camelot(info(qt).get("key")))
@@ -961,35 +1030,9 @@ async def handle_message(ws: WebSocket, msg: dict):
             await core.push_queue()
 
     elif t == "get_download_tree":
-        dl_dir = Path(_state.get("download_dir", str(core.BASE_DIR / "Downloads")))
-        AUDIO_EXT = {'.mp3', '.opus', '.m4a', '.flac', '.wav', '.ogg', '.aac', '.wma'}
-
-        def _scan_dl_dir(path: Path, depth: int = 0) -> dict:
-            tracks, subfolders = [], []
-            try:
-                for entry in sorted(path.iterdir(), key=lambda x: (x.is_file(), x.name.lower())):
-                    if entry.is_dir() and not entry.name.startswith('.'):
-                        if depth < 4:
-                            subfolders.append(_scan_dl_dir(entry, depth + 1))
-                    elif entry.is_file() and entry.suffix.lower() in AUDIO_EXT:
-                        tracks.append({"path": str(entry), "name": entry.stem, "mtime": entry.stat().st_mtime})
-            except PermissionError:
-                pass
-            return {"name": path.name, "path": str(path),
-                    "tracks": sorted(tracks, key=lambda x: x["name"].lower()),
-                    "folders": subfolders}
-
-        tree = {"folders": [], "files": []}
-        if dl_dir.exists():
-            try:
-                for entry in sorted(dl_dir.iterdir(), key=lambda x: (x.is_file(), x.name.lower())):
-                    if entry.is_dir() and not entry.name.startswith('.'):
-                        tree["folders"].append(_scan_dl_dir(entry))
-                    elif entry.is_file() and entry.suffix.lower() in AUDIO_EXT:
-                        tree["files"].append({"path": str(entry), "name": entry.stem, "mtime": entry.stat().st_mtime})
-            except PermissionError:
-                pass
-        await ws.send_text(json.dumps({"type": "download_tree", "tree": tree}))
+        # Im Hintergrund-Thread: beim ganzen Musikordner dauerte das Einlesen
+        # ~0,4 s und hielt so lange den ganzen Server an (auch die Waveform)
+        asyncio.create_task(_send_download_tree(ws))
 
     elif t == "get_playlists":
         await ws.send_text(json.dumps({"type": "playlists",
@@ -1297,6 +1340,13 @@ async def handle_message(ws: WebSocket, msg: dict):
         _state["playlist_folder_enabled"] = bool(msg.get("enabled", True))
         store.save_settings()
 
+    elif t == "set_dl_parallel":
+        try:
+            _state["dl_parallel"] = max(1, min(6, int(msg.get("value", 3))))
+        except (TypeError, ValueError):
+            pass
+        store.save_settings()
+
     elif t == "set_dl_filename_format":
         _state["dl_filename_format"] = str(msg.get("format", "title"))
         store.save_settings()
@@ -1331,4 +1381,7 @@ async def websocket_endpoint(ws: WebSocket):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=core._BACKEND_PORT, log_level="warning")
+    # Keine Kompression: nur lokal, und sie kostete bei der ganzen Bibliothek
+    # (~1,5 MB) rund 0,4 s — so lange stand jede weitere Anfrage an
+    uvicorn.run(app, host="127.0.0.1", port=core._BACKEND_PORT, log_level="warning",
+                ws_per_message_deflate=False)

@@ -62,6 +62,8 @@
   function shuffleQueue()         { send({ type: 'queue_shuffle' }) }
   function shuffleUnplayed()      { send({ type: 'queue_shuffle_unplayed' }); showMenu = false }
   function shuffleSelected()      { send({ type: 'queue_shuffle_selected', indices: [...qSelected] }); showMenu = false; qSelected = new Set() }
+  // Nur die markierten Titel harmonisch ordnen (auf ihren bisherigen Plaetzen)
+  function harmonicSelected()     { send({ type: 'queue_harmonic', indices: [...qSelected] }); showMenu = false; qSelected = new Set() }
   function markAllUnplayed()      { send({ type: 'queue_mark_unplayed' }); showMenu = false }
   function removePlayed()         { send({ type: 'queue_remove_played' }); showMenu = false }
   function removeQueueDuplicates(){ send({ type: 'queue_remove_duplicates' }); showMenu = false }
@@ -545,6 +547,10 @@
             <button onclick={() => { shuffleQueue(); showMenu = false }}>Einmalig mischen</button>
             <button onclick={shuffleUnplayed}>Nur ungespielte mischen</button>
             {#if qSelected.size > 1}
+              <button onclick={harmonicSelected}
+                      title="Nur die markierten Titel nach Tonart und Tempo ordnen — sie bleiben auf ihren Plätzen in der Warteschlange">
+                <i class="ti ti-wave-sine dd-check"></i> Nur markierte harmonisch sortieren ({qSelected.size})
+              </button>
               <button onclick={shuffleSelected}>Nur markierte mischen ({qSelected.size})</button>
             {/if}
             {#if $playerState.current_idx >= 0}
@@ -644,10 +650,12 @@
             <span class="bpm">{bpm ? Math.round(bpm) : ''}</span>
           {/if}
 
-          {#if showKey && keyOf(track)}
+          <!-- Feste Breite (auch ohne Tonart), damit BPM und Dauer in einer Reihe stehen -->
+          {#if showKey}
             {@const k = keyOf(track)}
-            {@const uebergang = i > 0 ? keyCompat(keyOf($queue[i - 1])?.key, k.key) : null}
-            <span class="key">{#if track.energy_boost}<i class="ti ti-trending-up boost" title="Energie-Schub: Tonart oder Tempo gehen hier bewusst nach oben"></i>{/if}<KeyChip key={k.key} src={k.key_src} compat={uebergang} hint="Übergang vom vorherigen Titel: " /></span>
+            {@const uebergang = k && i > 0 ? keyCompat(keyOf($queue[i - 1])?.key, k.key) : null}
+            <span class="key">{#if k}<KeyChip key={k.key} src={k.key_src} compat={uebergang} hint="Übergang vom vorherigen Titel: "
+                                                 ring boost={!!track.energy_boost} />{/if}</span>
           {/if}
           <span class="dur">{fmt(track.duration_sec)}</span>
           <!-- Startzeit-Spalte immer ausgeben (auch leer), damit die Dauer buendig bleibt -->
@@ -737,6 +745,7 @@
     <button onclick={() => { skipIntroFor($queue[qCtxMenu.idx]?.path); play(qCtxMenu.idx); closeRowCtx() }}>Intro überspringen</button>
     <div class="ctx-sep"></div>
     {#if qSelected.size > 1 && qSelected.has(qCtxMenu.idx)}
+      <button onclick={() => { harmonicSelected(); closeRowCtx() }}>{qSelected.size} harmonisch sortieren</button>
       <button class="ctx-danger" onclick={() => { removeSelected(); closeRowCtx() }}>{qSelected.size} löschen</button>
     {:else}
       <button class="ctx-danger" onclick={() => { remove(qCtxMenu.idx); closeRowCtx() }}>Löschen</button>
@@ -846,8 +855,7 @@
   }
 
   .pc { flex-shrink: 0; font-size: var(--fs-cap); font-weight: 600; color: var(--c-accent-tx); font-variant-numeric: tabular-nums; }
-  .key { flex-shrink: 0; font-size: var(--fs-sm); display: inline-flex; align-items: center; gap: 2px; }
-  .boost { color: var(--c-accent-tx); font-size: 13px; }
+  .key { flex-shrink: 0; width: 60px; font-size: var(--fs-sm); display: inline-flex; align-items: center; }
   .harm-note { color: var(--c-accent-tx); }
   .bpm { flex-shrink: 0; min-width: 28px; text-align: right; font-size: var(--fs-sm); color: var(--c-tx3); font-variant-numeric: tabular-nums; }
   .dur {

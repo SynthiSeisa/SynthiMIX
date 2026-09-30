@@ -726,14 +726,81 @@ async def _enrich_track(path: str, force: bool = False):
 # ── waveform ─────────────────────────────────────────────────────────────────
 _wf_cache: dict[str, list] = {}
 
+# Waveforms zusaetzlich auf der Platte merken: frueher wurde jede nach jedem
+# Start neu aus der Datei gerechnet. Je Titel 1000 Werte als Bytes (0-255),
+# Schluessel Pfad + Groesse + Aenderungszeit — eine geaenderte Datei rechnet neu.
+from concurrent.futures import ThreadPoolExecutor
+# Eigene Threads: im allgemeinen Pool stand die Waveform sonst hinter den
+# Hintergrund-Analysen (Qualitaet, Tonart, Takt, Phrasen) an
+_WF_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="waveform")
+_WF_DISK_MAX = 6000
+_wf_disk: dict | None = None
+_wf_disk_dirty = False
+_wf_save_task = None
+
+def _wf_cache_file():
+    return core.BASE_DIR / "waveform_cache.json"
+
+def _wf_key(path: str) -> str | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return f"{path.lower()}|{st.st_size}|{int(st.st_mtime)}"
+
+def _wf_disk_dict() -> dict:
+    global _wf_disk
+    if _wf_disk is None:
+        raw = store._load_json(_wf_cache_file(), {})
+        _wf_disk = raw if isinstance(raw, dict) else {}
+    return _wf_disk
+
+def _save_wf_cache():
+    global _wf_disk_dirty
+    if not _wf_disk_dirty or _wf_disk is None:
+        return
+    while len(_wf_disk) > _WF_DISK_MAX:
+        _wf_disk.pop(next(iter(_wf_disk)))
+    try:
+        store._save_json(_wf_cache_file(), _wf_disk)
+        _wf_disk_dirty = False
+    except Exception:
+        pass
+
+async def _save_wf_cache_later():
+    global _wf_save_task
+    try:
+        await asyncio.sleep(10)
+        _save_wf_cache()
+    finally:
+        _wf_save_task = None
+
 async def compute_waveform(path: str, bars: int = 1000) -> list[float]:
+    global _wf_disk_dirty, _wf_save_task
     if path in _wf_cache:
         return _wf_cache[path]
     if not os.path.exists(path):
         return []
+    key = _wf_key(path) if bars == 1000 else None
+    if key:
+        hit = _wf_disk_dict().get(key)
+        if hit:
+            try:
+                data = [b / 255 for b in base64.b64decode(hit)]
+                _wf_cache[path] = data
+                return data
+            except Exception:
+                pass
     loop = asyncio.get_running_loop()
-    data = await loop.run_in_executor(None, _waveform_sync, path, bars)
+    data = await loop.run_in_executor(_WF_POOL, _waveform_sync, path, bars)
     _wf_cache[path] = data
+    if key and data:
+        d = _wf_disk_dict()
+        d.pop(key, None)
+        d[key] = base64.b64encode(bytes(min(255, max(0, round(v * 255))) for v in data)).decode("ascii")
+        _wf_disk_dirty = True
+        if _wf_save_task is None:
+            _wf_save_task = asyncio.create_task(_save_wf_cache_later())
     return data
 
 def _waveform_sync(path: str, bars: int) -> list[float]:
@@ -747,6 +814,17 @@ def _waveform_sync(path: str, bars: int) -> list[float]:
         proc.wait()
         if not raw or len(raw) < 4:
             return []
+        if _numpy_ok():
+            # Mit numpy: ein Bruchteil der Zeit der Python-Schleife unten
+            import numpy as np
+            a = np.frombuffer(raw[:len(raw) & ~1], dtype=np.int16)
+            chunk = a.size // bars
+            if chunk < 1:
+                return []
+            x = a[:chunk * bars].astype(np.float32).reshape(bars, chunk)
+            rms = np.sqrt((x * x).mean(axis=1))
+            mx = float(rms.max()) or 1.0
+            return [float(v) for v in rms / mx]
         import array as _arr
         samples = _arr.array("h", raw[:len(raw) & ~1])
         n = len(samples)

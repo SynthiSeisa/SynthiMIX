@@ -18,7 +18,7 @@ a = Analysis(
     ['main.py'],
     pathex=[str(ROOT / 'backend')],
     binaries=binaries,
-    datas=[],
+    datas=[(str(ROOT / 'backend' / 'synthimix' / 'web'), 'synthimix/web')],
     hiddenimports=[
         'uvicorn.logging',
         'uvicorn.loops', 'uvicorn.loops.auto',

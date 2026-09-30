@@ -93,6 +93,22 @@ class PlaylistParallelTest(BackendTest):
         self.assertEqual(len(starts), main._DL_PARALLEL)
         self.assertTrue(final and final.endswith(".mp3"))
 
+    def test_gleichzeitige_downloads_einstellbar(self):
+        from tests.support import FakeWS
+        self.run_async(main.handle_message(FakeWS(), {"type": "set_dl_parallel", "value": 5}))
+        self.assertEqual(main._state["dl_parallel"], 5)
+        self.run_async(main.handle_message(FakeWS(), {"type": "set_dl_parallel", "value": 99}))
+        self.assertEqual(main._state["dl_parallel"], 6)                    # hoechstens 6
+        main._state["dl_parallel"] = 1
+        try:
+            self.fake_audit([f"id{n:09d}" for n in range(4)], "Eins")
+            self.run_async(main.run_download("https://www.youtube.com/playlist?list=PLeins", "mp3-best"))
+            starts = [l for l in self.log.read_text("utf-8").splitlines() if l.startswith("start")]
+            self.assertEqual(len(starts), 1)
+            self.assertEqual(len(list((self.tmp / "Downloads" / "Eins").glob("*.mp3"))), 4)
+        finally:
+            main._state["dl_parallel"] = 3
+
     def test_nicht_verfuegbar(self):
         self.fake_audit(["idaaaaaaaaa", "kaputt00000", "idbbbbbbbbb"], "Liste")
         self.run_async(main.run_download("https://www.youtube.com/playlist?list=PLtest2", "mp3-best"))

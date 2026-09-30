@@ -26,11 +26,19 @@ export const settingsOpen  = writable(false)
 export const settingsTab   = writable(null)   // Tab, der beim Oeffnen gezeigt wird
 
 /** Einstellungen oeffnen, wahlweise direkt auf einem bestimmten Tab. */
+// Zuletzt angefragte Waveform je Art (waveform / waveform_next / waveform_third)
+const _wfWant = {}
+export function requestWaveform(kind, path) {
+  _wfWant[kind] = path
+  send({ type: 'get_' + kind, path })
+}
+
 export function openSettings(tabId = null) {
   if (tabId) settingsTab.set(tabId)
   settingsOpen.set(true)
 }
 export const playlistFolderEnabled = writable(true)
+export const dlParallel = writable(3)          // gleichzeitige Downloads bei Playlists (1-6)
 export const dlFilenameFormat      = writable('title')
 export const downloadDir           = writable('')
 export const autoScanIntervalMin   = writable(0)
@@ -60,6 +68,8 @@ export const followed            = writable([])
 export const followedChannels    = writable([])
 // Auswahl der Playlists eines Kanals: null | {plan_id, url, title, playlists:[{url,title,thumb,followed}], existing, auto_new, excluded} | {error}
 export const channelPlan         = writable(null)
+// "Jetzt mischen" von der Fernbedienung: Zeitstempel der Anforderung
+export const mixNowRequest       = writable(0)
 // Eigener Store: im settings-Store landen nur volume/crossfade_s, dort kam der
 // Wert nie an — der Schalter stand in 1.4.2 dadurch immer auf aus.
 export const ytdlpAutoupdate     = writable(true)
@@ -127,6 +137,10 @@ const APP_SETTINGS_DEFAULTS = {
   phraseAlign:        true,    // Uebergang auf Phrasenanfang (16/8 Takte, hoechstens 8 Takte verschoben)
   bassSwap:           true,    // Bass weich tauschen (EQ), nur wenn der Uebergang im Takt laeuft
   maxTempoDiff:       8,       // groesster Tempo-Unterschied fuers Angleichen in % (4-25)
+  cfUnit:             'bars',  // Uebergangslaenge in Takten ('bars') oder Sekunden ('sec')
+  cfBars:             16,      // Takte (0 = aus); ohne bekannte BPM gelten die Sekunden
+  outputDevice:       '',      // Ausgabegeraet (deviceId), '' = Windows-Standard
+  outputDeviceLabel:  '',      // Name dazu, falls sich die Kennung aendert
   playerShowLufs:     false,   // LUFS-Stand im Player neben BPM zeigen
   dupeAllowFolders:   [],      // Ordner, in denen Kopien nicht als Duplikat zaehlen
   keyNotation:        'musical',   // Tonart als 'musical' (F♯m) oder 'camelot' (11A)
@@ -247,9 +261,10 @@ function connect() {
         break
       }
       case 'scan_status':   scanStatus.set(msg.text); break
-      case 'waveform':        waveform.set(msg.data ?? []); break
-      case 'waveform_next':   waveformNext.set(msg.data ?? []); break
-      case 'waveform_third':  waveformThird.set({ path: msg.path ?? '', data: msg.data ?? [] }); break
+      // Waveforms kommen nebenher — eine aeltere Antwort darf keine neuere ueberschreiben
+      case 'waveform':        if (_wfWant.waveform === undefined || msg.path === _wfWant.waveform) waveform.set(msg.data ?? []); break
+      case 'waveform_next':   if (_wfWant.waveform_next === undefined || msg.path === _wfWant.waveform_next) waveformNext.set(msg.data ?? []); break
+      case 'waveform_third':  if (_wfWant.waveform_third === undefined || msg.path === _wfWant.waveform_third) waveformThird.set({ path: msg.path ?? '', data: msg.data ?? [] }); break
       case 'harmonic_result': harmonicResult.set({ ...msg, at: Date.now() }); break
       case 'beatgrid':
         beatGrids.update(g => ({ ...g, [msg.path]: { bpm: msg.bpm_f || 0, off: msg.beat_off || 0, conf: msg.beat_conf || 0,
@@ -273,6 +288,7 @@ function connect() {
         if (msg.loudnorm_target           !== undefined) loudnormTarget.set(msg.loudnorm_target)
         if (msg.loudnorm_tp               !== undefined) loudnormTp.set(msg.loudnorm_tp)
         if (msg.playlist_folder_enabled   !== undefined) playlistFolderEnabled.set(msg.playlist_folder_enabled)
+        if (msg.dl_parallel               !== undefined) dlParallel.set(msg.dl_parallel)
         if (msg.dl_filename_format        !== undefined) dlFilenameFormat.set(msg.dl_filename_format)
         if (msg.download_dir              !== undefined) downloadDir.set(msg.download_dir)
         if (msg.auto_scan_interval_min    !== undefined) autoScanIntervalMin.set(msg.auto_scan_interval_min)
@@ -362,6 +378,7 @@ function connect() {
       case 'wishes':                  wishes.set(msg.items || []); wishesLoaded.set(true); break
       case 'changelog':               changelog.set(msg.items || []); break
       case 'followed':                followed.set(msg.items || []); followedChannels.set(msg.channels || []); break
+      case 'mix_now':                 mixNowRequest.set(Date.now()); break
       case 'channel_plan':
         planChecks.update(l => l.filter(c => c.url !== msg.src))
         channelPlan.set(msg)

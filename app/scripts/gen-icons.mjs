@@ -96,6 +96,10 @@ const ICONS = [
   ['broadcast',       'outline'],
   ['playlist',        'outline'],
   ['sparkles',        'outline'],
+  // 30.09.2026: Dienste als Karten
+  ['brand-spotify',   'outline'],
+  ['brand-lastfm',    'outline'],
+  ['fingerprint',     'outline'],
 ]
 
 function maskUrl(name, variant) {

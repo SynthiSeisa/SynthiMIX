@@ -64,3 +64,20 @@ class HarmonicOrderTest(BackendTest):
         self.assertEqual(titles[-1], "clash")
         res = [m for m in ws.sent if m.get("type") == "harmonic_result"][0]
         self.assertEqual(res["count"], 3)
+
+    def test_nur_markierte(self):
+        # Nur die markierten Titel werden umgeordnet, auf ihren bisherigen Plaetzen;
+        # der laufende und alle anderen bleiben stehen
+        main._state["library"] = []
+        main._state["queue"] = [t("laeuft", "Am"), t("clash", "F♯"), t("fest1", "C"),
+                                t("gut", "Am"), t("fest2", "G"), t("auch", "Em")]
+        main._state["current_idx"] = 0
+        ws = _WS()
+        self.run_async(main.handle_message(ws, {"type": "queue_harmonic", "indices": [0, 1, 3, 5]}))
+        titles = [x["title"] for x in main._state["queue"]]
+        self.assertEqual((titles[0], titles[2], titles[4]), ("laeuft", "fest1", "fest2"))
+        self.assertEqual(sorted([titles[1], titles[3], titles[5]]), ["auch", "clash", "gut"])
+        self.assertEqual(titles[5], "clash")                     # passt am wenigsten: nach hinten
+        self.assertEqual(main._state["current_idx"], 0)
+        res = [m for m in ws.sent if m.get("type") == "harmonic_result"][0]
+        self.assertEqual(res["count"], 3)

@@ -41,6 +41,9 @@
         {(current.count ?? 1) > 1 ? 'Wieder gewünscht' : 'Neuer Musikwunsch'}
       </div>
       <div class="wt-title" title={current.title}>{current.title}</div>
+      {#if current.names?.length || current.note}
+        <div class="wt-from">{#if current.names?.length}<b>{current.names.join(', ')}</b>{/if}{#if current.note}{current.names?.length ? ': ' : ''}„{current.note}“{/if}</div>
+      {/if}
       <div class="wt-state s-{current.status}">
         {#if (current.count ?? 1) > 1}<b class="wt-cnt">{current.count}× gewünscht</b>&nbsp;·&nbsp;{/if}{STATUS[current.status] ?? current.status}{#if more}&nbsp;·&nbsp;<button class="wt-link" onclick={openAll}>+{more} weitere</button>{/if}
       </div>
@@ -79,6 +82,8 @@
   .wt-head { font-size: var(--fs-sm); font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--c-accent-tx); display: flex; gap: 8px; align-items: center; }
   .wt-cnt { font-weight: 700; color: var(--c-tx1); }
   .wt-title { font-size: var(--fs-lg, 15px); font-weight: 700; color: var(--c-tx1); line-height: 1.3; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .wt-from { font-size: var(--fs-sm); color: var(--c-tx2); line-height: 1.4; word-break: break-word; }
+  .wt-from b { font-weight: 700; color: var(--c-tx1); }
   .wt-state { font-size: var(--fs-sm); color: var(--c-tx3); }
   .wt-state.s-bereit { color: var(--c-green-tx); }
   .wt-state.s-fehler { color: var(--c-warn-tx); }

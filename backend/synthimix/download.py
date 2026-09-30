@@ -13,7 +13,7 @@ from .core import _NO_WINDOW, _state
 from . import channels, core, library, media, search, store, tools
 
 _dl_procs: dict[int, Any] = {}  # session_id → asyncio.Process oder Liste davon (Playlist parallel)
-_DL_PARALLEL = 3                  # gleichzeitige yt-dlp-Prozesse bei Playlists
+_DL_PARALLEL = 3                  # gleichzeitige yt-dlp-Prozesse bei Playlists (Standard, einstellbar 1-6)
 
 def _is_spotify(url: str) -> bool:
     return "open.spotify.com" in url or "spotify.link" in url
@@ -1091,7 +1091,8 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
                 try: listfile.unlink()
                 except Exception: pass
 
-        batches = [todo[i::_DL_PARALLEL] for i in range(_DL_PARALLEL)]
+        par = max(1, min(6, int(_state.get("dl_parallel", _DL_PARALLEL) or _DL_PARALLEL)))
+        batches = [b for b in (todo[i::par] for i in range(par)) if b]
         await asyncio.gather(*(_batch(b, n) for n, b in enumerate(batches)))
 
         # Gesperrt (Land) oder geloescht: eine andere Version desselben Songs

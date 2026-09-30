@@ -11,10 +11,52 @@
            lastfmApiKey, acoustidApiKey,
            fpcalcInstalling, fpcalcInstallError,
            spotdlInstalling, spotdlInstallError, spotdlInstallText,
-           watchedFolders, watchedFolderImpact, ytdlpAutoupdate, excludedFolders, toolUpdates, servicesTest, setupOpen, changelog, followed, followedChannels } from '../stores/ws.js'
+           watchedFolders, watchedFolderImpact, ytdlpAutoupdate, excludedFolders, toolUpdates, servicesTest, setupOpen, changelog, followed, followedChannels, dlParallel } from '../stores/ws.js'
   import { infoHints } from '../lib/infohints.js'
 
   let tab = $state('playback')
+
+  // ── Ausgabegeraet (Wiedergabe) ─────────────────────────────────────────────
+  let outDevices = $state([])
+  async function loadDevices() {
+    try {
+      const d = await navigator.mediaDevices.enumerateDevices()
+      outDevices = d.filter(x => x.kind === 'audiooutput' && x.deviceId !== 'default' && x.deviceId !== 'communications')
+    } catch { outDevices = [] }
+  }
+  $effect(() => {
+    if (tab !== 'playback') return
+    loadDevices()
+    const h = () => loadDevices()
+    navigator.mediaDevices?.addEventListener?.('devicechange', h)
+    return () => navigator.mediaDevices?.removeEventListener?.('devicechange', h)
+  })
+  const devMissing = $derived(!!$appSettings.outputDevice && !outDevices.some(d => d.deviceId === $appSettings.outputDevice))
+  function setDevice(id) {
+    const d = outDevices.find(x => x.deviceId === id)
+    appSettings.update(s => ({ ...s, outputDevice: id, outputDeviceLabel: d?.label ?? '' }))
+  }
+
+  // ── Uebergangslaenge ──────────────────────────────────────────────────────
+  const CF_BARS = [0, 4, 8, 16, 32]
+  const barSec = (bars, bpm) => Math.round(bars * 4 * 60 / bpm)
+
+  // ── Dienste: je Dienst eine Karte, aufklappbar ────────────────────────────
+  let svcOpen = $state(null)
+  function toggleCard(id) { svcOpen = svcOpen === id ? null : id }
+  const svcState = $derived.by(() => {
+    const t = $servicesTest ?? {}
+    const res = (r, fallback) => r ? { cls: r.ok ? 'ok' : 'err', text: r.ok ? 'Verbunden' : 'Fehler' } : fallback
+    return {
+      spotify: $spotdlInstalling ? { cls: 'busy', text: 'Wird installiert…' }
+        : !$toolsInfo.spotdl_version ? { cls: 'off', text: 'Nicht installiert' }
+        : $toolUpdates.spotdl?.available ? { cls: 'busy', text: 'Update verfügbar' }
+        : { cls: 'ok', text: 'Bereit' },
+      lastfm: !$lastfmApiKey ? { cls: 'off', text: 'Nicht eingerichtet' } : res(t.lastfm, { cls: 'ok', text: 'Key eingetragen' }),
+      acoustid: !$toolsInfo.fpcalc_found ? { cls: 'off', text: 'fpcalc fehlt' }
+        : !$acoustidApiKey ? { cls: 'off', text: 'Key fehlt' } : res(t.acoustid, { cls: 'ok', text: 'Bereit' }),
+    }
+  })
 
   // ── Verfolgte Playlists (frueher als Kasten ueber den Downloads) ─────────
   const FOLLOW_MODE = { playlist: 'als Playlist', new: 'nur neue', folder: 'kompletter Ordner' }
@@ -337,14 +379,24 @@
         {#if tab === 'playback'}
 
           <div class="group">
-            <div class="group-title">Pegel</div>
-
+            <div class="group-title">Ausgabe</div>
+            <div class="row">
+              <span class="lbl">Ausgabegerät</span>
+              <select class="field field-sm" value={$appSettings.outputDevice ?? ''} onchange={(e) => setDevice(e.currentTarget.value)}
+                      aria-label="Ausgabegerät">
+                <option value="">Windows-Standard</option>
+                {#each outDevices as d (d.deviceId)}<option value={d.deviceId}>{d.label || 'Audiogerät'}</option>{/each}
+                {#if devMissing}<option value={$appSettings.outputDevice}>{$appSettings.outputDeviceLabel || 'Gerät'} (nicht verbunden)</option>{/if}
+              </select>
+            </div>
+            {#if devMissing}<div class="hint keep warn">Das gewählte Gerät ist nicht verbunden — gespielt wird über den Windows-Standard, bis es wieder da ist.</div>{/if}
             <div class="row">
               <span class="lbl">Lautstärke</span>
               <input type="range" min="0" max="100" value={$settings.volume}
                 oninput={(e) => send({ type: 'set_volume', value: +e.target.value })} />
               <span class="val">{$settings.volume}</span>
             </div>
+            <div class="hint">Die ganze Wiedergabe läuft über das gewählte Gerät, z. B. ein USB-Audio-Interface. Fehlt es (Box aus, abgesteckt), spielt SynthiMIX über den Windows-Standard weiter und schaltet zurück, sobald es wieder da ist.</div>
           </div>
 
           <div class="group">
@@ -400,16 +452,18 @@
 
           <div class="group">
             <div class="group-title">Queue-Ende</div>
-            <div class="hint">Was passiert wenn die Warteschlange leer ist.</div>
-            <div class="btn-group radio-group">
-              {#each [['stop','Stopp'],['automix','Auto-Mix'],['repeat','Wiederholen']] as [val, label]}
-                <button class="btn btn-sm" class:is-active={queueEnd === val}
-                        onclick={() => setQueueEnd(val)}>
-                  {label}
-                </button>
-              {/each}
+            <div class="row">
+              <span class="lbl">Wenn die Warteschlange leer ist</span>
+              <div class="btn-group">
+                {#each [['stop','Stopp'],['automix','Auto-Mix'],['repeat','Wiederholen']] as [val, label]}
+                  <button class="btn btn-sm" class:is-active={queueEnd === val}
+                          onclick={() => setQueueEnd(val)}>
+                    {label}
+                  </button>
+                {/each}
+              </div>
             </div>
-            <div class="hint" style="margin-top:6px">
+            <div class="hint keep sub">
               {#if queueEnd === 'stop'}Wiedergabe endet nach dem letzten Track
               {:else if queueEnd === 'automix'}Sucht automatisch ähnliche Songs weiter
               {:else}Queue startet von vorne (alle Tracks){/if}
@@ -420,29 +474,57 @@
         {:else if tab === 'fade'}
 
           <div class="group">
-            <div class="group-title">Überblendzeit</div>
-            <div class="hint">Wie lange der Übergang zwischen zwei Tracks dauert. Bei 0 wird direkt umgeschaltet.</div>
-            <div class="row" style="margin-top:8px">
-              <span class="lbl">Dauer</span>
-              <input type="range" min="0" max="15" step="1" value={$settings.crossfade_s}
-                onchange={(e) => send({ type: 'set_crossfade', seconds: +e.target.value })}
-                oninput={(e) => settings.update(s => ({ ...s, crossfade_s: +e.target.value }))} />
-              <span class="val">{$settings.crossfade_s === 0 ? 'aus' : $settings.crossfade_s + 's'}</span>
+            <div class="group-title">Übergangslänge</div>
+            <div class="row">
+              <span class="lbl">Messen in</span>
+              <div class="btn-group">
+                <button class="btn btn-sm" class:is-active={($appSettings.cfUnit ?? 'bars') === 'bars'}
+                        onclick={() => appSettings.update(s => ({ ...s, cfUnit: 'bars' }))}>Takten</button>
+                <button class="btn btn-sm" class:is-active={$appSettings.cfUnit === 'sec'}
+                        onclick={() => appSettings.update(s => ({ ...s, cfUnit: 'sec' }))}>Sekunden</button>
+              </div>
             </div>
+            {#if ($appSettings.cfUnit ?? 'bars') === 'bars'}
+              {@const bars = $appSettings.cfBars ?? 16}
+              <div class="row">
+                <span class="lbl">Länge in Takten</span>
+                <div class="btn-group">
+                  {#each CF_BARS as b}
+                    <button class="btn btn-sm" class:is-active={bars === b}
+                            onclick={() => appSettings.update(s => ({ ...s, cfBars: b }))}>{b === 0 ? 'aus' : b}</button>
+                  {/each}
+                </div>
+              </div>
+              <div class="hint keep sub">
+                {#if bars === 0}Kein Übergang — es wird direkt umgeschaltet.
+                {:else}Bei 128 BPM etwa {barSec(bars, 128)} s, bei 174 BPM etwa {barSec(bars, 174)} s. Titel ohne bekanntes Tempo: {$settings.crossfade_s || 8} s.{/if}
+              </div>
+            {:else}
+              <div class="row">
+                <span class="lbl">Dauer</span>
+                <input type="range" min="0" max="15" step="1" value={$settings.crossfade_s}
+                  onchange={(e) => send({ type: 'set_crossfade', seconds: +e.target.value })}
+                  oninput={(e) => settings.update(s => ({ ...s, crossfade_s: +e.target.value }))} />
+                <span class="val">{$settings.crossfade_s === 0 ? 'aus' : $settings.crossfade_s + ' s'}</span>
+              </div>
+            {/if}
+            <div class="hint">Wie lange der Übergang zwischen zwei Titeln dauert. In Takten ist er bei jedem Tempo musikalisch gleich lang (16 Takte = eine typische Phrase); das Tempo kommt aus dem gemessenen Taktraster, sonst aus dem BPM-Tag.</div>
           </div>
 
           <div class="group">
             <div class="group-title">Überblend-Kurve</div>
-            <div class="hint">Bestimmt den Lautstärkeverlauf während des Übergangs.</div>
-            <div class="btn-group radio-group">
-              {#each [['cosine','Kosinus'],['linear','Linear'],['scurve','S-Kurve']] as [val, label]}
-                <button class="btn btn-sm" class:is-active={$appSettings.cfCurve === val}
-                        onclick={() => appSettings.update(s => ({...s, cfCurve: val}))}>
-                  {label}
-                </button>
-              {/each}
+            <div class="row">
+              <span class="lbl">Lautstärkeverlauf</span>
+              <div class="btn-group">
+                {#each [['cosine','Kosinus'],['linear','Linear'],['scurve','S-Kurve']] as [val, label]}
+                  <button class="btn btn-sm" class:is-active={$appSettings.cfCurve === val}
+                          onclick={() => appSettings.update(s => ({...s, cfCurve: val}))}>
+                    {label}
+                  </button>
+                {/each}
+              </div>
             </div>
-            <div class="hint" style="margin-top:6px">
+            <div class="hint keep sub">
               {#if $appSettings.cfCurve === 'cosine'}Weiche Sinuskurve — natürlichster Klang, empfohlen
               {:else if $appSettings.cfCurve === 'linear'}Gleichmäßiger Abfall — direkter, teils hörbar
               {:else}Starke S-Kurve — lange stille Mitte, harte Ein- und Ausgänge{/if}
@@ -454,14 +536,14 @@
             <div class="group-title">Intelligenter Fade</div>
             <div class="hint">Analysiert die Waveform automatisch und zeigt graue Balken: das Intro (Track startet erst beim Beat) und die Mix-Zone am Outro (wo der Übergang läuft).</div>
 
-            <div class="row" style="margin-top:10px">
+            <div class="row">
               <span class="lbl">Aktiv</span>
               <button class="tog {$appSettings.smartFade ? 'on' : ''}"
                 onclick={() => appSettings.update(s => ({...s, smartFade: !s.smartFade}))}></button>
             </div>
 
             <!-- INTRO -->
-            <div class="row {$appSettings.smartFade ? '' : 'dimmed'}" style="margin-top:8px">
+            <div class="row {$appSettings.smartFade ? '' : 'dimmed'}">
               <span class="lbl" title="Wie viel vom erkannten Intro übersprungen wird. Sanft = nur ein Teil, Stark = das ganze Intro bis zum Beat.">Intro überspringen</span>
               <input type="range" min="1" max="5" step="1"
                      value={$appSettings.introAggressiveness ?? 3}
@@ -471,7 +553,7 @@
                 {(['Sehr sanft','Sanft','Mittel','Stark','Sehr stark'])[($appSettings.introAggressiveness ?? 3) - 1]}
               </span>
             </div>
-            <div class="hint {$appSettings.smartFade ? '' : 'dimmed'}">
+            <div class="hint keep sub {$appSettings.smartFade ? '' : 'dimmed'}">
               {#if ($appSettings.introAggressiveness ?? 3) === 1}
                 Sehr sanft — überspringt nur ~30% des erkannten Intros
               {:else if ($appSettings.introAggressiveness ?? 3) === 2}
@@ -487,7 +569,7 @@
             <BlendSketch kind="intro" value={$appSettings.introAggressiveness ?? 3} dimmed={!$appSettings.smartFade} />
 
             <!-- OUTRO -->
-            <div class="row {$appSettings.smartFade ? '' : 'dimmed'}" style="margin-top:8px">
+            <div class="row {$appSettings.smartFade ? '' : 'dimmed'}">
               <span class="lbl" title="Wie früh der Übergang vor der erkannten Outro-Stille beginnt. Stark = deutlich früher, längere Überlappung.">Outro-Start</span>
               <input type="range" min="1" max="5" step="1"
                      value={$appSettings.outroAggressiveness ?? 3}
@@ -497,7 +579,7 @@
                 {(['Sehr sanft','Sanft','Mittel','Stark','Sehr stark'])[($appSettings.outroAggressiveness ?? 3) - 1]}
               </span>
             </div>
-            <div class="hint {$appSettings.smartFade ? '' : 'dimmed'}">
+            <div class="hint keep sub {$appSettings.smartFade ? '' : 'dimmed'}">
               {#if ($appSettings.outroAggressiveness ?? 3) === 1}
                 Sehr sanft — Übergang startet genau am erkannten Stille-Punkt
               {:else if ($appSettings.outroAggressiveness ?? 3) === 2}
@@ -516,7 +598,7 @@
           <div class="group">
             <div class="group-title">Auf den Takt</div>
             <div class="hint">SynthiMIX misst für den laufenden und den nächsten Titel das genaue Tempo und wo die Schläge liegen (etwa 1 s je Titel).</div>
-            <div class="row" style="margin-top:8px">
+            <div class="row">
               <span class="lbl">Schläge übereinanderlegen</span>
               <button class="tog {$appSettings.beatAlignCf ? 'on' : ''}" aria-label="Schläge übereinanderlegen"
                 onclick={() => appSettings.update(s => ({...s, beatAlignCf: !s.beatAlignCf}))}></button>
@@ -534,12 +616,12 @@
                   oninput={(e) => appSettings.update(s => ({...s, maxTempoDiff: +e.target.value}))} />
                 <span class="val">±{td} %</span>
               </div>
-              <div class="hint keep">
+              <div class="hint keep sub">
                 Bei 128 BPM: {Math.round(128 / (1 + td / 100))}–{Math.round(128 * (1 + td / 100))} BPM.
                 {#if td > 12}Ab etwa 12 % hört man das Dehnen etwas (klingt leicht verwaschen).{:else}Bis hierhin fällt das Angleichen kaum auf.{/if}
               </div>
             {/if}
-            <div class="hint" style="margin-top:4px">
+            <div class="hint">
               {#if $appSettings.beatAlignCf && $appSettings.tempoMatch !== false}
                 Der Übergang beginnt auf einem Schlag. Beide Titel gehen im Tempo je zur Hälfte aufeinander zu (Tonhöhe bleibt), die Schläge werden laufend übereinandergezogen. Danach gleitet der neue Titel in etwa 20 s zurück aufs Original. Bei mehr als {$appSettings.maxTempoDiff ?? 8} % Tempo-Unterschied oder unklarem Takt (Live-Schlagzeug) wird nur geblendet.
               {:else if $appSettings.beatAlignCf}
@@ -562,18 +644,45 @@
                 onclick={() => appSettings.update(s => ({...s, phraseAlign: s.phraseAlign === false}))}></button>
             </div>
             <div class="hint">Der Übergang beginnt auf einem Phrasenanfang (alle 16 bzw. 8 Takte, meist dort, wo ein neuer Teil des Songs beginnt) und wird dafür höchstens 8 Takte verschoben. Der neue Titel steigt ebenfalls am Anfang einer Phrase ein, Eins auf Eins. Phrasen kommen aus den Cue-Punkten von Mixed In Key, sonst aus der eigenen Messung. Selbst gezogene Mix-Zonen rasten nur auf die nächste Eins.</div>
-            <div class="row" style="margin-top:8px">
+            <div class="row">
               <span class="lbl">Bass tauschen (EQ)</span>
               <button class="tog {$appSettings.bassSwap !== false ? 'on' : ''}" aria-label="Bass tauschen"
                 disabled={!$appSettings.beatAlignCf}
                 onclick={() => appSettings.update(s => ({...s, bassSwap: s.bassSwap === false}))}></button>
             </div>
             <div class="hint">Der neue Titel läuft zuerst ohne Bass mit; in der Mitte des Übergangs wird der Bass über 1–2 Takte weich getauscht — so wummern nie zwei Bassdrums gleichzeitig. Nur wenn der Übergang im Takt läuft; sonst wird wie bisher nur die Lautstärke geblendet.</div>
-            {#if !$appSettings.beatAlignCf}<div class="hint keep">Braucht „Schläge übereinanderlegen“.</div>{/if}
+            {#if !$appSettings.beatAlignCf}<div class="hint keep warn">Braucht „Schläge übereinanderlegen“ (Auf den Takt).</div>{/if}
           </div>
 
         <!-- ── DOWNLOAD ────────────────────────────────────────────────── -->
         {:else if tab === 'download'}
+
+          <div class="group">
+            <div class="group-title">Speicherort</div>
+            <div class="row">
+              <span class="lbl ellip" title={$downloadDir || 'Standard: Downloads/'}>
+                {$downloadDir ? $downloadDir.split(/[\\/]/).pop() || $downloadDir : 'Downloads/'}
+              </span>
+              <button class="btn btn-sm" onclick={pickDownloadFolder}>Ordner wählen</button>
+            </div>
+          </div>
+
+          <div class="group">
+            <div class="group-title">Dateiname</div>
+            <div class="radio-group vertical">
+              {#each [
+                ['title',          'Titel',              '%(title)s'],
+                ['uploader_title', 'Kanal – Titel',      '%(uploader)s – %(title)s'],
+                ['artist_title',   'Künstler – Titel',   '%(artist)s – %(title)s'],
+              ] as [val, label, example]}
+                <button class="radio-opt-v {$dlFilenameFormat === val ? 'active' : ''}"
+                        onclick={() => setFilenameFormat(val)}>
+                  <span class="ro-label">{label}</span>
+                  <span class="ro-example">{example}</span>
+                </button>
+              {/each}
+            </div>
+          </div>
 
           <div class="group">
             <div class="group-title">Playlist-Download</div>
@@ -583,13 +692,47 @@
               <button class="tog {$playlistFolderEnabled ? 'on' : ''}"
                 onclick={() => setPlaylistFolder(!$playlistFolderEnabled)}></button>
             </div>
-            <div class="hint">
+            <div class="hint keep sub">
               {#if $playlistFolderEnabled}
                 Downloads/&lt;Playlist-Name&gt;/Song.mp3
               {:else}
                 Alle Downloads landen direkt im Download-Ordner
               {/if}
             </div>
+            <div class="row">
+              <span class="lbl">Gleichzeitige Downloads</span>
+              <input type="range" min="1" max="6" step="1" value={$dlParallel} aria-label="Gleichzeitige Downloads"
+                oninput={(e) => dlParallel.set(+e.target.value)}
+                onchange={(e) => send({ type: 'set_dl_parallel', value: +e.target.value })} />
+              <span class="val">{$dlParallel}</span>
+            </div>
+            <div class="hint">Wie viele Titel einer Playlist gleichzeitig geladen werden. Mehr ist schneller; bei zu vielen bremst YouTube eher oder verlangt eine Bestätigung. Standard: 3.</div>
+          </div>
+
+          <div class="group">
+            <div class="group-title">Lautstärke beim Download normalisieren</div>
+
+            <div class="row">
+              <span class="lbl">Loudnorm aktiv</span>
+              <button class="tog {$loudnormOnDl ? 'on' : ''}"
+                onclick={() => { loudnormOnDl.update(v => !v); sendLoudnorm() }}></button>
+            </div>
+            <div class="hint">Fügt einen ffmpeg loudnorm-Pass zu yt-dlp hinzu (etwas langsamer)</div>
+
+            {#if $loudnormOnDl}
+              <div class="row indent">
+                <span class="lbl">Ziel-LUFS</span>
+                <input type="range" min="-23" max="-6" step="1" value={$loudnormTarget}
+                  oninput={(e) => loudnormTarget.set(+e.target.value)} onchange={sendLoudnorm} />
+                <span class="val">{$loudnormTarget} LUFS</span>
+              </div>
+              <div class="row indent">
+                <span class="lbl">True Peak</span>
+                <input type="range" min="-9" max="-0.5" step="0.5" value={$loudnormTp}
+                  oninput={(e) => loudnormTp.set(+e.target.value)} onchange={sendLoudnorm} />
+                <span class="val">{$loudnormTp} dBTP</span>
+              </div>
+            {/if}
           </div>
 
           <div class="group">
@@ -675,171 +818,114 @@
             {/if}
           </div>
 
-          <div class="group">
-            <div class="group-title">Dateiname</div>
-            <div class="radio-group vertical">
-              {#each [
-                ['title',          'Titel',              '%(title)s'],
-                ['uploader_title', 'Kanal – Titel',      '%(uploader)s – %(title)s'],
-                ['artist_title',   'Künstler – Titel',   '%(artist)s – %(title)s'],
-              ] as [val, label, example]}
-                <button class="radio-opt-v {$dlFilenameFormat === val ? 'active' : ''}"
-                        onclick={() => setFilenameFormat(val)}>
-                  <span class="ro-label">{label}</span>
-                  <span class="ro-example">{example}</span>
-                </button>
-              {/each}
-            </div>
-          </div>
-
-          <div class="group">
-            <div class="group-title">Lautstärke beim Download normalisieren</div>
-
-            <div class="row">
-              <span class="lbl">Loudnorm aktiv</span>
-              <button class="tog {$loudnormOnDl ? 'on' : ''}"
-                onclick={() => { loudnormOnDl.update(v => !v); sendLoudnorm() }}></button>
-            </div>
-            <div class="hint">Fügt einen ffmpeg loudnorm-Pass zu yt-dlp hinzu (etwas langsamer)</div>
-
-            {#if $loudnormOnDl}
-              <div class="row indent">
-                <span class="lbl">Ziel-LUFS</span>
-                <input type="range" min="-23" max="-6" step="1" value={$loudnormTarget}
-                  oninput={(e) => loudnormTarget.set(+e.target.value)} onchange={sendLoudnorm} />
-                <span class="val">{$loudnormTarget} LUFS</span>
-              </div>
-              <div class="row indent">
-                <span class="lbl">True Peak</span>
-                <input type="range" min="-9" max="-0.5" step="0.5" value={$loudnormTp}
-                  oninput={(e) => loudnormTp.set(+e.target.value)} onchange={sendLoudnorm} />
-                <span class="val">{$loudnormTp} dBTP</span>
-              </div>
-            {/if}
-          </div>
-
-          <div class="group">
-            <div class="group-title">Speicherort</div>
-            <div class="row">
-              <span class="lbl" title={$downloadDir || 'Standard: Downloads/'}
-                style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-                {$downloadDir ? $downloadDir.split(/[\\/]/).pop() || $downloadDir : 'Downloads/'}
-              </span>
-              <button class="btn btn-sm" onclick={pickDownloadFolder}>Ordner wählen</button>
-            </div>
-          </div>
-
         <!-- ── DIENSTE ─────────────────────────────────────────────────── -->
         {:else if tab === 'services'}
 
-          <div class="group">
-            <div class="group-title">Spotify-Download (via spotdl)</div>
-            <div class="row">
-              <span class="lbl">spotdl</span>
-              {#if $toolsInfo.spotdl_version && $spotdlInstalling}
-                <span class="val st-busy">{$spotdlInstallText ?? 'Wird aktualisiert…'}</span>
-              {:else if $toolsInfo.spotdl_version}
-                <span class="val st-ok">✓ v{$toolsInfo.spotdl_version}</span>
-                {#if $toolUpdates.spotdl?.available}
-                  <button class="btn btn-sm btn-primary" data-upd onclick={() => send({ type: 'install_spotdl' })}
-                          title="Lädt die neue Version (~46 MB) und ersetzt die alte erst, wenn der Download vollständig ist">
-                    Auf {$toolUpdates.spotdl.latest} aktualisieren
-                  </button>
-                {/if}
-              {:else if $spotdlInstalling}
-                <span class="val st-busy">{$spotdlInstallText ?? 'Wird installiert…'}</span>
-              {:else}
-                <span class="val st-muted">nicht gefunden</span>
-                <button class="btn btn-sm btn-primary" onclick={() => send({ type: 'install_spotdl' })}>
-                  Installieren
-                </button>
+          <div class="svc-intro">Optional — SynthiMIX läuft auch ohne. Jeder Dienst schaltet einzelne Funktionen frei.</div>
+          <div class="svc-list">
+
+            <div class="svc" class:open={svcOpen === 'spotify'}>
+              <button class="svc-head" onclick={() => toggleCard('spotify')} aria-expanded={svcOpen === 'spotify'}>
+                <i class="ti ti-brand-spotify svc-ico" aria-hidden="true"></i>
+                <span class="svc-name">Spotify-Links laden<span class="svc-sub">spotdl · lädt die Titel über YouTube Music</span></span>
+                <span class="svc-state {svcState.spotify.cls}">{svcState.spotify.text}</span>
+                <i class="ti ti-chevron-down svc-chev" aria-hidden="true"></i>
+              </button>
+              {#if svcOpen === 'spotify'}
+                <div class="svc-body">
+                  <div class="row">
+                    <span class="lbl">Programm spotdl</span>
+                    {#if $spotdlInstalling}
+                      <span class="val st-busy">{$spotdlInstallText ?? 'Wird installiert…'}</span>
+                    {:else if $toolsInfo.spotdl_version}
+                      <span class="val st-ok">v{$toolsInfo.spotdl_version}</span>
+                      {#if $toolUpdates.spotdl?.available}
+                        <button class="btn btn-sm btn-primary" data-upd onclick={() => send({ type: 'install_spotdl' })}
+                                title="Lädt die neue Version (~46 MB) und ersetzt die alte erst, wenn der Download vollständig ist">
+                          Auf {$toolUpdates.spotdl.latest} aktualisieren
+                        </button>
+                      {/if}
+                    {:else}
+                      <button class="btn btn-sm btn-primary" onclick={() => send({ type: 'install_spotdl' })}
+                              title="Lädt spotdl einmalig als eigenständiges Programm (~46 MB); Python ist nicht nötig">Installieren</button>
+                    {/if}
+                  </div>
+                  {#if $spotdlInstallError}<div class="svc-note err">{$spotdlInstallError}</div>{/if}
+                  <div class="row">
+                    <span class="lbl">Client-ID <span class="opt">optional</span></span>
+                    <input class="field field-sm" type="text" bind:value={spotifyCidEdit} onchange={saveSpotifyCreds} />
+                  </div>
+                  <div class="row">
+                    <span class="lbl">Client-Secret <span class="opt">optional</span></span>
+                    <input class="field field-sm" type="password" bind:value={spotifyCsecEdit} onchange={saveSpotifyCreds} />
+                  </div>
+                  <div class="svc-note">Client-ID und Secret (developer.spotify.com) erlauben mehr Anfragen — nur bei sehr vielen Spotify-Links nötig.</div>
+                  {#if $servicesTest?.spotify}<div class="svc-note {$servicesTest.spotify.ok ? 'ok' : 'err'}">{$servicesTest.spotify.ok ? '✓' : '✗'} {$servicesTest.spotify.text}</div>{/if}
+                </div>
               {/if}
             </div>
-            {#if $spotdlInstallError}
-              <div class="row">
-                <span class="lbl"></span>
-                <span class="val st-err">{$spotdlInstallError}</span>
-              </div>
-            {/if}
-            <div class="hint" style="margin-top:6px">
-              Spotify lädt via YouTube Music — kein direkter Spotify-Stream.
-              „Installieren“ lädt spotdl einmalig als eigenständiges Programm (~46 MB) herunter;
-              Python wird dafür nicht benötigt.
-              Client-ID &amp; Secret sind optional (höhere Rate-Limits):
-            </div>
-            <div class="row" style="margin-top:8px">
-              <span class="lbl">Client-ID</span>
-              <input class="field field-sm" type="text" placeholder="optional"
-                     bind:value={spotifyCidEdit} onchange={saveSpotifyCreds} />
-            </div>
-            <div class="row">
-              <span class="lbl">Client-Secret</span>
-              <input class="field field-sm" type="password" placeholder="optional"
-                     bind:value={spotifyCsecEdit} onchange={saveSpotifyCreds} />
-            </div>
-            <div class="row">
-              <span class="lbl"></span>
-              <button class="btn btn-sm" onclick={saveSpotifyCreds}>Speichern</button>
-            </div>
-          </div>
 
-          <div class="group">
-            <div class="group-title">Last.fm — Radio-Modus</div>
-            <div class="hint">
-              Radio-Modus füllt die Queue automatisch mit ähnlichen Tracks aus deiner Bibliothek.
-              API-Key kostenlos unter <strong>last.fm/api/account/create</strong>.
-            </div>
-            <div class="row" style="margin-top:8px">
-              <span class="lbl">API-Key</span>
-              <input class="field field-sm" type="text" placeholder="32-stelliger Hex-Key"
-                     bind:value={lastfmKeyEdit} oninput={() => servicesDirty = true} onchange={saveServices} />
-            </div>
-            {#if $servicesTest?.lastfm}<div class="row"><span class="lbl"></span><span class="val {$servicesTest.lastfm.ok ? 'st-ok' : 'st-err'}">{$servicesTest.lastfm.ok ? '✓' : '✗'} {$servicesTest.lastfm.text}</span></div>{/if}
-          </div>
-
-          <div class="group">
-            <div class="group-title">AcoustID — Fingerprint-Erkennung</div>
-            <div class="hint">
-              Erkennt Tracks anhand des Audioinhalts (via AcoustID + MusicBrainz).
-              Braucht <strong>Chromaprint (fpcalc)</strong> und einen kostenlosen <strong>Application-Key</strong>:
-              acoustid.org → anmelden → <strong>„Register your application“</strong>. Der Key von deiner Benutzerseite funktioniert hier nicht.
-            </div>
-            <div class="row" style="margin-top:8px">
-              <span class="lbl">fpcalc</span>
-              {#if $toolsInfo.fpcalc_found}
-                <span class="val st-ok">✓ gefunden</span>
-              {:else if $fpcalcInstalling}
-                <span class="val st-busy">Wird installiert…</span>
-              {:else}
-                <span class="val st-muted">nicht gefunden</span>
-                <button class="btn btn-sm btn-primary" onclick={() => send({ type: 'download_fpcalc' })}>
-                  Installieren
-                </button>
+            <div class="svc" class:open={svcOpen === 'lastfm'}>
+              <button class="svc-head" onclick={() => toggleCard('lastfm')} aria-expanded={svcOpen === 'lastfm'}>
+                <i class="ti ti-brand-lastfm svc-ico" aria-hidden="true"></i>
+                <span class="svc-name">Last.fm<span class="svc-sub">Radio-Modus · Schreibweise beim Titel-Aufräumen · Genres</span></span>
+                <span class="svc-state {svcState.lastfm.cls}">{svcState.lastfm.text}</span>
+                <i class="ti ti-chevron-down svc-chev" aria-hidden="true"></i>
+              </button>
+              {#if svcOpen === 'lastfm'}
+                <div class="svc-body">
+                  <div class="row">
+                    <span class="lbl">API-Key</span>
+                    <input class="field field-sm" type="text" placeholder="32 Zeichen"
+                           bind:value={lastfmKeyEdit} oninput={() => servicesDirty = true} onchange={saveServices} />
+                  </div>
+                  <div class="svc-note">Kostenlos unter <strong>last.fm/api/account/create</strong>.</div>
+                  {#if $servicesTest?.lastfm}<div class="svc-note {$servicesTest.lastfm.ok ? 'ok' : 'err'}">{$servicesTest.lastfm.ok ? '✓' : '✗'} {$servicesTest.lastfm.text}</div>{/if}
+                  <div class="svc-actions">
+                    <button class="btn btn-sm" onclick={testServices} disabled={testing}>
+                      <i class="ti {testing ? 'ti-refresh spin' : 'ti-plug'}"></i> {testing ? 'Teste…' : 'Testen'}
+                    </button>
+                  </div>
+                </div>
               {/if}
             </div>
-            {#if $fpcalcInstallError}
-              <div class="row">
-                <span class="lbl"></span>
-                <span class="val st-err">{$fpcalcInstallError}</span>
-              </div>
-            {/if}
-            <div class="row">
-              <span class="lbl">API-Key</span>
-              <input class="field field-sm" type="text" placeholder="AcoustID Application-Key"
-                     bind:value={acoustidKeyEdit} oninput={() => servicesDirty = true} onchange={saveServices} />
-            </div>
-            {#if $servicesTest?.acoustid}<div class="row"><span class="lbl"></span><span class="val {$servicesTest.acoustid.ok ? 'st-ok' : 'st-err'}">{$servicesTest.acoustid.ok ? '✓' : '✗'} {$servicesTest.acoustid.text}</span></div>{/if}
-          </div>
 
-          <div class="row" style="padding:0 4px">
-            <span class="lbl"></span>
-            <button class="btn btn-sm btn-primary" onclick={testServices} disabled={testing}>
-              <i class="ti {testing ? 'ti-refresh spin' : 'ti-plug'}"></i> {testing ? 'Teste…' : 'Speichern und Verbindung testen'}
-            </button>
+            <div class="svc" class:open={svcOpen === 'acoustid'}>
+              <button class="svc-head" onclick={() => toggleCard('acoustid')} aria-expanded={svcOpen === 'acoustid'}>
+                <i class="ti ti-fingerprint svc-ico" aria-hidden="true"></i>
+                <span class="svc-name">AcoustID<span class="svc-sub">Titel am Klang erkennen (Fingerprint)</span></span>
+                <span class="svc-state {svcState.acoustid.cls}">{svcState.acoustid.text}</span>
+                <i class="ti ti-chevron-down svc-chev" aria-hidden="true"></i>
+              </button>
+              {#if svcOpen === 'acoustid'}
+                <div class="svc-body">
+                  <div class="row">
+                    <span class="lbl">Programm fpcalc</span>
+                    {#if $toolsInfo.fpcalc_found}
+                      <span class="val st-ok">Gefunden</span>
+                    {:else if $fpcalcInstalling}
+                      <span class="val st-busy">Wird installiert…</span>
+                    {:else}
+                      <button class="btn btn-sm btn-primary" onclick={() => send({ type: 'download_fpcalc' })}>Installieren</button>
+                    {/if}
+                  </div>
+                  {#if $fpcalcInstallError}<div class="svc-note err">{$fpcalcInstallError}</div>{/if}
+                  <div class="row">
+                    <span class="lbl">Application-Key</span>
+                    <input class="field field-sm" type="text" placeholder="AcoustID Application-Key"
+                           bind:value={acoustidKeyEdit} oninput={() => servicesDirty = true} onchange={saveServices} />
+                  </div>
+                  <div class="svc-note">acoustid.org → anmelden → <strong>„Register your application“</strong>. Der Key von deiner Benutzerseite funktioniert hier nicht.</div>
+                  {#if $servicesTest?.acoustid}<div class="svc-note {$servicesTest.acoustid.ok ? 'ok' : 'err'}">{$servicesTest.acoustid.ok ? '✓' : '✗'} {$servicesTest.acoustid.text}</div>{/if}
+                  <div class="svc-actions">
+                    <button class="btn btn-sm" onclick={testServices} disabled={testing}>
+                      <i class="ti {testing ? 'ti-refresh spin' : 'ti-plug'}"></i> {testing ? 'Teste…' : 'Testen'}
+                    </button>
+                  </div>
+                </div>
+              {/if}
+            </div>
           </div>
-          {#if $servicesTest?.spotify}
-            <div class="row" style="padding:0 4px"><span class="lbl">Spotify</span><span class="val {$servicesTest.spotify.ok ? 'st-ok' : 'st-err'}">{$servicesTest.spotify.ok ? '✓' : '✗'} {$servicesTest.spotify.text}</span></div>
-          {/if}
 
         <!-- ── DARSTELLUNG ─────────────────────────────────────────────── -->
         {:else if tab === 'look'}
@@ -925,13 +1011,10 @@
               </div>
             </div>
             <p class="hint">Bibliotheksordner automatisch neu scannen</p>
-            <div class="row" style="margin-top: 8px">
-              <span class="lbl">Unterordner</span>
-              <label class="toggle-wrap">
-                <input type="checkbox" checked={$scanRecursive}
-                       onchange={(e) => send({ type: 'set_scan_recursive', enabled: e.target.checked })} />
-                <span class="toggle-lbl">beim Scannen einschließen</span>
-              </label>
+            <div class="row">
+              <span class="lbl">Unterordner beim Scannen einschließen</span>
+              <button class="tog {$scanRecursive ? 'on' : ''}" aria-label="Unterordner beim Scannen einschließen"
+                onclick={() => send({ type: 'set_scan_recursive', enabled: !$scanRecursive })}></button>
             </div>
 
             <div class="wf-head">Beobachtete Ordner</div>
@@ -964,7 +1047,7 @@
                 {/if}
               </div>
             {/each}
-            <div class="row" style="margin-top: 6px">
+            <div class="row">
               <span class="lbl"></span>
               <button class="btn btn-sm" onclick={addWatchedFolder}><i class="ti ti-folder-plus"></i> Ordner hinzufügen</button>
             </div>
@@ -1036,7 +1119,7 @@
               <button class="tog {$ytdlpAutoupdate ? 'on' : ''}"
                 onclick={() => send({ type: 'set_ytdlp_autoupdate', value: !$ytdlpAutoupdate })}></button>
             </div>
-            <div class="hint" style="margin-bottom:10px">
+            <div class="hint">
               yt-dlp und spotdl werden täglich geprüft und ersetzt, sobald kein Download läuft —
               YouTube ändert regelmäßig etwas, wodurch ältere Versionen mit „403 Forbidden" abbrechen.
               ffmpeg wird wöchentlich geprüft und erst neu geladen, wenn der eigene Build mehr als
@@ -1059,12 +1142,12 @@
 
           <div class="group">
             <div class="group-title">Handy-Dienste</div>
-            <p class="remote-desc">Fernbedienung und Musikwünsche laufen über einen kleinen Server im WLAN — kein Internet, keine App. Beide lassen sich einzeln ein- und ausschalten.</p>
-            <label class="row-toggle">
-              <span class="row-label">Beim Start die zuletzt eingeschalteten wieder starten</span>
-              <input type="checkbox" checked={$remoteAutostart}
-                onchange={(e) => send({ type: 'set_remote_autostart', value: e.target.checked })} />
-            </label>
+            <p class="hint">Fernbedienung und Musikwünsche laufen über einen kleinen Server im WLAN — kein Internet, keine App. Beide lassen sich einzeln ein- und ausschalten.</p>
+            <div class="row">
+              <span class="lbl">Beim Start die zuletzt eingeschalteten wieder starten</span>
+              <button class="tog {$remoteAutostart ? 'on' : ''}" aria-label="Handy-Dienste beim Start wieder starten"
+                onclick={() => send({ type: 'set_remote_autostart', value: !$remoteAutostart })}></button>
+            </div>
             {#if $remoteStatus?.error}
               <div class="remote-status off"><span class="remote-dot off"></span> Fehler: {$remoteStatus.error}</div>
             {/if}
@@ -1258,7 +1341,7 @@
   .tab-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c-accent); flex-shrink: 0; }
 
   /* Inhalt */
-  .content { flex: 1; overflow-y: auto; padding: var(--sp-4) var(--sp-5) var(--sp-6); display: flex; flex-direction: column; gap: var(--sp-5); }
+  .content { flex: 1; overflow-y: auto; scrollbar-gutter: stable; padding: var(--sp-4) var(--sp-5) var(--sp-6); display: flex; flex-direction: column; gap: var(--sp-5); }
   .group { display: flex; flex-direction: column; gap: var(--sp-2); }
   .group + .group { padding-top: var(--sp-5); border-top: 1px solid var(--c-br1); }
   .group-title {
@@ -1273,6 +1356,40 @@
   .row input[type="range"] { width: 200px; flex-shrink: 0; }
   .row .field { width: 280px; flex-shrink: 0; }
   .hint { font-size: var(--fs-sm); line-height: 1.5; color: var(--c-tx3); max-width: 60ch; }
+  /* Erklaerung direkt zu einer Zeile: buendig unter dem Label, dicht dran */
+  .hint.sub { margin-top: calc(-1 * var(--sp-1)); }
+  .hint.warn { color: var(--c-warn-tx); }
+  .lbl.ellip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row select.field { width: 280px; flex-shrink: 0; }
+  /* ── Dienste als Karten ─────────────────────────────────────────────── */
+  .svc-intro { font-size: var(--fs-sm); color: var(--c-tx3); margin-bottom: var(--sp-3); }
+  .svc-list { display: flex; flex-direction: column; gap: var(--sp-2); }
+  .svc { border: 1px solid var(--c-br1); border-radius: var(--r-m); background: var(--c-bg2); }
+  .svc.open { border-color: var(--c-br2); }
+  .svc-head { display: flex; align-items: center; gap: var(--sp-3); width: 100%; padding: 10px 12px;
+              border: none; background: none; cursor: pointer; font: inherit; text-align: left; color: inherit; }
+  .svc-head:hover .svc-name { color: var(--c-tx1); }
+  .svc-ico { font-size: 20px; color: var(--c-tx3); flex-shrink: 0; }
+  .svc-name { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px;
+              font-size: var(--fs-body); font-weight: 600; color: var(--c-tx1); }
+  .svc-sub { font-size: var(--fs-sm); font-weight: 400; color: var(--c-tx3); }
+  .svc-state { font-size: var(--fs-sm); font-weight: 600; white-space: nowrap; }
+  .svc-state::before { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px;
+                       background: currentColor; vertical-align: 1px; }
+  .svc-state.ok { color: var(--c-green-tx); }
+  .svc-state.err { color: var(--c-red-tx); }
+  .svc-state.busy { color: var(--c-accent-tx); }
+  .svc-state.off { color: var(--c-tx4); }
+  .svc-chev { color: var(--c-tx4); transition: transform .15s; flex-shrink: 0; }
+  .svc.open .svc-chev { transform: rotate(180deg); }
+  .svc-body { display: flex; flex-direction: column; gap: var(--sp-2); padding: 4px 12px 12px 44px; border-top: 1px solid var(--c-br1); }
+  .svc-body .row:first-child { margin-top: var(--sp-2); }
+  .svc-note { font-size: var(--fs-sm); line-height: 1.5; color: var(--c-tx3); }
+  .svc-note strong { color: var(--c-tx1); }
+  .svc-note.ok { color: var(--c-green-tx); }
+  .svc-note.err { color: var(--c-red-tx); }
+  .svc-actions { display: flex; justify-content: flex-end; }
+  .opt { font-size: var(--fs-cap); color: var(--c-tx4); margin-left: 4px; }
   .hint strong { color: var(--c-tx1); }
   .dimmed { opacity: .5; }
   .st-ok { color: var(--c-green-tx); font-weight: 600; }
@@ -1312,9 +1429,6 @@
   .ro-example { font-family: Consolas, 'Cascadia Mono', monospace; font-size: var(--fs-sm); color: var(--c-tx3); }
 
   /* Checkbox mit Text */
-  .toggle-wrap, .row-toggle { display: flex; align-items: center; gap: var(--sp-2); cursor: pointer; font-size: var(--fs-body); color: var(--c-tx1); }
-  .row-toggle { justify-content: space-between; min-height: var(--btn-h); }
-  .toggle-lbl, .row-label { color: var(--c-tx1); }
   input[type="checkbox"] { width: 16px; height: 16px; }
 
   /* Beobachtete Ordner */
@@ -1337,7 +1451,6 @@
   .key-samples { display: flex; gap: var(--sp-2); flex-wrap: wrap; font-size: var(--fs-body); }
 
   /* Remote */
-  .remote-desc { font-size: var(--fs-sm); line-height: 1.5; color: var(--c-tx3); max-width: 60ch; }
   .remote-status { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-body); font-weight: 600; }
   .remote-status.on { color: var(--c-green-tx); }
   .remote-status.off { color: var(--c-tx3); }

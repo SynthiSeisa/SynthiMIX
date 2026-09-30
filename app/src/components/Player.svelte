@@ -3,8 +3,8 @@
   import { untrack, onMount } from 'svelte'
   import { keyCompat } from '../lib/keys.js'
   import KeyChip from './KeyChip.svelte'
-  import { library, playerState, nowPlaying, queue, waveform, waveformNext, settings, playMode, send, autoMixEnabled, appSettings, introSkipPaths, skipNextCrossfade, livePositionMs, beatGrids, waveformThird } from '../stores/ws.js'
-  import { createSync, glideRate, barAlignedStart, snapToPhrase, swapEligible, bassSwapPlan, meetRate } from '../lib/beatsync.js'
+  import { library, playerState, nowPlaying, queue, waveform, waveformNext, settings, playMode, send, autoMixEnabled, appSettings, introSkipPaths, skipNextCrossfade, livePositionMs, beatGrids, waveformThird, mixNowRequest, requestWaveform } from '../stores/ws.js'
+  import { createSync, glideRate, barAlignedStart, snapToPhrase, swapEligible, bassSwapPlan, meetRate, barLen, tempoMatch } from '../lib/beatsync.js'
   import Waveform from './Waveform.svelte'
 
   let elA = $state(null)
@@ -14,7 +14,7 @@
   let posMs  = $state(0)
   let durMs  = $state(0)
   let volume = $state(80)
-  let cfS    = $state(8)
+  let cfS    = $state(8)                // Uebergangslaenge in Sekunden (Einstellung, Rueckfall ohne BPM)
 
   let cfActive     = false
   let cfTimer      = null
@@ -30,6 +30,30 @@
   let blendP       = $state(0)       // Fortschritt des automatischen Uebergangs, 0…1
   let blendNextPos = $state(0)       // Position im naechsten Titel waehrend des Uebergangs
   let cfStartAt = 0, cfLenMs = 0     // fuer die Animation
+  // Laenge des Uebergangs in Sekunden fuer den laufenden Titel: in Takten
+  // (Standard) nach dessen Tempo, ohne bekannte BPM die eingestellten Sekunden.
+  const cfEff = $derived.by(() => {
+    const cfg = $appSettings
+    if ((cfg.cfUnit ?? 'bars') !== 'bars') return cfS
+    const bars = cfg.cfBars ?? 16
+    if (bars <= 0) return 0
+    void $beatGrids
+    const g = gridOf($nowPlaying?.path)
+    const bpm = g?.bpm || $nowPlaying?.bpm
+    if (!(bpm > 30 && bpm < 300)) return cfS > 0 ? cfS : 8
+    return Math.min(40, bars * barLen(g ?? { bpm }))
+  })
+  // Dasselbe fuer einen anderen Titel, wenn er einmal laeuft (Vorschau der Zonen)
+  function _cfSecFor(path, bpm) {
+    const cfg = get(appSettings)
+    if ((cfg.cfUnit ?? 'bars') !== 'bars') return cfS
+    const bars = cfg.cfBars ?? 16
+    if (bars <= 0) return 0
+    const g = gridOf(path)
+    const b = g?.bpm || bpm
+    if (!(b > 30 && b < 300)) return cfS > 0 ? cfS : 8
+    return Math.min(40, bars * barLen(g ?? { bpm: b }))
+  }
   function gridOf(path) {
     const g = path ? get(beatGrids)[path] : null
     return g && g.bpm > 0 ? g : null
@@ -61,6 +85,7 @@
   // ── Mix-Zonen per Ziehen verschieben (gilt nur fuer diesen Uebergang) ─────
   let outroOverride = $state(null)   // { path, frac }: Beginn der MIX-Zone im laufenden Titel
   let introOverride = $state(null)   // { path, frac }: Einstieg im naechsten Titel
+  let nextOutroOverride = $state(null) // { path, frac }: spaeteres Ausmischen des naechsten Titels (wird zu outroOverride, sobald er laeuft)
   let zoneDragging  = false
   let _cfDoneAt     = 0            // Ende des letzten Uebergangs (performance.now)
 
@@ -161,11 +186,44 @@
       eqB = shelf(); eqB.connect(gainB)
       audioCtx.createMediaElementSource(elA).connect(eqA)
       audioCtx.createMediaElementSource(elB).connect(eqB)
+      untrack(() => applySink())
     } catch (e) { console.warn('AudioContext:', e) }
   })
 
   $effect(() => {
     if ($playerState.playing && audioCtx?.state === 'suspended') audioCtx.resume().catch(() => {})
+  })
+
+  // Ausgabegeraet: der ganze Audio-Graph geht ueber ein Geraet. Fehlt es
+  // (Box aus, Interface abgesteckt), laeuft es ueber den Windows-Standard
+  // weiter; kommt es zurueck, wird wieder umgeschaltet.
+  let _sinkNow = ''
+  async function applySink(notify = false) {
+    if (!audioCtx?.setSinkId) return
+    const cfg = get(appSettings)
+    let want = cfg.outputDevice || ''
+    if (want) {
+      try {
+        const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audiooutput')
+        const hit = devs.find(d => d.deviceId === want) || devs.find(d => cfg.outputDeviceLabel && d.label === cfg.outputDeviceLabel)
+        if (!hit) {
+          if (_sinkNow && notify) _notice(`Ausgabegerät „${cfg.outputDeviceLabel || 'gewählt'}" nicht gefunden — spiele über den Windows-Standard`)
+          want = ''
+        } else want = hit.deviceId
+      } catch { want = '' }
+    }
+    if (want === _sinkNow) return
+    try { await audioCtx.setSinkId(want); _sinkNow = want }
+    catch (e) { console.warn('setSinkId:', e); try { await audioCtx.setSinkId(''); _sinkNow = '' } catch {} }
+  }
+  $effect(() => {
+    void $appSettings.outputDevice
+    if (audioCtx) untrack(() => applySink(true))
+  })
+  onMount(() => {
+    const onChange = () => applySink(true)
+    navigator.mediaDevices?.addEventListener?.('devicechange', onChange)
+    return () => navigator.mediaDevices?.removeEventListener?.('devicechange', onChange)
   })
 
   // Browsers create an AudioContext in the "suspended" state until the page
@@ -341,7 +399,7 @@
 
   // Fraction of the next track to skip on entry (manual override or scaled detection)
   // Returns where track 2 should START playing (fraction to seek to).
-  // Bar START = this value. Bar END = this + cfS/duration.
+  // Bar START = this value. Bar END = this + cfEff/duration.
   function _getNextIntroStart() {
     const cfg = get(appSettings)
     const nt  = get(queue)[_nextIdx()]
@@ -364,9 +422,9 @@
 
   // Crossfade trigger as a fraction of the current track — single source of truth
   function _outroTrigger() {
-    if (durMs <= 0 || cfS <= 0) return -1
+    if (durMs <= 0 || cfEff <= 0) return -1
     const cfg    = get(appSettings)
-    const cfFrac = Math.min(0.9, (cfS * 1000) / durMs)
+    const cfFrac = Math.min(0.9, (cfEff * 1000) / durMs)
     const playingPath = cur()?.dataset.path || get(nowPlaying)?.path
     if (outroOverride && outroOverride.path === playingPath)
       return Math.max(0.02, Math.min(outroOverride.frac, 1 - cfFrac))
@@ -387,17 +445,19 @@
   // 8 Takte verschoben), bei selbst gezogener Zone nur auf die naechste Eins,
   // ohne Takt-Information wie bisher auf den naechsten Schlag.
   function _snapTriggerMs(triggerMs) {
-    const cfg = get(appSettings)
-    if (!cfg.beatAlignCf || durMs <= 0) return triggerMs
-    const latest = durMs - cfS * 1000 - 200
     const playingPath = cur()?.dataset.path || get(nowPlaying)?.path
-    const gC = gridOf(playingPath)
+    const dragged = !!(outroOverride && outroOverride.path === playingPath)
+    return _snapTrigger(triggerMs, durMs, cfEff, playingPath, dragged, get(nowPlaying)?.bpm)
+  }
+  function _snapTrigger(triggerMs, dMs, cf, path, dragged, bpm) {
+    const cfg = get(appSettings)
+    if (!cfg.beatAlignCf || dMs <= 0) return triggerMs
+    const latest = dMs - cf * 1000 - 200
+    const gC = gridOf(path)
     if (gC && gC.conf >= 0.4 && gC.phrase != null) {
-      const dragged = outroOverride && outroOverride.path === playingPath
       const units = dragged || cfg.phraseAlign === false ? [1] : [16, 8, 1]
       return snapToPhrase(triggerMs / 1000, gC, 0, latest / 1000, dragged ? 1 : 8, units) * 1000
     }
-    const bpm = get(nowPlaying)?.bpm
     if (gC && gC.conf >= 0.3) {
       const beatMs = 60000 / gC.bpm, offMs = gC.off * 1000
       const snapped = offMs + Math.round((triggerMs - offMs) / beatMs) * beatMs
@@ -417,16 +477,24 @@
     return snapToPhrase(sec, g, 0, dur * 0.6)
   }
 
+  // Farbband ueber den Waveforms: Intro bis zum Einsatz, Outro ab dem Ende
+  // des lauten Teils (dieselbe Erkennung wie der Intelligente Fade)
+  const curIntroMark  = $derived(_detectIntroLen($waveform))
+  const curOutroMark  = $derived(_detectOutroStart($waveform))
+  const nextIntroMark = $derived(_detectIntroLen($waveformNext))
+  const nextOutroMark = $derived(_detectOutroStart($waveformNext))
+  const WF_BAND = 12
+
   $effect(() => { void $waveform;     _sfWf  = null })
   $effect(() => { void $waveformNext; _sfNWf = null })
 
   // ── Derived grey-bar zones for the waveform ────────────────────────────────
-  const _cfFrac = $derived(durMs > 0 && cfS > 0 ? Math.min(0.9, (cfS * 1000) / durMs) : 0)
+  const _cfFrac = $derived(durMs > 0 && cfEff > 0 ? Math.min(0.9, (cfEff * 1000) / durMs) : 0)
 
   // Outro grey "mix" bar on the current track: [trigger, trigger + crossfade]
   // Die Zone steht immer da (auch ohne Smart Fade), damit man sie ziehen kann
   const outroBarStart = $derived.by(() => {
-    if (durMs <= 0 || cfS <= 0) return -1
+    if (durMs <= 0 || cfEff <= 0) return -1
     void $waveform; void $appSettings.outroAggressiveness; void $appSettings.smartFade
     void outroOverride; void $nowPlaying?.path; void $beatGrids
     void $appSettings.phraseAlign; void $appSettings.beatAlignCf
@@ -491,6 +559,16 @@
   const curKey    = $derived(keyByPath.get($nowPlaying?.path) ?? null)
   const nextKey   = $derived(keyByPath.get(nextTrack?.path) ?? null)
   const uebergang = $derived(keyCompat(curKey?.key, nextKey?.key))
+  // Tempo des naechsten Titels, und ob es sich angleichen laesst (auch halb/doppelt)
+  const bpmByPath = $derived(new Map($library.filter(t => t.bpm).map(t => [t.path, t.bpm])))
+  const nextBpm   = $derived(nextTrack ? (bpmByPath.get(nextTrack.path) || nextTrack.bpm || 0) : 0)
+  const nextTempo = $derived.by(() => {
+    const cb = $nowPlaying?.bpm || bpmByPath.get($nowPlaying?.path) || 0
+    if (!(nextBpm > 30) || !(cb > 30)) return null
+    const lim = $appSettings.maxTempoDiff ?? 8
+    const m = tempoMatch(cb, nextBpm, lim / 100)
+    return m ? { ok: true, pct: Math.round(Math.abs(m.rate - 1) * 1000) / 10 } : { ok: false, lim }
+  })
 
   const nextTrack    = $derived(
     nextTrackIdx >= 0 && nextTrackIdx < $queue.length ? $queue[nextTrackIdx] : null
@@ -504,7 +582,7 @@
   })
   // Deck 2 grey bar:
   //   START = where track 2 begins playing (seeks to this position)
-  //   END   = start + cfS (bar is always exactly one crossfade wide)
+  //   END   = start + cfEff (bar is always exactly one crossfade wide)
   //   Level 1 (soft) → bar at 0:00; Level 5 (aggressive) → bar before the drop
   const nextIntroStart = $derived.by(() => {
     const sf = $appSettings.smartFade
@@ -512,29 +590,93 @@
     const wf = $waveformNext
     const nt = nextTrack
     if (nt && introOverride && introOverride.path === nt.path) return introOverride.frac
-    if (!nt || cfS <= 0) return 0
-    const dur = nt.duration_sec || 0
-    void $beatGrids; void $appSettings.phraseAlign; void $appSettings.beatAlignCf
+    if (!nt || cfEff <= 0) return 0
+    void sf; void ia; void $beatGrids; void $appSettings.phraseAlign; void $appSettings.beatAlignCf
+    return _introFracFor(nt, wf)
+  })
+  // Wo ein Titel einsteigt, wenn in ihn gemischt wird (ohne gezogene Zone)
+  function _introFracFor(t, wf) {
+    const cfg = get(appSettings)
+    const dur = t.duration_sec || 0
     let frac = 0
-    if (sf) {
-      const a   = Math.max(0, Math.min(4, ia - 1))
+    if (cfg.smartFade) {
+      const a   = Math.max(0, Math.min(4, (cfg.introAggressiveness ?? cfg.fadeAggressiveness ?? 3) - 1))
       const det = wf?.length > 0 ? _detectIntroLen(wf) * INTRO_SKIP[a] : 0
       frac = Math.min(0.45, Math.max(det, INTRO_FRACS[a]))
     }
-    return dur > 0 ? _snapIntroSec(frac * dur, gridOf(nt.path), dur, false) / dur : frac
-  })
+    return dur > 0 ? _snapIntroSec(frac * dur, gridOf(t.path), dur, false) / dur : frac
+  }
+  // Wo ein Titel ausgemischt wird, wenn er einmal laeuft (wie outroBarStart,
+  // ohne gezogene Zone) — fuer den naechsten und den Titel danach
+  function _outroZoneFor(t, wf, ovFrac = null) {
+    const dur = t?.duration_sec || 0
+    const bpm = bpmByPath.get(t?.path) || t?.bpm
+    const cf  = _cfSecFor(t?.path, bpm)
+    if (!(dur > 0) || cf <= 0) return null
+    const cfg    = get(appSettings)
+    const cfFrac = Math.min(0.9, cf / dur)
+    const sil    = cfg.smartFade && wf?.length ? _detectOutroStart(wf) : -1
+    const a      = Math.max(0, Math.min(4, (cfg.outroAggressiveness ?? cfg.fadeAggressiveness ?? 3) - 1))
+    let trig = sil >= 0 ? sil - OUTRO_EARLY[a] * cfFrac : 1 - cfFrac
+    trig = Math.max(0.2, Math.min(trig, 1 - cfFrac))
+    if (ovFrac != null) trig = Math.max(0.02, Math.min(ovFrac, 1 - cfFrac))   // selbst gezogen
+    const st = Math.max(0, _snapTrigger(trig * dur * 1000, dur * 1000, cf, t.path, ovFrac != null, bpm) / (dur * 1000))
+    return [st, Math.min(1, st + cfFrac)]
+  }
   const nextIntroEnd = $derived.by(() => {
     const nt = nextTrack
-    if (!nt || cfS <= 0) return -1
+    if (!nt || cfEff <= 0) return -1
     const dur = nt.duration_sec || 180
-    return Math.min(0.95, nextIntroStart + cfS / dur)
+    return Math.min(0.95, nextIntroStart + cfEff / dur)
+  })
+
+  // Mix-Zonen im Farbband: der naechste Titel zeigt auch schon, wo er
+  // ausgemischt wird, der Titel danach (rueckt beim Uebergang nach) beides —
+  // so sieht jede Zeile nach dem Hochgleiten gleich aus wie davor
+  const nextOutroZone = $derived.by(() => {
+    void $appSettings; void $beatGrids; void cfS; void bpmByPath
+    if (!nextTrack) return null
+    const ov = nextOutroOverride?.path === nextTrack.path ? nextOutroOverride.frac : null
+    return _outroZoneFor(nextTrack, $waveformNext, ov)
+  })
+  const thirdWf = $derived($waveformThird.path && $waveformThird.path === thirdTrack?.path ? $waveformThird.data : [])
+  const thirdIntroMark = $derived(_detectIntroLen(thirdWf))
+  const thirdOutroMark = $derived(_detectOutroStart(thirdWf))
+  const thirdIntroStart = $derived.by(() => {
+    void $appSettings; void $beatGrids
+    return thirdTrack ? _introFracFor(thirdTrack, thirdWf) : 0
+  })
+  const thirdIntroEnd = $derived.by(() => {
+    if (!thirdTrack || !nextTrack) return -1
+    void $appSettings; void $beatGrids; void cfS
+    const cf = _cfSecFor(nextTrack.path, nextBpm)     // dann laeuft der naechste Titel
+    return cf > 0 ? Math.min(0.95, thirdIntroStart + cf / (thirdTrack.duration_sec || 180)) : -1
+  })
+  const thirdOutroZone = $derived.by(() => {
+    void $appSettings; void $beatGrids; void cfS; void bpmByPath
+    return thirdTrack ? _outroZoneFor(thirdTrack, thirdWf) : null
+  })
+  // Tonart und Tempo des Titels danach (im Verhaeltnis zum naechsten)
+  const thirdKey   = $derived(keyByPath.get(thirdTrack?.path) ?? null)
+  const thirdCompat = $derived(keyCompat(nextKey?.key, thirdKey?.key))
+  const thirdBpm   = $derived(thirdTrack ? (bpmByPath.get(thirdTrack.path) || thirdTrack.bpm || 0) : 0)
+  const thirdTempo = $derived.by(() => {
+    if (!(thirdBpm > 30) || !(nextBpm > 30)) return null
+    const lim = $appSettings.maxTempoDiff ?? 8
+    const m = tempoMatch(nextBpm, thirdBpm, lim / 100)
+    return m ? { ok: true, pct: Math.round(Math.abs(m.rate - 1) * 1000) / 10 } : { ok: false, lim }
+  })
+  // Waveform des Titels danach schon vorher holen, damit er beim Nachruecken fertig ist
+  $effect(() => {
+    const p = thirdTrack?.path
+    if (p && untrack(() => get(waveformThird).path) !== p) requestWaveform('waveform_third', p)
   })
 
   // Taktraster fuer laufenden und naechsten Titel holen (einmal je Pfad)
   const _gridAsked = new Set()
   $effect(() => {
     if (!$appSettings.beatAlignCf && $appSettings.tempoMatch === false) return
-    for (const p of [$nowPlaying?.path, nextTrack?.path]) {
+    for (const p of [$nowPlaying?.path, nextTrack?.path, thirdTrack?.path]) {
       if (p && !_gridAsked.has(p)) { _gridAsked.add(p); send({ type: 'get_beatgrid', path: p }) }
     }
   })
@@ -545,13 +687,39 @@
     const p = $nowPlaying?.path ?? ''
     if (p === _ovFor) return
     _ovFor = p
-    untrack(() => { outroOverride = null; if (introOverride?.path === p) introOverride = null })
+    untrack(() => {
+      // Beim naechsten Titel gezogenes Ausmischen gilt jetzt fuer ihn als laufenden
+      if (nextOutroOverride?.path === p) outroOverride = nextOutroOverride
+      else if (outroOverride?.path !== p) outroOverride = null
+      nextOutroOverride = null
+      if (introOverride?.path === p) introOverride = null
+    })
   })
+  // "Jetzt mischen" (Fernbedienung): Mix-Zone an die aktuelle Stelle legen —
+  // der Uebergang startet dann auf der naechsten Eins, im Takt und mit
+  // Bass-Tausch, wie ein automatischer. Eine halbe Takt-Laenge Vorlauf, damit
+  // die Eins davor (schon vorbei) nicht gewaehlt wird.
+  let _mixReqSeen = 0
+  $effect(() => {
+    const at = $mixNowRequest
+    if (!at || at === _mixReqSeen) return
+    _mixReqSeen = at
+    untrack(() => {
+      const el = cur(), np = el?.dataset.path || get(nowPlaying)?.path
+      if (!el || !np || cfActive || cfRafActive || durMs <= 0 || !get(playerState).playing) return
+      const g = gridOf(np)
+      const lead = g ? barLen(g) * 500 : 250
+      _cfDoneAt = 0
+      outroOverride = { path: np, frac: Math.min(0.999, (el.currentTime * 1000 + lead + 150) / durMs) }
+      _checkCrossfade(el.currentTime * 1000)
+    })
+  })
+
   function dragOutro(frac, done) {
     const np = cur()?.dataset.path || get(nowPlaying)?.path
     zoneDragging = !done
     if (!np || cfActive || cfRafActive || durMs <= 0) return
-    const cfFrac = Math.min(0.9, (cfS * 1000) / durMs)
+    const cfFrac = Math.min(0.9, (cfEff * 1000) / durMs)
     outroOverride = { path: np, frac: Math.max(0.02, Math.min(frac, 1 - cfFrac)) }
   }
   function dragIntro(frac, done) {
@@ -559,7 +727,16 @@
     zoneDragging = !done
     if (!nt?.path || cfActive || cfRafActive) return
     const dur = nt.duration_sec || 180
-    introOverride = { path: nt.path, frac: Math.max(0, Math.min(frac, 0.95 - cfS / dur)) }
+    introOverride = { path: nt.path, frac: Math.max(0, Math.min(frac, 0.95 - cfEff / dur)) }
+  }
+
+  function dragNextOutro(frac, done) {
+    const nt = nextTrack
+    zoneDragging = !done
+    if (!nt?.path || !(nt.duration_sec > 0) || cfActive || cfRafActive) return
+    const cf = _cfSecFor(nt.path, nextBpm)
+    const cfFrac = Math.min(0.9, cf / nt.duration_sec)
+    nextOutroOverride = { path: nt.path, frac: Math.max(0.02, Math.min(frac, 1 - cfFrac)) }
   }
 
   let _lastNextPath = ''
@@ -567,7 +744,7 @@
     const nt = nextTrack
     if (nt?.path && nt.path !== _lastNextPath) {
       _lastNextPath = nt.path
-      send({ type: 'get_waveform_next', path: nt.path })
+      requestWaveform('waveform_next', nt.path)
       // Pre-enrich next track so its LUFS is ready before crossfade starts
       if (!nt.lufs || nt.lufs <= -90)
         send({ type: 'enrich_track', path: nt.path })
@@ -592,11 +769,11 @@
     const c  = untrack(cur)
     const a  = untrack(alt)
     const v  = untrack(() => volume) / 100
-    const cf = untrack(() => cfS)
+    const cf = untrack(() => cfEff)
     const wasPlaying = c && c.src && c.readyState >= 2 && !c.paused
 
     // Consume the one-shot flag: user-initiated plays skip the crossfade so
-    // the old track stops immediately instead of fading out over cfS seconds.
+    // the old track stops immediately instead of fading out over cfEff seconds.
     const forceImmediate = get(skipNextCrossfade)
     if (forceImmediate) skipNextCrossfade.set(false)
 
@@ -679,7 +856,7 @@
     if (p && p !== _wfPath) {
       _wfPath = p
       waveform.set([])
-      send({ type: 'get_waveform', path: p })
+      requestWaveform('waveform', p)
     }
   })
 
@@ -753,7 +930,7 @@
 
   // ── Auto-crossfade ─────────────────────────────────────────────────────────
   function _checkCrossfade(pos) {
-    if (cfActive || cfS <= 0 || durMs <= 0) return
+    if (cfActive || cfEff <= 0 || durMs <= 0) return
     // Nicht waehrend der Pause-Blende: der alte Titel laeuft dort noch ein
     // paar hundert Millisekunden — frueher startete genau dann ein neuer
     // Uebergang, und der naechste Titel spielte nach dem Pausieren weiter.
@@ -764,7 +941,7 @@
 
     const trigFrac = _outroTrigger()
     // Einrasten auf Phrase / Eins / Schlag (siehe _snapTriggerMs)
-    const triggerMs = _snapTriggerMs(trigFrac >= 0 ? trigFrac * durMs : durMs - cfS * 1000)
+    const triggerMs = _snapTriggerMs(trigFrac >= 0 ? trigFrac * durMs : durMs - cfEff * 1000)
 
     if (pos < triggerMs - 100 || pos >= durMs - 100) return
 
@@ -848,14 +1025,14 @@
     }, { once: true })
 
     const remaining = durMs - pos
-    const cfMs = Math.min(cfS * 1000, remaining)
+    const cfMs = Math.min(cfEff * 1000, remaining)
     planBassSwap(cur(), inactive, gridOf(curPath), gridOf(nextTrk.path), cfMs / 1000)
     let elapsed = 0
     const cfCurveSnap = get(appSettings).cfCurve ?? 'cosine'
 
     stopRamp(cur()); stopRamp(inactive)
     if (thirdTrack?.path && get(waveformThird).path !== thirdTrack.path)
-      send({ type: 'get_waveform_third', path: thirdTrack.path })
+      requestWaveform('waveform_third', thirdTrack.path)
     cfStartAt = performance.now(); cfLenMs = cfMs; blendNextPos = introFrac
     requestAnimationFrame(_blendLoop)
     cfTimer = setInterval(() => {
@@ -907,7 +1084,8 @@
     bassSwapOn = false
     blendP = 0; blendNextPos = 0
     _cfDoneAt = performance.now()
-    outroOverride = null; introOverride = null
+    outroOverride = nextOutroOverride?.path === nextPath ? nextOutroOverride : null
+    introOverride = null
     which = which === 'A' ? 'B' : 'A'
 
     if (oldEl) _silenceAndStop(oldEl)
@@ -1096,10 +1274,10 @@
     window.__player = {
       get elA() { return elA }, get elB() { return elB }, get which() { return which },
       get eqA() { return eqA?.gain.value }, get eqB() { return eqB?.gain.value },
-      get bassSwapOn() { return bassSwapOn }, get cfActive() { return cfActive }, get cfS() { return cfS },
+      get bassSwapOn() { return bassSwapOn }, get cfActive() { return cfActive }, get cfS() { return cfS }, get cfEff() { return cfEff },
       get durMs() { return durMs }, get triggerMs() { return outroBarStart >= 0 ? outroBarStart * durMs : -1 },
-      get nextIntroStart() { return nextIntroStart }, grid: (p) => gridOf(p),
-      get audioTime() { return audioCtx?.currentTime ?? 0 },
+      get nextIntroStart() { return nextIntroStart }, get nextOutroZone() { return nextOutroZone }, grid: (p) => gridOf(p),
+      get audioTime() { return audioCtx?.currentTime ?? 0 }, get sinkId() { return audioCtx?.sinkId ?? null },
     }
   }
 
@@ -1170,6 +1348,7 @@
              style={blendP > 0 ? `transform:translateY(${-blendP * 100}%);opacity:${1 - blendP}` : ''}>
           <Waveform data={$waveform} position={pos} onclick={seek} height={WF1_H}
                     outroStart={outroBarStart} outroEnd={outroBarEnd}
+                    band introMark={curIntroMark} outroMark={curOutroMark}
                     dragZone="outro" onzonedrag={dragOutro}
                     zoneTitle="MIX-Zone ziehen: Übergang früher oder später starten (nur dieses Mal)"
                     loading={$nowPlaying !== null && $waveform.length === 0} />
@@ -1180,15 +1359,22 @@
               <span class="eyebrow next-label">Nächster</span>
               <span class="next-title">{nextTrack.title}{nextTrack.artist ? ' · ' + nextTrack.artist : ''}</span>
               {#if nextKey}
-                <KeyChip key={nextKey.key} src={nextKey.key_src} compat={uebergang.level === 'unknown' ? null : uebergang} hint="Übergang: " />
+                <KeyChip key={nextKey.key} src={nextKey.key_src} compat={uebergang.level === 'unknown' ? null : uebergang} hint="Übergang: " ring boost={!!nextTrack.energy_boost} />
+              {/if}
+              {#if nextBpm}
+                <span class="next-bpm" class:far={nextTempo && !nextTempo.ok}
+                      title={!nextTempo ? 'Tempo des nächsten Titels' : nextTempo.ok ? `Tempo wird im Übergang angeglichen (${nextTempo.pct} %)` : `Mehr als ${nextTempo.lim} % Tempo-Unterschied — der Übergang wird nur geblendet (Einstellungen → Blend)`}>{Math.round(nextBpm)} BPM</span>
               {/if}
               <span class="next-dur">{fmt(nextTrack.duration_sec * 1000)}</span>
             </div>
-            <div class="wf2" style={blendP > 0 ? `transform:scaleY(${1 + blendP * (WF1_H / WF2_H - 1)})` : ''}>
+            <div class="wf2" style={blendP > 0 ? `transform:scaleY(${1 + blendP * ((WF1_H + WF_BAND) / (WF2_H + WF_BAND) - 1)})` : ''}>
               <Waveform data={$waveformNext} position={blendP > 0 ? blendNextPos : 0} height={WF2_H}
                         introStart={nextIntroStart} introEnd={nextIntroEnd}
-                        dragZone="intro" onzonedrag={dragIntro}
-                        zoneTitle="MIX-Zone ziehen: an anderer Stelle in den nächsten Titel einsteigen (nur dieses Mal)" />
+                        outroStart={nextOutroZone?.[0] ?? -1} outroEnd={nextOutroZone?.[1] ?? -1}
+                        band bandLabels={blendP === 0} introMark={nextIntroMark} outroMark={nextOutroMark}
+                        dragZone="both" onzonedrag={(f, done, kind) => kind === 'outro' ? dragNextOutro(f, done) : dragIntro(f, done)}
+                        zoneTitle={{ intro: 'MIX-Zone ziehen: an anderer Stelle in den nächsten Titel einsteigen (nur dieses Mal)',
+                                     outro: 'MIX-Zone ziehen: wenn dieser Titel läuft, früher oder später ausmischen (nur dieses Mal)' }} />
             </div>
           </div>
           {#if blendP > 0 && thirdTrack}
@@ -1197,9 +1383,18 @@
               <div class="next-bar">
                 <span class="eyebrow next-label">Nächster</span>
                 <span class="next-title">{thirdTrack.title}{thirdTrack.artist ? ' · ' + thirdTrack.artist : ''}</span>
+                {#if thirdKey}
+                  <KeyChip key={thirdKey.key} src={thirdKey.key_src} compat={thirdCompat.level === 'unknown' ? null : thirdCompat} hint="Übergang: " ring boost={!!thirdTrack.energy_boost} />
+                {/if}
+                {#if thirdBpm}
+                  <span class="next-bpm" class:far={thirdTempo && !thirdTempo.ok}>{Math.round(thirdBpm)} BPM</span>
+                {/if}
                 <span class="next-dur">{fmt(thirdTrack.duration_sec * 1000)}</span>
               </div>
-              <Waveform data={$waveformThird.path === thirdTrack.path ? $waveformThird.data : []} position={0} height={WF2_H} />
+              <Waveform data={thirdWf} position={0} height={WF2_H}
+                        introStart={thirdIntroStart} introEnd={thirdIntroEnd}
+                        outroStart={thirdOutroZone?.[0] ?? -1} outroEnd={thirdOutroZone?.[1] ?? -1}
+                        band introMark={thirdIntroMark} outroMark={thirdOutroMark} />
             </div>
           {/if}
         {/if}
@@ -1262,6 +1457,8 @@
   .next-bar { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
   .next-label { flex-shrink: 0; }
   .next-title { flex: 1; min-width: 0; font-size: var(--fs-body); color: var(--c-tx2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .next-bpm { flex-shrink: 0; font-size: var(--fs-sm); color: var(--c-tx2); font-variant-numeric: tabular-nums; }
+  .next-bpm.far { color: var(--c-warn-tx); }
   .next-dur { flex-shrink: 0; font-size: var(--fs-sm); color: var(--c-tx3); font-variant-numeric: tabular-nums; }
 
   .controls { display: flex; align-items: center; justify-content: center; gap: var(--sp-1); }

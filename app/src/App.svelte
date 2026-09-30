@@ -251,6 +251,9 @@
     --c-wf-zone:       rgba(86,96,112,0.62);
     --c-wf-zone-edge:  rgba(150,166,190,0.55);
     --c-wf-zone-label: rgba(196,208,226,0.82);
+    --c-wf-intro:      #4f8fe8;
+    --c-wf-outro:      #4f8fe8;
+    --c-wf-mix:        #ff9a33;
     /* Farbige Flaechen: Grund / Rahmen / Schrift je Bedeutung. Im dunklen
        Theme dunkle Kacheln mit heller Schrift, im hellen genau andersherum. */
     --c-green-br: #2a6a30;  --c-green-tx: #4a9a50;  --c-green-bg: #0e1a10;
@@ -305,6 +308,9 @@
     --c-wf-zone:       rgba(150,142,132,0.55);
     --c-wf-zone-edge:  rgba(90,84,76,0.65);
     --c-wf-zone-label: rgba(30,26,20,0.85);
+    --c-wf-intro:      #1a5cb0;
+    --c-wf-outro:      #1a5cb0;
+    --c-wf-mix:        #b35400;
     --c-green-br: #8ac098;  --c-green-tx: #1a7030;  --c-green-bg: #eaf6ec;
     --c-red-br:   #d89a9a;  --c-red-tx:   #b82020;
     --c-blue-br:  #93b6e0;  --c-blue-tx:  #1a5cb0;  --c-blue-bg:  #e8f0fb;

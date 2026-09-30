@@ -84,6 +84,8 @@ class BackendTest(unittest.TestCase):
         main._quality_cache = {}
         main._quality_cache_dirty = False
         main._ytm_cache = {}
+        main._wf_disk = None
+        main._wf_cache.clear()
         main._ytm_cache_dirty = False
         main.PLAYLISTS_DIR = self.tmp / "playlists"
         self._saved_state = {k: main._state.get(k) for k in (

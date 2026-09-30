@@ -285,6 +285,10 @@ def load_settings():
     _state["loudnorm_target"]         = float(raw.get("loudnorm_target", -10.0))
     _state["loudnorm_tp"]             = float(raw.get("loudnorm_tp", -1.5))
     _state["playlist_folder_enabled"] = bool(raw.get("playlist_folder_enabled", True))
+    try:
+        _state["dl_parallel"]         = max(1, min(6, int(raw.get("dl_parallel", 3))))
+    except (TypeError, ValueError):
+        _state["dl_parallel"]         = 3
     _state["dl_filename_format"]      = str(raw.get("dl_filename_format", "title"))
     _state["download_dir"]            = str(raw.get("download_dir", str(core.BASE_DIR / "Downloads")))
     _state["auto_scan_interval_min"]  = int(raw.get("auto_scan_interval_min", 0))
@@ -323,6 +327,7 @@ def save_settings():
         "loudnorm_target":         _state.get("loudnorm_target", -10.0),
         "loudnorm_tp":             _state.get("loudnorm_tp", -1.5),
         "playlist_folder_enabled": _state.get("playlist_folder_enabled", True),
+        "dl_parallel":             _state.get("dl_parallel", 3),
         "dl_filename_format":      _state.get("dl_filename_format", "title"),
         "download_dir":            _state.get("download_dir", str(core.BASE_DIR / "Downloads")),
         "auto_scan_interval_min":  _state.get("auto_scan_interval_min", 0),

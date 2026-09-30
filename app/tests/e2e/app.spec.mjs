@@ -16,6 +16,12 @@ test.beforeAll(async () => {
   page = await app.firstWindow()
   await page.waitForLoadState('domcontentloaded')
   await expect(page.locator('.rows .row').first()).toBeVisible({ timeout: 30000 })
+  // Kurze Uebergaenge fuer die Tests: 4 Takte = 7,5 s bei 128 BPM
+  await page.evaluate(async () => {
+    const url = performance.getEntriesByType('resource').map(e => e.name).find(n => n.includes('/src/stores/ws.js'))
+    const m = await import(url)
+    m.appSettings.update(s => ({ ...s, cfUnit: 'bars', cfBars: 4 }))
+  })
 })
 
 test.afterAll(async () => { await app?.close() })
@@ -77,6 +83,18 @@ test('Einstellungen: DJ-Schalter und verfolgte Playlists', async () => {
   await page.locator('.tab-btn', { hasText: 'Download' }).click()
   await expect(page.getByText('Verfolgte Playlists und Kanäle', { exact: true })).toBeVisible()
   await expect(page.getByText(/Noch keine\./)).toBeVisible()
+  await expect(page.getByText('Gleichzeitige Downloads')).toBeVisible()
+  // Dienste als Karten, Details aufklappbar
+  await page.locator('.tab-btn', { hasText: 'Dienste' }).click()
+  await expect(page.locator('.svc')).toHaveCount(3)
+  await page.locator('.svc-head', { hasText: 'AcoustID' }).click()
+  await expect(page.getByText('Application-Key', { exact: true })).toBeVisible()
+  // Ausgabegeraet und Uebergangslaenge
+  await page.locator('.tab-btn', { hasText: 'Wiedergabe' }).click()
+  await expect(page.getByLabel('Ausgabegerät')).toBeVisible()
+  await expect(page.getByLabel('Ausgabegerät').locator('option').first()).toHaveText('Windows-Standard')
+  await page.locator('.tab-btn', { hasText: 'Blend' }).click()
+  await expect(page.getByText('Länge in Takten')).toBeVisible()
   await page.keyboard.press('Escape')
 })
 
@@ -109,6 +127,8 @@ test('Uebergang: Einstieg auf der Phrase und weicher Bass-Tausch im Takt', async
     return { trig, s }
   })
   const beat = 60 / 128, bar = 4 * beat, phrase = 0.1 + 8 * beat
+  // 4 Takte bei 128 BPM
+  expect(await page.evaluate(() => window.__player.cfEff)).toBeCloseTo(4 * bar, 2)
   // Mix-Punkt liegt auf einer Phrasengrenze (8 Takte)
   const k = (r.trig / 1000 - phrase) / (8 * bar)
   expect(Math.abs(k - Math.round(k))).toBeLessThan(0.01)
@@ -169,6 +189,45 @@ test('Groesserer Tempo-Unterschied (128 -> 144 BPM, Grenze 15 %): beide treffen 
   expect(med(diffs)).toBeLessThan(0.05)
   expect(r.some(x => x.swap)).toBe(true)
   await stores(`m.appSettings.update(s => ({ ...s, maxTempoDiff: 8 }))`)
+})
+
+test('Jetzt mischen (Fernbedienung): Uebergang startet auf der naechsten Eins', async () => {
+  await stores(`m.appSettings.update(s => ({ ...s, beatAlignCf: true, tempoMatch: true, phraseAlign: true, bassSwap: true, maxTempoDiff: 8 }))`)
+  await startFirst()
+  await page.waitForFunction(async () => {
+    const url = performance.getEntriesByType('resource').map(e => e.name).find(n => n.includes('/src/stores/ws.js'))
+    const m = await import(url)
+    let g, q; m.beatGrids.subscribe(x => g = x)(); m.queue.subscribe(x => q = x)()
+    return q.length === 2 && q.every(t => g[t.path]?.phrase != null)
+  }, null, { timeout: 30000 })
+  // Mitten im Titel, weit vor der Mix-Zone
+  const r = await page.evaluate(async () => {
+    const P = window.__player
+    const sleep = ms => new Promise(res => setTimeout(res, ms))
+    const el = P.which === 'A' ? P.elA : P.elB
+    el.currentTime = 20.3
+    await sleep(400)
+    const url = performance.getEntriesByType('resource').map(e => e.name).find(n => n.includes('/src/stores/ws.js'))
+    const m = await import(url)
+    const t0 = el.currentTime
+    m.send({ type: 'mix_now' })                     // wie von der Fernbedienung
+    let start = null, swap = false
+    const tEnd = performance.now() + 9000
+    while (performance.now() < tEnd) {
+      if (P.cfActive && start === null) start = el.currentTime
+      if (P.bassSwapOn) swap = true
+      await sleep(20)
+    }
+    return { t0, start, swap }
+  })
+  expect(r.start).not.toBeNull()
+  const bar = 4 * 60 / 128, phrase = 0.1 + 8 * 60 / 128
+  const ph = ((r.start - phrase) / bar) % 1
+  expect(Math.min(ph, 1 - ph)).toBeLessThan(0.12)            // auf einer Eins (Messraster 20 ms + timeupdate)
+  expect(r.start - r.t0).toBeLessThan(bar * 1.6)              // spaetestens die uebernaechste Eins
+  expect(r.swap).toBe(true)
+  // Uebergang zu Ende laufen lassen, sonst laeuft er in den naechsten Test
+  await page.waitForFunction(() => !window.__player.cfActive, null, { timeout: 15000 })
 })
 
 test('Pause mitten im Uebergang haelt beide Titel an', async () => {
