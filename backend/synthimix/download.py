@@ -703,6 +703,38 @@ async def _follow_startup():
               f"{len(_state.get('followed_channels', []))} Kanal/Kanaele", flush=True)
         await _follow_check_all()
 
+def _temp_leftovers(folder: str, min_age: float = 3600) -> list[str]:
+    """Liegengebliebene Zwischendateien im Download-Ordner, aelter als min_age s."""
+    out, now = [], time.time()
+    for root, _, files in os.walk(folder):
+        for f in files:
+            if core.is_temp_audio(f):
+                p = os.path.join(root, f)
+                try:
+                    if now - os.path.getmtime(p) >= min_age:
+                        out.append(p)
+                except OSError:
+                    pass
+    return out
+
+async def _temp_cleanup_loop():
+    """Reste abgebrochener Downloads ("Titel.temp.mp3") in den Papierkorb —
+    nur im Download-Ordner, nur aelter als eine Stunde, nie waehrend ein
+    Download laeuft. Beim Start und danach alle 30 Minuten."""
+    await asyncio.sleep(90)
+    while True:
+        try:
+            folder = _state.get("download_dir") or str(core.BASE_DIR / "Downloads")
+            if not _dl_procs and os.path.isdir(folder):
+                loop = asyncio.get_running_loop()
+                old = await loop.run_in_executor(None, _temp_leftovers, folder)
+                if old and not _dl_procs:
+                    left = await loop.run_in_executor(None, library._move_many_to_trash, old)
+                    print(f"[download] {len(old) - len(left)} liegengebliebene Zwischendatei(en) in den Papierkorb", flush=True)
+        except Exception as e:
+            print(f"[download] Aufraeumen: {e}", flush=True)
+        await asyncio.sleep(1800)
+
 def _dl_error_reason(msg: str) -> str:
     """yt-dlp-Fehlermeldung → Grund (Schluessel von _DL_REASON_TEXT)."""
     m = (msg or "").lower()

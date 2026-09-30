@@ -39,18 +39,59 @@ def _channel_of(url: str) -> dict | None:
     return next((c for c in _channels() if c["url"] == url), None)
 
 
-async def _channel_playlists(base: str) -> tuple[str, list[dict]]:
-    """Name des Kanals und seine oeffentlichen Playlists [{url, title, thumb}]."""
+class ChannelReadError(RuntimeError):
+    """yt-dlp konnte die Playlist-Uebersicht nicht lesen (Text = Grund)."""
+
+
+async def _read_tab(cmd: list[str]) -> tuple[dict | None, str]:
+    """yt-dlp ausfuehren: (JSON oder None, letzte ERROR-Zeile)."""
     proc = await asyncio.create_subprocess_exec(
-        *core._yt("--flat-playlist", "-J", "--no-warnings", base + "/playlists"),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         creationflags=_NO_WINDOW)
     try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=180)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=180)
     except (asyncio.TimeoutError, asyncio.CancelledError):
         core._kill_quietly(proc)
         raise
-    data = json.loads(out.decode("utf-8", errors="replace") or "{}")
+    try:
+        data = json.loads(out.decode("utf-8", errors="replace") or "null")
+    except ValueError:
+        data = None
+    errs = [ln.strip() for ln in err.decode("utf-8", errors="replace").splitlines()
+            if ln.strip().startswith("ERROR")]
+    return (data if isinstance(data, dict) else None), (errs[-1] if errs else "")
+
+
+def _channel_error_text(msg: str) -> str:
+    """yt-dlp-Fehler → kurzer Grund fuer die Anzeige."""
+    low = (msg or "").lower()
+    if "winerror 2" in low or "no such file" in low:
+        return "yt-dlp wurde nicht gefunden (evtl. vom Virenscanner entfernt) — unter Einstellungen → Dienste → yt-dlp neu laden"
+    if "http error 404" in low or "does not exist" in low:
+        return "Kanal nicht gefunden — Link prüfen"
+    kind = download._dl_error_reason(msg)
+    if kind != "other":
+        return download._DL_REASON_TEXT[kind]
+    t = re.sub(r"^ERROR:\s*", "", (msg or "").strip())
+    t = re.sub(r"^\[[^\]]+\]\s*[^:]{0,60}:\s*", "", t)      # "[youtube:tab] @name: "
+    return (t[:160] + "…") if len(t) > 160 else t
+
+
+async def _channel_playlists(base: str) -> tuple[str, list[dict]]:
+    """Name des Kanals und seine oeffentlichen Playlists [{url, title, thumb}].
+    Kann yt-dlp die Uebersicht nicht lesen: ChannelReadError mit dem Grund —
+    frueher wurde die Fehlermeldung verworfen, und es hiess nur "keine
+    Playlists gefunden"."""
+    tab = base + "/playlists"
+    data, err = await _read_tab(core._yt("--flat-playlist", "-J", "--no-warnings", tab))
+    if data is None and core._JS_ARGS:
+        # Zweiter Versuch ohne JS-Laufzeit (Electron als Node): fuer die
+        # Uebersicht braucht es sie nicht, und so faellt ein Problem dort nicht ins Gewicht
+        print(f"[kanal] {base}: {err or 'keine Antwort'} — zweiter Versuch ohne JS-Laufzeit", flush=True)
+        data, err2 = await _read_tab([core.YTDLP, "--encoding", "utf-8", "--flat-playlist", "-J", "--no-warnings", tab])
+        err = err2 or err
+    if data is None:
+        raise ChannelReadError(err or "yt-dlp lieferte keine Antwort")
     title = (data.get("channel") or data.get("uploader")
              or re.sub(r"\s*-\s*Playlists$", "", data.get("title") or "")).strip()
     out_pl, seen = [], set()
@@ -94,6 +135,7 @@ async def _plan_channel(url: str, fmt: str, ws: WebSocket):
     await _send("playlist_plan_pending", url=url, kind="channel")
     await _send("playlist_plan_progress", url=url, phase="channel", done=0, total=0)
     download._plan_tasks[url] = asyncio.current_task()
+    reason = ""
     try:
         title, pls = await _channel_playlists(base)
     except asyncio.CancelledError:
@@ -102,11 +144,14 @@ async def _plan_channel(url: str, fmt: str, ws: WebSocket):
     except Exception as e:
         print(f"[kanal] {base}: {e}", flush=True)
         title, pls = "", []
+        reason = _channel_error_text(str(e))
     finally:
         download._plan_tasks.pop(url, None)
     if not pls:
         await _send("playlist_plan_cancel", url=url)
-        await _send("channel_plan", src=url, url=base, error="Keine öffentlichen Playlists gefunden (oder der Kanal ließ sich nicht lesen).")
+        await _send("channel_plan", src=url, url=base, error=(
+            f"Der Kanal ließ sich nicht lesen: {reason}" if reason
+            else "Dieser Kanal hat keine öffentlichen Playlists."))
         return
     followed = {f["url"] for f in _state.get("followed", [])}
     ch = _channel_of(base)

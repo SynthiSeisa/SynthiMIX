@@ -99,6 +99,9 @@ export const qualityBatch        = writable({})
 // weiter (kleine Anzeige unten rechts) und das Fenster kommt wieder, wenn die
 // Vorschlaege fertig sind.
 export const qualityBatchOpen    = writable(false)
+// Laufwerk gewechselt: Vorschlaege [{from, to, count, found}] und Stand
+export const relocateSuggest     = writable([])
+export const relocateState       = writable(null)   // null | {busy} | {done, tracks, merged, playlists} | {none}
 export function startQualityBatch(paths) {
   const cur = get(qualityBatch)
   if (cur.phase === 'search' || cur.phase === 'replace') { qualityBatchOpen.set(true); return }
@@ -278,6 +281,26 @@ function connect() {
       }
       case 'scan_status':   scanStatus.set(msg.text); break
       // Waveforms kommen nebenher — eine aeltere Antwort darf keine neuere ueberschreiben
+      case 'relocate_suggest':
+        relocateSuggest.set(msg.items ?? [])
+        if (msg.manual && !(msg.items ?? []).length) relocateState.set({ none: true })
+        break
+      case 'relocated': {
+        // Auch Pfade in der Oberflaeche (angeheftete Ordner, zuletzt offene Ansicht)
+        const fix = (v) => typeof v === 'string' && v.toLowerCase().startsWith(msg.from.toLowerCase()) ? msg.to + v.slice(msg.from.length)
+          : Array.isArray(v) ? v.map(fix) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [fix(k), fix(x)])) : v
+        try {
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i), raw = localStorage.getItem(k)
+            if (!raw || !raw.toLowerCase().includes(msg.from.toLowerCase().replace(/\\/g, '\\\\'))) continue
+            try { localStorage.setItem(k, JSON.stringify(fix(JSON.parse(raw)))) } catch {}
+          }
+        } catch {}
+        relocateSuggest.update(l => l.filter(x => x.from !== msg.from))
+        relocateState.set({ done: true, tracks: msg.tracks, merged: msg.merged, playlists: msg.playlists })
+        send({ type: 'get_state' })
+        break
+      }
       case 'waveform':        if (_wfWant.waveform === undefined || msg.path === _wfWant.waveform) waveform.set(msg.data ?? []); break
       case 'waveform_next':   if (_wfWant.waveform_next === undefined || msg.path === _wfWant.waveform_next) waveformNext.set(msg.data ?? []); break
       case 'waveform_third':  if (_wfWant.waveform_third === undefined || msg.path === _wfWant.waveform_third) waveformThird.set({ path: msg.path ?? '', data: msg.data ?? [] }); break

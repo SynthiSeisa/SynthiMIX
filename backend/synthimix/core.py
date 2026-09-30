@@ -382,6 +382,14 @@ def _yt(*args: str) -> list[str]:
     return [YTDLP, *_JS_ARGS, "--encoding", "utf-8", *args]
 FFMPEG_DIR = str(Path(FFMPEG).parent) if FFMPEG != "ffmpeg" else ""
 
+# Zwischendateien mit Audio-Endung: yt-dlp ("Titel.temp.mp3" beim Umwandeln)
+# und die eigenen beim Tag-Schreiben/Normalisieren. Bricht etwas ab, bleiben sie
+# liegen — sie sind keine Titel und gehoeren nicht in die Bibliothek.
+_TEMP_AUDIO_RE = re.compile(r'\.(temp|__tmp|norm_tmp)\.[a-z0-9]{2,5}$', re.I)
+
+def is_temp_audio(name: str) -> bool:
+    return bool(_TEMP_AUDIO_RE.search(name or ""))
+
 def _kill_quietly(proc):
     """Prozess einer abgebrochenen Suche beenden (sonst liefe yt-dlp weiter)."""
     if proc is not None and proc.returncode is None:

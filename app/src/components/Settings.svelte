@@ -11,7 +11,7 @@
            lastfmApiKey, acoustidApiKey,
            fpcalcInstalling, fpcalcInstallError,
            spotdlInstalling, spotdlInstallError, spotdlInstallText,
-           watchedFolders, watchedFolderImpact, ytdlpAutoupdate, excludedFolders, toolUpdates, servicesTest, setupOpen, changelog, followed, followedChannels, dlParallel } from '../stores/ws.js'
+           watchedFolders, watchedFolderImpact, ytdlpAutoupdate, excludedFolders, toolUpdates, servicesTest, setupOpen, changelog, followed, followedChannels, dlParallel, relocateState } from '../stores/ws.js'
   import { infoHints } from '../lib/infohints.js'
 
   let tab = $state('playback')
@@ -1142,6 +1142,15 @@
               <button class="tog {$scanRecursive ? 'on' : ''}" aria-label="Unterordner beim Scannen einschließen"
                 onclick={() => send({ type: 'set_scan_recursive', enabled: !$scanRecursive })}></button>
             </div>
+
+            <div class="row">
+              <span class="lbl">Laufwerk gewechselt?</span>
+              <button class="btn btn-sm" onclick={() => { relocateState.set(null); send({ type: 'relocate_detect' }) }}>
+                <i class="ti ti-folder-search"></i> Fehlende Titel suchen
+              </button>
+            </div>
+            {#if $relocateState?.none}<p class="hint keep">Nichts gefunden — entweder fehlt nichts, oder die Titel liegen nicht einfach unter einem anderen Laufwerksbuchstaben.</p>{/if}
+            <p class="hint">Hat sich der Buchstabe der Musik-Platte geändert, stellt SynthiMIX alle Pfade um — BPM, Tonart und Wiedergaben bleiben. Vorher keinen beobachteten Ordner entfernen.</p>
 
             <div class="wf-head">Beobachtete Ordner</div>
             {#if !$watchedFolders.length}

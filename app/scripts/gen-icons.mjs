@@ -46,6 +46,7 @@ const ICONS = [
   ['player-track-next', 'outline'],
   ['player-track-prev', 'outline'],
   ['refresh',         'outline'],
+  ['folder-search',   'outline'],
   ['plus',            'outline'],
   ['check',           'outline'],
   ['alert-triangle',  'outline'],

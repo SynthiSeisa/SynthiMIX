@@ -151,6 +151,8 @@ def load_library():
     normalised = []
     mojibake_fixed = False
     for t in raw:
+        if core.is_temp_audio(str(t.get("path") or "")):
+            continue                 # frueher mit eingelesene Zwischendatei ("….temp.mp3")
         orig_title = t.get("title", "")
         fixed_title = _complete_title(_fix_mojibake(orig_title), str(t.get("path") or ""))
         if fixed_title != orig_title:

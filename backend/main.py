@@ -17,7 +17,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 from synthimix.core import _state, clients
-from synthimix import automix, beatgrid, channels, core, download, keys, library, media, quality, remote, search, store, tags, tools
+from synthimix import automix, beatgrid, channels, core, download, keys, library, media, quality, relocate, remote, search, store, tags, tools
 
 # ── app ──────────────────────────────────────────────────────────────────────
 @asynccontextmanager
@@ -36,6 +36,7 @@ async def lifespan(application: FastAPI):
     asyncio.create_task(media._refresh_tag_meta_loop())
     asyncio.create_task(quality._quality_scan_loop())
     asyncio.create_task(media._loud_main_loop())
+    asyncio.create_task(download._temp_cleanup_loop())
     asyncio.create_task(download._follow_startup())
     asyncio.create_task(library._fileid_scan_task())
     print(f"[backend] ready on ws://127.0.0.1:{core._BACKEND_PORT}/ws", flush=True)
@@ -68,7 +69,7 @@ def _download_tree_sync(dl_dir: Path) -> dict:
         dirs = sorted((e for e in items if e.is_dir() and not e.name.startswith('.')), key=lambda e: e.name.lower())
         files = []
         for e in items:
-            if e.is_file() and os.path.splitext(e.name)[1].lower() in _DL_AUDIO_EXT:
+            if e.is_file() and os.path.splitext(e.name)[1].lower() in _DL_AUDIO_EXT and not core.is_temp_audio(e.name):
                 try:
                     files.append({"path": e.path, "name": os.path.splitext(e.name)[0], "mtime": e.stat().st_mtime})
                 except OSError:
@@ -105,6 +106,14 @@ async def _send_waveform(ws: WebSocket, kind: str, path: str):
     except Exception:
         pass
 
+async def _send_relocate(ws: WebSocket, manual: bool):
+    items = await asyncio.get_running_loop().run_in_executor(None, relocate.detect)
+    if items or manual:
+        try:
+            await ws.send_text(json.dumps({"type": "relocate_suggest", "items": items, "manual": manual}))
+        except Exception:
+            pass
+
 async def _send_changelog(ws: WebSocket):
     items = await asyncio.get_running_loop().run_in_executor(None, tools._changelog_sync)
     try:
@@ -116,6 +125,8 @@ async def handle_message(ws: WebSocket, msg: dict):
     t = msg.get("type")
 
     if t == "get_state":
+        # Laufwerksbuchstabe geaendert? Nebenher pruefen und ggf. vorschlagen
+        asyncio.create_task(_send_relocate(ws, manual=False))
         await ws.send_text(json.dumps({"type": "queue", "items": _state["queue"],
                                        "current_idx": _state["current_idx"]}))
         await core.push_player()
@@ -1317,6 +1328,16 @@ async def handle_message(ws: WebSocket, msg: dict):
 
     elif t == "check_tools":
         asyncio.create_task(tools._check_tools(ws))
+
+    elif t == "relocate_detect":
+        asyncio.create_task(_send_relocate(ws, manual=True))
+
+    elif t == "relocate_apply":
+        old, new = str(msg.get("from") or ""), str(msg.get("to") or "")
+        if old and new and old.lower() != new.lower():
+            res = await asyncio.get_running_loop().run_in_executor(None, relocate.apply, old, new)
+            await core.push_library()
+            await core.broadcast({"type": "relocated", "from": old, "to": new, **res})
 
     elif t == "update_ytdlp":
         asyncio.create_task(tools._update_ytdlp(ws))

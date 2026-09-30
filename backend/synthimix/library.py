@@ -67,6 +67,10 @@ def _parse_m3u(path: str) -> list[dict]:
 # ── library scan ─────────────────────────────────────────────────────────────
 AUDIO_EXTS = {".mp3", ".flac", ".wav", ".ogg", ".m4a", ".aac", ".opus", ".wma"}
 
+def _is_audio_file(name: str) -> bool:
+    """Audio-Datei, aber keine liegengebliebene Zwischendatei (core.is_temp_audio)."""
+    return Path(name).suffix.lower() in AUDIO_EXTS and not core.is_temp_audio(name)
+
 async def scan_folder(folder: str):
     await core.broadcast({"type": "scan_status", "text": "Scanne…"})
     loop = asyncio.get_running_loop()
@@ -283,7 +287,7 @@ def _scan_sync(folder: str) -> list[dict]:
         if _is_excluded(root):
             continue
         for f in files:
-            if Path(f).suffix.lower() in AUDIO_EXTS:
+            if _is_audio_file(f):
                 full = str(Path(os.path.join(root, f)))  # normalisiert Slashes auf Windows
                 probe = media._probe_sync(full)
                 result.append(media._make_library_entry(full, probe))
@@ -297,14 +301,14 @@ def _find_new_audio_paths(folder: str, existing: set[str], recursive: bool) -> l
             if _is_excluded(root):
                 continue
             for f in files:
-                if Path(f).suffix.lower() in AUDIO_EXTS:
+                if _is_audio_file(f):
                     full = str(Path(os.path.join(root, f)))
                     if full not in existing:
                         new_paths.append(full)
     else:
         try:
             for f in os.listdir(folder):
-                if Path(f).suffix.lower() in AUDIO_EXTS:
+                if _is_audio_file(f):
                     full = str(Path(os.path.join(folder, f)))
                     if full not in existing and not _is_excluded(full):
                         new_paths.append(full)

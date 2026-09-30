@@ -5,6 +5,7 @@
   import SetupWizard from './components/SetupWizard.svelte'
   import WishToast from './components/WishToast.svelte'
   import QualityBatchDialog from './components/QualityBatchDialog.svelte'
+  import RelocateDialog from './components/RelocateDialog.svelte'
 
   // Einrichtung beim ersten Start: nach dem Verbinden kurz warten, bis
   // Bibliothek und Ordner da sind — wer schon Musik hat, sieht ihn nicht
@@ -209,6 +210,7 @@
   {#if $setupOpen}<SetupWizard onclose={() => setupOpen.set(false)} />{/if}
   <WishToast />
   <QualityBatchDialog />
+  <RelocateDialog />
 </div>
 
 <style>
