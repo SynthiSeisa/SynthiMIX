@@ -116,6 +116,42 @@ _KEY_SCORE = {"same": 3.0, "relative": 2.6, "up1": 2.7, "down1": 2.5,
               "up2": 1.2, "up7": 0.8, "unknown": 1.2, "clash": 0.0}
 _BOOST_KEY_SCORE = {"up2": 3.6, "up7": 3.3}
 
+
+def _pre(t: dict) -> tuple:
+    """Einmal je Titel: Tonart im Camelot-Rad, Tempo, Energie."""
+    return (_key_to_camelot(t.get("key")), float(t.get("bpm_f") or t.get("bpm") or 0), _energy(t))
+
+
+def _camelot_step(ca, cb) -> str:
+    """Wie _key_step, aber auf schon umgerechneten Camelot-Werten."""
+    if not ca or not cb:
+        return "unknown"
+    if ca == cb:
+        return "same"
+    if ca[0] == cb[0]:
+        return "relative"
+    if ca[1] == cb[1]:
+        return {1: "up1", 11: "down1", 2: "up2", 7: "up7"}.get((cb[0] - ca[0]) % 12, "clash")
+    return "clash"
+
+
+def _trans_score(pa: tuple, pc: tuple, boost_due: bool) -> tuple[float, str, float]:
+    """Wie gut der Titel c (pc = _pre(c)) auf a folgt: Tonart, Tempo, Energie.
+    Ist ein Energie-Schub faellig, zaehlen +2/+7 im Camelot-Rad und mehr Energie.
+    Liefert (Wertung, Tonart-Schritt, Energie-Unterschied)."""
+    (ka, ba, ea), (kc, bc, ec) = pa, pc
+    step = _camelot_step(ka, kc)
+    sc = (_BOOST_KEY_SCORE.get(step) if boost_due and step in _BOOST_KEY_SCORE
+          else _KEY_SCORE[step])
+    gap = _tempo_gap(ba, bc)
+    sc -= 0.3 if gap < 0 else min(3.0, gap * 25)
+    de = ec - ea
+    if boost_due:
+        sc += max(0.0, min(2.0, de))
+    else:
+        sc -= abs(de - 0.15) * 0.5
+    return sc, step, de
+
 def _harmonic_order(start: dict | None, tracks: list[dict], rng=None) -> tuple[list[dict], set[int]]:
     """Reihenfolge fuer einen harmonischen Mix mit gelegentlichen Energie-Schueben.
 
@@ -134,34 +170,10 @@ def _harmonic_order(start: dict | None, tracks: list[dict], rng=None) -> tuple[l
     since = 0
     due_at = rng.randint(4, 6)
     # Je Titel einmal vorrechnen: Tonart im Camelot-Rad, Tempo, Energie
-    pre: dict[int, tuple] = {}
-    for x in ([start] if start else []) + list(tracks):
-        pre[id(x)] = (_key_to_camelot(x.get("key")), float(x.get("bpm_f") or x.get("bpm") or 0), _energy(x))
-
-    def step_of(ca, cb):
-        if not ca or not cb:
-            return "unknown"
-        if ca == cb:
-            return "same"
-        if ca[0] == cb[0]:
-            return "relative"
-        if ca[1] == cb[1]:
-            return {1: "up1", 11: "down1", 2: "up2", 7: "up7"}.get((cb[0] - ca[0]) % 12, "clash")
-        return "clash"
+    pre: dict[int, tuple] = {id(x): _pre(x) for x in ([start] if start else []) + list(tracks)}
 
     def score(a, c, boost_due):
-        (ka, ba, ea), (kc, bc, ec) = pre[id(a)], pre[id(c)]
-        step = step_of(ka, kc)
-        sc = (_BOOST_KEY_SCORE.get(step) if boost_due and step in _BOOST_KEY_SCORE
-              else _KEY_SCORE[step])
-        gap = _tempo_gap(ba, bc)
-        sc -= 0.3 if gap < 0 else min(3.0, gap * 25)
-        de = ec - ea
-        if boost_due:
-            sc += max(0.0, min(2.0, de))
-        else:
-            sc -= abs(de - 0.15) * 0.5
-        return sc, step, de
+        return _trans_score(pre[id(a)], pre[id(c)], boost_due)
 
     while rest:
         boost_due = since >= due_at

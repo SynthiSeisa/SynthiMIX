@@ -259,7 +259,7 @@ async def _quality_replace(path: str, url: str, ws: WebSocket):
             return
         # Ohne Audio-Endung: der Ordner-Waechter nimmt die Zwischendatei nicht auf
         staged = path + ".synthimix-neu"
-        shutil.move(new, staged)
+        await loop.run_in_executor(None, shutil.move, new, staged)
         if not await loop.run_in_executor(None, library._move_to_trash, path):
             try: os.remove(staged)
             except OSError: pass
@@ -295,7 +295,7 @@ async def _quality_replace(path: str, url: str, ws: WebSocket):
         store.save_library()
         store.save_queue()
         await core.broadcast({"type": "track_meta_update", "track": lt})
-        asyncio.create_task(media._enrich_track(path))       # Lautheit neu messen
+        core.spawn(media._enrich_track(path))       # Lautheit neu messen
         await status("done", f"Ersetzt: {lt['bitrate_kbps']} kbps, Höhen bis {lt['cutoff_khz']} kHz.")
     finally:
         _replace_running.discard(path)
@@ -351,9 +351,7 @@ async def _quality_batch(paths: list[str], ws: WebSocket):
     global _qbatch_cancel
     _qbatch_cancel = False
 
-    async def send(t, **kw):
-        try: await ws.send_text(json.dumps({"type": t, **kw}))
-        except Exception: pass
+    send = core.sender(ws)
 
     by_path = {x.get("path"): x for x in _state["library"]}
     sem = asyncio.Semaphore(_QBATCH_PARALLEL)
@@ -408,9 +406,7 @@ async def _quality_batch_replace(items: list, ws: WebSocket):
     global _qbatch_cancel
     _qbatch_cancel = False
 
-    async def send(t, **kw):
-        try: await ws.send_text(json.dumps({"type": t, **kw}))
-        except Exception: pass
+    send = core.sender(ws)
 
     ok, failed, total = 0, [], len(items)
     for n, it in enumerate(items):

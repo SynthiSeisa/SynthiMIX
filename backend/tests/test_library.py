@@ -5,7 +5,6 @@ Album und Genre wurden nie gespeichert, load_library hat den Kuenstler bei
 jedem Start verworfen, und einzelne Eintrags-Bauer liessen Felder aus.
 """
 import os
-import time
 
 from tests.support import BackendTest, main
 
@@ -148,4 +147,4 @@ class NormalizeTest(BackendTest):
         daten = __import__("json").loads(probe.stdout)
         self.assertIn("video", [s["codec_type"] for s in daten["streams"]])   # Cover
         self.assertEqual(daten["format"]["tags"].get("TKEY"), "8A")
-        self.assertAlmostEqual(main._compute_lufs_sync(str(ziel)), -10.0, delta=1.0)
+        self.assertAlmostEqual(main._measure_loudness_sync(str(ziel))[0], -10.0, delta=1.0)

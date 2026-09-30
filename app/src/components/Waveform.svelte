@@ -1,10 +1,10 @@
 <script>
-  // band: Farbband ueber der Waveform — Intro (bis introMark), Mix (die
-  // Zone), Outro (ab outroMark). bandLabels=false: nur die Streifen (z. B.
-  // waehrend die untere Waveform beim Uebergang hochwaechst und sich streckt)
+  // Oben ein Farbband: Intro (bis introMark), Mix (die Zonen), Outro (ab
+  // outroMark). bandLabels=false: nur die Streifen (z. B. waehrend die untere
+  // Waveform beim Uebergang hochwaechst und sich streckt)
   let { data = [], position = 0, onclick, introStart = 0, introEnd = -1, outroStart = -1, outroEnd = -1, height = 36, loading = false,
         dragZone = null, onzonedrag = null, zoneTitle = '',
-        band = false, bandLabels = true, introMark = -1, outroMark = -1 } = $props()
+        bandLabels = true, introMark = -1, outroMark = -1 } = $props()
   const BAND_H = 12
 
   let canvas = $state(null)
@@ -66,28 +66,8 @@
     return () => obs.disconnect()
   })
 
-  $effect(() => { if (!canvas) return; draw() })
-  $effect(() => { void data; void position; void introStart; void introEnd; void outroStart; void outroEnd; void introMark; void outroMark; void band; void bandLabels; if (canvas) draw() })
-
-  // Solid grey overlay marking a mix zone (Virtual-DJ style), with optional label
-  function greyZone(ctx, x0, x1, w, h, label, theme) {
-    const a = Math.round(Math.max(0, x0) * w)
-    const b = Math.round(Math.min(1, x1) * w)
-    if (b <= a) return
-    ctx.fillStyle = theme.zone
-    ctx.fillRect(a, 0, b - a, h)
-    ctx.strokeStyle = theme.edge
-    ctx.lineWidth = 1
-    ctx.beginPath(); ctx.moveTo(a + 0.5, 0); ctx.lineTo(a + 0.5, h); ctx.stroke()
-    ctx.beginPath(); ctx.moveTo(b - 0.5, 0); ctx.lineTo(b - 0.5, h); ctx.stroke()
-    if (label && (b - a) >= 20 && h >= 16) {
-      ctx.fillStyle = theme.label
-      ctx.font = `700 ${(b - a) < 30 ? 9 : Math.max(10, Math.min(12, Math.floor(h * 0.3)))}px 'Segoe UI', system-ui, sans-serif`
-      ctx.textBaseline = 'middle'
-      ctx.textAlign = 'center'
-      ctx.fillText(label, (a + b) / 2, h / 2)
-    }
-  }
+  // draw() liest alle Props selbst: der Effekt laeuft bei jeder Aenderung einmal
+  $effect(() => { if (canvas) draw() })
 
   // Mix-Zone in der Waveform: leicht getoent, orange Kanten (zum Farbband)
   function mixZone(ctx, x0, x1, w, top, h, col) {
@@ -141,7 +121,7 @@
     const w = canvas.width  = canvas.offsetWidth
     const H = canvas.height = canvas.offsetHeight
     if (w === 0 || H === 0) return
-    const top = band ? BAND_H : 0
+    const top = BAND_H
     const h = H - top
     const mid = top + h / 2
     ctx.clearRect(0, 0, w, H)
@@ -154,10 +134,7 @@
     const cPlayed   = v('--c-accent', '#e07800')
     const cUnplayed = v('--c-br2',    '#1a2838')
     const theme = {
-      head:  v('--c-wf-head',       'rgba(255,255,255,0.90)'),
-      zone:  v('--c-wf-zone',       'rgba(86,96,112,0.62)'),
-      edge:  v('--c-wf-zone-edge',  'rgba(150,166,190,0.55)'),
-      label: v('--c-wf-zone-label', 'rgba(196,208,226,0.82)'),
+      head:  v('--c-wf-head', 'rgba(255,255,255,0.90)'),
       intro: v('--c-wf-intro', '#4f8fe8'),
       outro: v('--c-wf-outro', '#4f8fe8'),
       mix:   v('--c-wf-mix',   '#ff9a33'),
@@ -177,18 +154,10 @@
       ctx.fillRect(px, mid - 1, w - px, 2)
     }
 
-    if (band) {
-      // Farbband oben, Mix-Zone in der Waveform nur leicht getoent
-      drawBand(ctx, w, theme)
-      if (introEnd > 0 && introEnd <= 1) mixZone(ctx, introStart, introEnd, w, top, h, theme.mix)
-      if (outroStart >= 0 && outroEnd > outroStart) mixZone(ctx, outroStart, outroEnd, w, top, h, theme.mix)
-    } else {
-      // ── Intro grey bar: [introStart, introEnd] — crossfade entry zone ──
-      if (introEnd > 0 && introEnd <= 1) greyZone(ctx, introStart, introEnd, w, h, 'MIX', theme)
-      // ── Outro grey bar: [outroStart, outroEnd] — the crossfade mix zone ──
-      if (outroStart >= 0 && outroEnd > outroStart)
-        greyZone(ctx, outroStart, outroEnd, w, h, 'MIX', theme)
-    }
+    // Farbband oben, Mix-Zonen in der Waveform nur leicht getoent
+    drawBand(ctx, w, theme)
+    if (introEnd > 0 && introEnd <= 1) mixZone(ctx, introStart, introEnd, w, top, h, theme.mix)
+    if (outroStart >= 0 && outroEnd > outroStart) mixZone(ctx, outroStart, outroEnd, w, top, h, theme.mix)
 
     // ── Playhead ──────────────────────────────────────────────────────────
     ctx.save()
@@ -199,7 +168,7 @@
   }
 </script>
 
-<div class="waveform-wrap" class:zone-hover={!!hoverZone} class:zone-drag={dragging} style="height:{height + (band ? BAND_H : 0)}px"
+<div class="waveform-wrap" class:zone-hover={!!hoverZone} class:zone-drag={dragging} style="height:{height + BAND_H}px"
   role="slider" aria-valuenow={Math.round(position * 100)}
   title={hoverTitle}
   onpointerdown={onDown} onpointermove={onMove} onpointerup={onUp} onpointercancel={onUp}

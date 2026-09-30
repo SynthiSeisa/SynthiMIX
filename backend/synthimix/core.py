@@ -122,6 +122,34 @@ _meipass  = Path(sys._MEIPASS) if _frozen and hasattr(sys, '_MEIPASS') else None
 # suchten (bis zu sechs yt-dlp-Prozesse je Suche, mehrere Suchen gleichzeitig).
 _NO_WINDOW = (subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS) if sys.platform == "win32" else 0
 
+# Hintergrund-Aufgaben: asyncio haelt Tasks nur schwach — ohne eigene
+# Referenz kann eine noch laufende Aufgabe vom Garbage Collector eingesammelt
+# werden. Ausserdem landen Fehler darin im Log statt still zu verschwinden.
+_tasks: set = set()
+
+def _task_done(t: asyncio.Task):
+    _tasks.discard(t)
+    if not t.cancelled() and t.exception() is not None:
+        name = getattr(t.get_coro(), "__qualname__", "?")
+        print(f"[aufgabe] {name}: {t.exception()!r}", flush=True)
+
+def sender(ws):
+    """send(typ, **felder) an genau diese Verbindung. Ist sie inzwischen zu
+    (Fenster geschlossen, Handy gesperrt), wird die Nachricht verworfen."""
+    async def send(t, **kw):
+        try:
+            await ws.send_text(json.dumps({"type": t, **kw}))
+        except Exception:
+            pass
+    return send
+
+def spawn(coro) -> asyncio.Task:
+    """asyncio.create_task mit gehaltener Referenz und Fehler-Log."""
+    t = asyncio.create_task(coro)
+    _tasks.add(t)
+    t.add_done_callback(_task_done)
+    return t
+
 # Nur die jeweils letzte Suche einer Verbindung laeuft weiter; eine neue
 # Eingabe bricht die vorige ab (samt ihren yt-dlp-Prozessen).
 _latest_search: dict = {}
@@ -132,7 +160,7 @@ def _start_search(ws, kind: str, coro):
     old = _latest_search.get(key)
     if old is not None and not old.done():
         old.cancel()
-    task = asyncio.create_task(coro)
+    task = spawn(coro)
     _latest_search[key] = task
 
     def _done(t, key=key):
@@ -241,8 +269,8 @@ async def push_queue():
     await broadcast({"type": "queue", "items": _state["queue"],
                      "current_idx": _state["current_idx"]})
     if remote._remote_clients:
-        asyncio.create_task(remote._broadcast_remote_state())
-    asyncio.create_task(automix._check_radio_queue())
+        spawn(remote._broadcast_remote_state())
+    spawn(automix._check_radio_queue())
 
 async def push_player():
     await broadcast({
@@ -257,7 +285,7 @@ async def push_player():
         }
     })
     if remote._remote_clients:
-        asyncio.create_task(remote._broadcast_remote_state())
+        spawn(remote._broadcast_remote_state())
 
 _dl_last_push: float = 0.0
 

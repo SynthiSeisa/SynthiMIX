@@ -140,9 +140,6 @@
   function stopSession(sid) {
     send({ type: 'download_stop', session_id: sid })
   }
-  function removeItem(dl) {
-    send({ type: 'download_cancel', id: dl.id })
-  }
   function removeGroup(g) {
     if (g.hdr) send({ type: 'download_cancel', id: g.hdr.id })
     g.tracks.forEach(dl => send({ type: 'download_cancel', id: dl.id }))

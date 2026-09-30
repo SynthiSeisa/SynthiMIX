@@ -9,7 +9,7 @@
   // mode "fingerprint": dieselbe Liste, die Vorschlaege kommen aber von
   // AcoustID (am Klang erkannt) statt aus den Regeln.
   let { paths = null, mode = 'clean', onclose } = $props()
-  const fp = mode === 'fingerprint'
+  const fp = $derived(mode === 'fingerprint')
 
   const PAGE = 250
   const st = $derived($titleState)

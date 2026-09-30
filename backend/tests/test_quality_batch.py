@@ -1,5 +1,4 @@
 """Sammel-Ersetzen, "Passt so" und die Analyse-Warteschlange."""
-import asyncio
 
 from tests.support import BackendTest, FakeWS, main
 

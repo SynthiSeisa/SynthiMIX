@@ -110,13 +110,13 @@ def _resume_wishes():
         if w.get("path") and os.path.exists(w["path"]):
             w["status"] = "bereit"
         else:
-            asyncio.create_task(_process_wish(w))
+            core.spawn(_process_wish(w))
     save_wishes()
 
 async def push_wishes():
     await core.broadcast({"type": "wishes", "items": _state.get("wishes", [])})
     if _remote_clients:
-        asyncio.create_task(_broadcast_remote_state())
+        core.spawn(_broadcast_remote_state())
 
 @lru_cache(maxsize=8192)
 def _norm_title(t: str) -> str:
@@ -403,9 +403,9 @@ async def wish_ws(websocket: WebSocket):
                 await websocket.send_text(json.dumps({"type": "wish_ack", "title": title,
                                                       "id": wish["id"]}))
                 if lib_entry is None:
-                    asyncio.create_task(_process_wish(wish))
+                    core.spawn(_process_wish(wish))
                 elif lib_entry.get("lufs", -99) <= -90:
-                    asyncio.create_task(media._enrich_track(lib_entry["path"]))
+                    core.spawn(media._enrich_track(lib_entry["path"]))
     except Exception:
         pass
     finally:
@@ -626,7 +626,7 @@ async def remote_ws_endpoint(websocket: WebSocket):
                 title = msg.get("title", "")
                 as_next = bool(msg.get("as_next", False))
                 if url:
-                    asyncio.create_task(_remote_dl_and_queue(url, title, websocket, as_next))
+                    core.spawn(_remote_dl_and_queue(url, title, websocket, as_next))
             elif t in ("set_normalize_volume", "wish_accept", "wish_reject",
                        "set_auto_mix", "set_radio", "queue_harmonic", "mix_now"):
                 await handle_message(websocket, msg)
@@ -778,7 +778,6 @@ def _remote_state_payload() -> str:
         "queue": [_q_item(i, t) for i, t in enumerate(q)],
         "auto_mix":      _state.get("auto_mix", True),
         "radio_enabled": _state.get("radio_enabled", False),
-        "radio_ok":      bool(_state.get("lastfm_api_key", "").strip()),
         # Ohne Pfade — die gehen nur die App etwas an
         "wishes": [{"id": w.get("id"), "title": w.get("title", ""), "count": w.get("count", 1),
                     "status": w.get("status", ""), "error": w.get("error", ""),
@@ -844,7 +843,7 @@ async def _start_remote_server(requester: WebSocket):
                     except Exception:
                         pass
 
-        asyncio.create_task(_serve_task())
+        core.spawn(_serve_task())
         # Kurz warten bis uvicorn den Port gebunden hat
         await asyncio.sleep(0.3)
         if _remote_server is None:

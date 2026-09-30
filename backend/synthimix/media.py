@@ -85,9 +85,6 @@ def _measure_loudness_sync(path: str) -> tuple[float, float | None]:
         print(f"[lufs] Exception bei '{Path(path).name}': {e}", flush=True)
         return -98.0, None
 
-def _compute_lufs_sync(path: str) -> float:
-    return _measure_loudness_sync(path)[0]
-
 
 _LOUD_PARALLEL = 1          # laeuft auch waehrend des Auflegens: sanft
 
@@ -680,7 +677,7 @@ async def _analyze_library_meta_task(only_paths: list[str] | None = None):
             _analyze_pending.clear()
         _analyze_cancel  = False
         if _analyze_pending:
-            asyncio.create_task(_analyze_library_meta_task(_analyze_pending.pop(0)))
+            core.spawn(_analyze_library_meta_task(_analyze_pending.pop(0)))
 
 async def _update_track_meta(path: str, title: str, artist: str):
     """Rewrite ID3/metadata tags in-place using ffmpeg, then update library cache."""
@@ -877,7 +874,7 @@ async def compute_waveform(path: str, bars: int = 1000) -> list[float]:
         d[key] = base64.b64encode(bytes(min(255, max(0, round(v * 255))) for v in data)).decode("ascii")
         _wf_disk_dirty = True
         if _wf_save_task is None:
-            _wf_save_task = asyncio.create_task(_save_wf_cache_later())
+            _wf_save_task = core.spawn(_save_wf_cache_later())
     return data
 
 def _waveform_sync(path: str, bars: int) -> list[float]:

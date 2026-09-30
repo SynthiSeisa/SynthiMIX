@@ -223,9 +223,6 @@ ipcMain.on('win-maximize', () => {
 ipcMain.on('win-fullscreen', () => {
   if (mainWindow) mainWindow.setFullScreen(!mainWindow.isFullScreen())
 })
-ipcMain.on('win-toggle-fullscreen', () => {
-  if (mainWindow) mainWindow.setFullScreen(!mainWindow.isFullScreen())
-})
 ipcMain.on('win-close', () => mainWindow?.close())
 
 // Datei im Explorer zeigen bzw. URL im Browser oeffnen
@@ -269,6 +266,8 @@ ipcMain.handle('pick-folder', async () => {
 ipcMain.handle('list-dir', async (e, dirPath) => {
   const fs    = require('fs')
   const AUDIO = /\.(mp3|flac|wav|m4a|ogg|aac|opus|wma)$/i
+  // Zwischendateien abgebrochener Downloads ("Titel.temp.mp3") sind keine Titel
+  const TEMP  = /\.(temp|__tmp|norm_tmp)\.[a-z0-9]{2,5}$/i
   try {
     if (!dirPath) {
       const drives = []
@@ -278,9 +277,10 @@ ipcMain.handle('list-dir', async (e, dirPath) => {
       }
       return drives
     }
-    const entries = fs.readdirSync(dirPath, { withFileTypes: true })
+    // asynchron: ein langsames Netz- oder USB-Laufwerk haelt sonst das ganze Fenster an
+    const entries = await fs.promises.readdir(dirPath, { withFileTypes: true })
     return entries
-      .filter(e => e.isDirectory() || AUDIO.test(e.name))
+      .filter(e => e.isDirectory() || (AUDIO.test(e.name) && !TEMP.test(e.name)))
       .map(e => ({ name: e.name, path: path.join(dirPath, e.name), isDir: e.isDirectory() }))
       .sort((a, b) => {
         if (a.isDir !== b.isDir) return a.isDir ? -1 : 1

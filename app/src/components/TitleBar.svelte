@@ -27,7 +27,6 @@
   const isDark = $derived($theme === 'dark')
   function toggleTheme() { theme.set(isDark ? 'light' : 'dark') }
 
-  let helpOpen = $state(false)
   let logOpen  = $state(false)
   let logFilter = $state('')
   let autoRefresh = $state(true)
@@ -154,7 +153,7 @@
 
     <div class="pop-wrap">
       <button class="btn btn-icon btn-sm" class:is-active={logOpen}
-              onclick={() => { logOpen = !logOpen; helpOpen = false; notesOpen = false }}
+              onclick={() => { logOpen = !logOpen; notesOpen = false }}
               title="Backend-Log" aria-label="Backend-Log"><i class="ti ti-terminal-2"></i></button>
       {#if logOpen}
         <div class="pop log-panel">
@@ -180,7 +179,7 @@
     </div>
     <div class="pop-wrap">
       <button class="btn btn-icon btn-sm" class:is-active={notesOpen}
-              onclick={() => { notesOpen = !notesOpen; helpOpen = false; logOpen = false }}
+              onclick={() => { notesOpen = !notesOpen; logOpen = false }}
               title="Notizblock" aria-label="Notizblock"><i class="ti ti-notes"></i></button>
       {#if notesOpen}
         <div class="pop notes-panel">
@@ -350,21 +349,6 @@
     user-select: text;
   }
   .notes-body::placeholder { color: var(--c-tx6); }
-
-  .help-backdrop { position: fixed; inset: 0; z-index: 900; }
-  .help-panel { min-width: 300px; }
-  .help-row {
-    display: flex; align-items: center; gap: var(--sp-3);
-    padding: 6px var(--sp-3); border-bottom: 1px solid var(--c-br1);
-  }
-  .help-row:last-child { border-bottom: none; }
-  kbd {
-    font-family: inherit; font-size: var(--fs-sm); font-weight: 600;
-    color: var(--c-tx2); background: var(--c-bg); border: 1px solid var(--c-br3);
-    border-radius: var(--r-s); padding: 2px 6px; white-space: nowrap;
-    min-width: 96px; text-align: center; flex-shrink: 0;
-  }
-  .help-row span { font-size: var(--fs-sm); color: var(--c-tx3); }
 
   /* ── Fensterknoepfe: wie unter Windows ueblich, randlos und voll hoch ── */
   .controls { display: flex; align-self: stretch; -webkit-app-region: no-drag; margin-left: var(--sp-2); }

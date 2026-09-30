@@ -1,7 +1,7 @@
 """Kanal-Link: der echte Grund statt "keine Playlists gefunden", zweiter Versuch ohne JS-Laufzeit."""
 import json
 
-from tests.support import BackendTest, main
+from tests.support import BackendTest
 from synthimix import channels, core
 
 

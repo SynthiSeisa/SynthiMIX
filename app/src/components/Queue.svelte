@@ -2,7 +2,7 @@
   import { get } from 'svelte/store'
   import { keyCompat } from '../lib/keys.js'
   import KeyChip from './KeyChip.svelte'
-  import { queue, playerState, library, playlists, playMode, send, automixStatus, introSkipPaths, settings, appSettings, skipNextCrossfade, autoRemovePlayed, livePositionMs, selectionOwner, radioEnabled, radioStatus, lastfmApiKey, harmonicResult } from '../stores/ws.js'
+  import { queue, playerState, library, playlists, playMode, send, automixStatus, introSkipPaths, settings, appSettings, skipNextCrossfade, autoRemovePlayed, livePositionMs, selectionOwner, radioEnabled, radioStatus, harmonicResult } from '../stores/ws.js'
 
   // Tonart kommt aus der Bibliothek: Queue-Eintraege entstehen an vielen Stellen
   // und tragen sie nicht selbst mit.
@@ -27,7 +27,6 @@
   // ── Shuffle / Repeat ────────────────────────────────────────────────────────
   const shuffle = $derived($playMode.shuffle)
   const repeat  = $derived($playMode.repeat)
-  const repeatLabel = $derived(repeat === 1 ? '↺¹' : repeat === 2 ? '↺∞' : '↺')
 
   function toggleShuffle() {
     const v = !get(playMode).shuffle
@@ -510,7 +509,7 @@
     <span class="eyebrow">Warteschlange</span>
     <span class="queue-count">{$queue.length}</span>
     <button class="btn btn-sm" class:is-active={$radioEnabled}
-            title={$lastfmApiKey ? ($radioEnabled ? 'Radio-Modus deaktivieren' : 'Radio-Modus: Queue automatisch mit ähnlichen Tracks füllen') : 'Last.fm API-Key in Einstellungen → Dienste eintragen'}
+            title={$radioEnabled ? 'Radio ausschalten' : 'Radio: hält die Warteschlange mit passenden Titeln gefüllt — meist aus der Bibliothek, jeder 5. neu'}
             onclick={() => send({ type: 'set_radio', enabled: !$radioEnabled })}>
       <i class="ti ti-radio"></i> Radio
     </button>
@@ -596,7 +595,7 @@
         <span class="am-status">{$automixStatus}</span>
       {/if}
       {#if $radioStatus}
-        <span class="radio-added" title="Ähnlich zu: {$radioStatus.similar_to}">+ {$radioStatus.title}</span>
+        <span class="radio-added" title={$radioStatus.similar_to || 'Radio'}>+ {$radioStatus.title}</span>
       {/if}
     </div>
   {/if}

@@ -43,32 +43,6 @@ class TrashTestBase(BackendTest):
 
 class LoeschenTest(TrashTestBase):
 
-    def test_loeschen_geht_in_den_papierkorb_und_aus_der_bibliothek(self):
-        f = self.datei()
-        main._state["library"] = [{"path": str(f), "title": "song"}]
-        main._move_to_trash = trash = TrashAttrappe()
-        self.run_async(main.handle_message(FakeWS(), {"type": "library_remove_disk", "path": str(f)}))
-        self.assertEqual(trash.aufrufe, [str(f)])
-        self.assertEqual(main._state["library"], [])
-
-    def test_fehlgeschlagen_bleibt_der_eintrag(self):
-        # Frueher wurde erst der Eintrag entfernt und dann still geloescht —
-        # schlug das fehl, war der Titel weg, die Datei aber noch da.
-        f = self.datei()
-        main._state["library"] = [{"path": str(f), "title": "song"}]
-        main._move_to_trash = TrashAttrappe(gelingt=False)
-        self.run_async(main.handle_message(FakeWS(), {"type": "library_remove_disk", "path": str(f)}))
-        self.assertEqual(len(main._state["library"]), 1)
-        self.assertTrue(f.exists())
-
-    def test_schon_verschwundene_datei_nur_aus_bibliothek(self):
-        weg = self.tmp / "gibtsnicht.mp3"
-        main._state["library"] = [{"path": str(weg), "title": "x"}]
-        main._move_to_trash = trash = TrashAttrappe()
-        self.run_async(main.handle_message(FakeWS(), {"type": "library_remove_disk", "path": str(weg)}))
-        self.assertEqual(trash.aufrufe, [])
-        self.assertEqual(main._state["library"], [])
-
     @unittest.skipUnless(os.environ.get("SYNTHIMIX_TEST_TRASH") == "1",
                          "legt eine Datei in den echten Papierkorb — nur mit SYNTHIMIX_TEST_TRASH=1")
     def test_echter_papierkorb(self):

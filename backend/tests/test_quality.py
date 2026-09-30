@@ -161,7 +161,6 @@ class QualityCacheTest(BackendTest):
     """Messwerte der Hochrechnungs-Pruefung ueberleben einen Neuaufbau der Bibliothek."""
 
     def test_neu_aufgebaute_bibliothek_behaelt_messwerte(self):
-        import json
         eintrag = {"path": r"M:\Musik\a.mp3", "title": "a", "duration_sec": 200.4, "cutoff_khz": 16.1}
         self.write_library([eintrag])
         main.load_library()

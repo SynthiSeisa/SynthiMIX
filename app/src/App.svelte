@@ -252,9 +252,6 @@
     --c-red-bg: #1a0808;
     /* Waveform wird auf Canvas gezeichnet und liest diese Werte zur Laufzeit */
     --c-wf-head:       rgba(255,255,255,0.90);
-    --c-wf-zone:       rgba(86,96,112,0.62);
-    --c-wf-zone-edge:  rgba(150,166,190,0.55);
-    --c-wf-zone-label: rgba(196,208,226,0.82);
     --c-wf-intro:      #4f8fe8;
     --c-wf-outro:      #4f8fe8;
     --c-wf-mix:        #ff9a33;
@@ -309,9 +306,6 @@
     --c-red:    #b82020;
     --c-red-bg: #fff0f0;
     --c-wf-head:       rgba(20,16,12,0.88);
-    --c-wf-zone:       rgba(150,142,132,0.55);
-    --c-wf-zone-edge:  rgba(90,84,76,0.65);
-    --c-wf-zone-label: rgba(30,26,20,0.85);
     --c-wf-intro:      #1a5cb0;
     --c-wf-outro:      #1a5cb0;
     --c-wf-mix:        #b35400;

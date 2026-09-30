@@ -1,8 +1,6 @@
 """Fernbedienung und Wunschseite: geheimer Link, Wuensche aus der eigenen
 Sammlung, Status fuer Gaeste und was beim Ablehnen geloescht werden darf."""
 import json
-import os
-import time
 import unittest
 
 from tests.support import BackendTest, FakeWS, main

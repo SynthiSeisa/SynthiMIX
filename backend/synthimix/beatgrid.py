@@ -10,59 +10,75 @@ from . import core, media, store
 # ── Taktraster (Beat-Sync beim Uebergang) ────────────────────────────────────
 _beatgrid_cache: dict = {}    # Pfad -> Raster, auch fuer Titel ausserhalb der Bibliothek
 
-def _beatgrid_sync(path: str, bpm_hint: float = 0.0) -> dict | None:
-    """Genaues Tempo und Lage des ersten Schlags.
+# Version des Messverfahrens: aeltere Raster werden beim naechsten Abspielen neu gemessen
+GRID_REV = 2
 
-    Tiefpass (Bassdrum), Anstiege der Lautstaerke als Huellkurve, dann ein
-    Kammfilter ueber den ganzen Titel: fuer Tempi nahe der Schaetzung und jede
-    Phase wird aufsummiert, wie viel Anstieg genau auf den Schlaegen liegt.
-    Kandidaten sind die BPM aus den Tags und eine eigene Schaetzung, jeweils
-    auch halbes/doppeltes Tempo; es gewinnt das Raster mit der deutlichsten
-    Spitze. beat_conf (0..1) sagt, wie klar das Raster ist — unter ~0.4
-    (Live-Schlagzeug, freies Tempo) legt der Player die Schlaege nicht
-    uebereinander.
-    """
-    if not media._numpy_ok():
-        return None
-    import numpy as np
-    sr, hop = 11025, 64            # 5,8 ms Aufloesung
-    try:
-        r = subprocess.run([core.FFMPEG, "-nostdin", "-v", "error", "-i", path,
-                            "-af", "lowpass=f=180,aformat=channel_layouts=mono",
-                            "-ac", "1", "-ar", str(sr), "-f", "s16le", "-acodec", "pcm_s16le", "-"],
-                           capture_output=True, timeout=120, creationflags=_NO_WINDOW)
-    except Exception:
-        return None
-    x = np.frombuffer(r.stdout, dtype=np.int16).astype(np.float32) / 32768.0
-    if x.size < sr * 20:
-        return None
-    n = x.size // hop
-    fr = x[:n * hop].reshape(n, hop)
+# Abspielen im Player (Chromium) gegen Dekodieren mit ffmpeg: Opus und Vorbis
+# erklingen etwas frueher, als die Abspielposition anzeigt (Encoder-Vorlauf).
+# Gemessen 09/2026 mit Klick-Dateien; MP3, M4A, FLAC und WAV liegen genau.
+_PLAYBACK_SHIFT = {".opus": -0.0046, ".webm": -0.0046, ".ogg": -0.0029}
+
+# Baender fuer das Anschlagsignal (von, bis in Hz, Gewicht). An 90 Titeln mit
+# Mixed-In-Key-Cues bestimmt: das Tief-Band allein (bis 1.6 das einzige) liegt
+# bei modernem DnB oft eine Achtel daneben, weil der Sub-Bass durchlaeuft.
+_BANDS = ((180, 1000, 1.0), (1000, 5000, 1.0), (6000, 11025, 0.5), (0, 11025, 1.0))
+_SR, _HOP = 22050, 32                       # 1,45 ms je Schritt
+_OFFBEAT_BASS = 3.0                         # so viel mehr Bass auf der Achtel dazwischen: Raster verschieben
+
+
+def _fft_len(n: int) -> int:
+    """Kleinste Laenge >= n der Form 2^k, 3*2^k, 5*2^k oder 7*2^k (schnelle FFT, wenig Polster)."""
+    best = 1 << (n - 1).bit_length()
+    for m in (3, 5, 7):
+        k = max(0, (n // m - 1).bit_length())
+        while m << k < n:
+            k += 1
+        best = min(best, m << k)
+    return best
+
+
+def _onset(y, np):
+    """Anschlagstaerke je 1,45 ms: Anstieg der logarithmischen Energie, ohne langsame Pegelaenderungen."""
+    n = y.size // _HOP
+    fr = y[:n * _HOP].reshape(n, _HOP)
     env = np.log1p(200 * np.sqrt((fr * fr).mean(axis=1) + 1e-12))
-    onset = np.maximum(0.0, np.diff(env, prepend=env[0]))
-    k = 32                          # langsame Pegelaenderungen raus
-    if onset.size > k:
-        onset = np.maximum(0.0, onset - np.convolve(onset, np.ones(k) / k, mode="same"))
-    fps = sr / hop
+    env = np.convolve(env, np.ones(3) / 3, mode="same")
+    o = np.maximum(0.0, np.diff(env, prepend=env[0]))
+    return np.maximum(0.0, o - np.convolve(o, np.ones(128) / 128, mode="same"))
 
-    def comb(bpms):
-        best = (-1.0, 0.0, 0.0, 0.0)            # Summe, bpm, Phase (Frames), Mittel
-        for bpm in bpms:
-            period = fps * 60.0 / bpm
-            nb = int((n - 1) / period)
-            if nb < 8:
-                continue
-            phases = np.arange(int(math.ceil(period)), dtype=np.float64)
-            idx = np.minimum(np.rint(phases[:, None] + np.arange(nb)[None, :] * period).astype(np.int64), n - 1)
-            sums = onset[idx].sum(axis=1)
-            j = int(np.argmax(sums))
-            if sums[j] > best[0]:
-                best = (float(sums[j]), float(bpm), float(j), float(sums.mean()))
-        return best
 
-    def conf_of(b):
-        return 0.0 if b[0] <= 0 else (b[0] - b[3]) / b[0]
+def _near(onset, fps, period, off, tol, np):
+    """Anschlags-Energie innerhalb ±tol um die Schlaege eines Rasters."""
+    t = np.arange(onset.size) / fps
+    d = np.abs(np.mod(t - off + period / 2, period) - period / 2)
+    return float(onset[d <= tol].sum())
 
+
+def _comb(onset, fps, bpms, np):
+    """Kammfilter: fuer jedes Tempo die Phase mit der meisten Energie auf den Schlaegen."""
+    n = onset.size
+    best = (-1.0, 0.0, 0.0, 0.0)            # Summe, bpm, Phase (Frames), Mittel
+    for bpm in bpms:
+        period = fps * 60.0 / bpm
+        nb = int((n - 1) / period)
+        if nb < 8:
+            continue
+        phases = np.arange(int(math.ceil(period)), dtype=np.float64)
+        idx = np.minimum(np.rint(phases[:, None] + np.arange(nb)[None, :] * period).astype(np.int64), n - 1)
+        sums = onset[idx].sum(axis=1)
+        j = int(np.argmax(sums))
+        if sums[j] > best[0]:
+            best = (float(sums[j]), float(bpm), float(j), float(sums.mean()))
+    return best
+
+
+def _conf_of(b) -> float:
+    return 0.0 if b[0] <= 0 else (b[0] - b[3]) / b[0]
+
+
+def _tempo(onset, fps, bpm_hint, np):
+    """Tempo: Autokorrelation + Kamm; Kandidaten aus dem Tag und der eigenen
+    Schaetzung, jeweils auch halbes/doppeltes Tempo."""
     m = min(onset.size, int(fps * 120))
     seg = onset[:m] - onset[:m].mean()
     spec = np.fft.rfft(seg, 2 * m)
@@ -76,24 +92,158 @@ def _beatgrid_sync(path: str, bpm_hint: float = 0.0) -> dict | None:
         for c in (c0, c0 * 2, c0 / 2):
             if 60 <= c <= 200 and all(abs(c - d) > 1.5 for d in centers):
                 centers.append(c)
-    results = [comb(np.arange(c - 1.5, c + 1.5001, 0.05)) for c in centers]
-    results = [r_ for r_ in results if r_[1] > 0]
-    if not results:
+    res = [r_ for r_ in (_comb(onset, fps, np.arange(c - 1.5, c + 1.5001, 0.05), np) for c in centers) if r_[1] > 0]
+    if not res:
         return None
-    # Halbes Tempo wirkt im Kamm immer etwas "deutlicher" (weniger Schlaege,
-    # hoehere Spitze). Deshalb: fast gleich gut (85 %) reicht fuer das Tempo
-    # aus den Tags, sonst fuer das doppelte Tempo.
-    top = max(conf_of(r_) for r_ in results)
-    good = [r_ for r_ in results if conf_of(r_) >= 0.85 * top]
+    # Halbes Tempo wirkt im Kamm immer etwas "deutlicher": fast gleich gut
+    # (85 %) reicht fuer das Tempo aus den Tags, sonst fuer das schnellere
+    top = max(_conf_of(r_) for r_ in res)
+    good = [r_ for r_ in res if _conf_of(r_) >= 0.85 * top]
     tagged = [r_ for r_ in good if bpm_hint and abs(r_[1] - bpm_hint) <= 2]
-    coarse = tagged[0] if tagged else max(good, key=lambda r_: r_[1])
-    fine = comb(np.arange(coarse[1] - 0.06, coarse[1] + 0.0601, 0.005))
-    period = fps * 60.0 / fine[1]
-    return {"bpm_f": round(fine[1], 3),
-            "beat_off": round((fine[2] % period) / fps, 4),
-            "beat_conf": round(max(0.0, min(1.0, conf_of(fine))), 3)}
+    c = tagged[0] if tagged else max(good, key=lambda r_: r_[1])
+    fine = _comb(onset, fps, np.arange(c[1] - 0.06, c[1] + 0.0601, 0.005), np)
+    return fine[1], _conf_of(fine)
 
-_GRID_KEYS = ("bpm_f", "beat_off", "beat_conf", "phrase_off", "bar_beats", "phrase_src")
+
+def _fold_phase(onset, fps, period, np, smooth_ms=5):
+    """Lage (s) mit der meisten Anschlags-Energie im auf einen Schlag gefalteten Profil (1-ms-Bins)."""
+    nb = max(8, int(round(period * 1000)))
+    t = np.arange(onset.size) / fps
+    h = np.bincount((np.mod(t, period) / period * nb).astype(int) % nb, weights=onset, minlength=nb)
+    k = smooth_ms
+    h = np.convolve(np.concatenate([h[-k:], h, h[:k]]), np.ones(k) / k, mode="same")[k:-k]
+    j = int(np.argmax(h))
+    y0, y1, y2 = h[j - 1], h[j], h[(j + 1) % nb]
+    den = y0 - 2 * y1 + y2
+    frac = 0.5 * (y0 - y2) / den if den != 0 else 0.0
+    return ((j + frac) / nb) * period
+
+
+def _fit_beats(onset, fps, period, off, dur, np):
+    """Jeden Schlag einzeln suchen (Fenster schrumpft 30 -> 15 -> 8 ms, nur die
+    deutlichsten zaehlen) und eine robuste Gerade durch die Anschlaege legen:
+    Steigung = Schlaglaenge, Achsenabschnitt = Lage. (Periode, Lage, Streuung ms) oder None."""
+    T, res = period, None
+    for win_ms, keep in ((30, 0.6), (15, 0.5), (8, 0.5)):
+        w = max(2, int(win_ms / 1000 * fps))
+        ks, ts, amps = [], [], []
+        k = int(math.ceil(-off / T))
+        while True:
+            t = off + k * T
+            if t > dur - 0.05:
+                break
+            c = int(round(t * fps))
+            if c - w - 1 >= 0 and c + w + 1 < onset.size:
+                seg = onset[c - w:c + w + 1]
+                j = int(np.argmax(seg))
+                if seg[j] > 0 and 0 < j < seg.size - 1:
+                    y0, y1, y2 = seg[j - 1], seg[j], seg[j + 1]
+                    den = y0 - 2 * y1 + y2
+                    frac = 0.5 * (y0 - y2) / den if den != 0 else 0.0
+                    ks.append(k); ts.append((c - w + j + frac) / fps); amps.append(seg[j])
+            k += 1
+        if len(ks) < 16:
+            return None
+        ks, ts, amps = np.array(ks, float), np.array(ts), np.array(amps)
+        sel = amps >= np.quantile(amps, 1 - keep)
+        kk, tt, aa = ks[sel], ts[sel], amps[sel]
+        for _ in range(3):                     # Ausreisser (> 3 MAD) raus
+            A = np.vstack([kk, np.ones_like(kk)]).T
+            W = np.sqrt(aa)
+            sol, *_ = np.linalg.lstsq(A * W[:, None], tt * W, rcond=None)
+            res = tt - (sol[0] * kk + sol[1])
+            mad = np.median(np.abs(res - np.median(res))) + 1e-5
+            ok = np.abs(res) <= max(3 * mad, 0.003)
+            if ok.all():
+                break
+            kk, tt, aa = kk[ok], tt[ok], aa[ok]
+            if kk.size < 12:
+                return None
+        T, off = float(sol[0]), float(sol[1])
+    return T, off % T, float(np.median(np.abs(res)) * 1000)
+
+
+def _beatgrid_sync(path: str, bpm_hint: float = 0.0) -> dict | None:
+    """Genaues Tempo und Lage des ersten Schlags.
+
+    1. Einmal dekodieren, per FFT in Baender teilen (180-1000 Hz, 1-5 kHz,
+       >6 kHz, voll) und daraus ein Anschlagsignal in 1,45-ms-Schritten.
+    2. Tempo per Kammfilter (Kandidaten aus dem Tag und eigener Schaetzung).
+    3. Lage aus dem auf einen echten Schlag gefalteten Profil (1 ms genau).
+    4. Jeden Schlag einzeln suchen, robuste Gerade: Tempo und Lage auf
+       Bruchteile einer Millisekunde, keine Drift ueber den Titel.
+    5. Halbtempo-Raster (DnB 87): die Eins ist der Halbschlag mit mehr
+       Bassdrum und weniger Snare-Koerper (180-1000 Hz).
+    Gemessen 09/2026: kuenstliche Titel mit bekanntem Raster max. 4 ms Fehler
+    (vorher 90 ms), 90 Titel gegen Mixed-In-Key-Cues median 4 ms Abweichung
+    (vorher 10 ms), die Eins bei 87er-Rastern 86 % richtig (vorher 72 %).
+    beat_conf (0..1): Deutlichkeit im Kamm, gedaempft durch die Streuung der
+    Anschlaege um die Gerade (Live-Schlagzeug) — unter ~0.4 legt der Player
+    die Schlaege nicht uebereinander.
+    """
+    if not media._numpy_ok():
+        return None
+    import numpy as np
+    try:
+        r = subprocess.run([core.FFMPEG, "-nostdin", "-v", "error", "-i", path, "-ac", "1", "-ar", str(_SR),
+                            "-f", "s16le", "-acodec", "pcm_s16le", "-"],
+                           capture_output=True, timeout=120, creationflags=_NO_WINDOW)
+    except Exception:
+        return None
+    x = np.frombuffer(r.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+    if x.size < _SR * 20:
+        return None
+    n = _fft_len(x.size)
+    X = np.fft.rfft(x, n)
+    f = np.fft.rfftfreq(n, 1 / _SR)
+
+    def band(lo, hi):
+        return np.fft.irfft(X * ((f >= lo) & (f < hi)), n)[:x.size].astype(np.float32)
+
+    o = None
+    for lo, hi, w in _BANDS:
+        ob = _onset(band(lo, hi), np)
+        ob = ob / (ob.mean() + 1e-12) * w
+        o = ob if o is None else o + ob
+    low, lowmid = _onset(band(0, 180), np), _onset(band(180, 1000), np)
+    del X
+    fps = _SR / _HOP
+    n4 = o.size // 4
+    tp = _tempo(o[:n4 * 4].reshape(n4, 4).sum(axis=1), fps / 4, bpm_hint, np)
+    if not tp:
+        return None
+    bpm0, conf = tp
+    T = 60.0 / bpm0
+    half = bpm0 < 100                          # Halbtempo-Raster: zwei echte Schlaege je Rasterschlag
+    Tb = T / 2 if half else T
+    off = _fold_phase(o, fps, Tb, np)
+    fit = _fit_beats(o, fps, Tb, off, x.size / _SR, np)
+    if fit and abs(fit[0] - Tb) / Tb < 0.004 and \
+            _near(o, fps, fit[0], fit[1], 0.008, np) >= _near(o, fps, Tb, off, 0.008, np):
+        Tb, off = fit[0], fit[1]
+        # Streuung um die Gerade: elektronisch ~0,5 ms, Live-Schlagzeug ~3 ms
+        conf *= min(1.0, max(0.5, 1.0 - max(0.0, fit[2] - 1.5) * 0.17))
+    else:
+        fit = None
+    # Bassdrum ohne Obertoene, Hi-Hat auf der Achtel dazwischen: dann rasten die
+    # oberen Baender auf die Hi-Hat ein. Liegt der Bass klar auf der anderen
+    # Haelfte, gehoert der Schlag dorthin.
+    lo_on, lo_off = _near(low, fps, Tb, off, 0.012, np), _near(low, fps, Tb, off + Tb / 2, 0.012, np)
+    if lo_off > _OFFBEAT_BASS * lo_on:
+        off += Tb / 2
+    T = Tb * 2 if half else Tb
+    if half:
+        def nd(ob):
+            a_, b_ = _near(ob, fps, T, off, 0.012, np), _near(ob, fps, T, off + Tb, 0.012, np)
+            return (a_ - b_) / (a_ + b_ + 1e-12)
+        if nd(low) - nd(lowmid) < 0:
+            off += Tb
+    off += _PLAYBACK_SHIFT.get(os.path.splitext(path)[1].lower(), 0.0)
+    return {"bpm_f": round(60.0 / T, 4), "beat_off": round(float(off % T), 5),
+            "beat_conf": round(max(0.0, min(1.0, conf)), 3), "grid_rev": GRID_REV,
+            **({"grid_fit": True} if fit else {})}
+
+_GRID_KEYS = ("bpm_f", "beat_off", "beat_conf", "grid_rev", "phrase_off", "bar_beats", "phrase_src")
 
 def _phrase_from_cues(off: float, beat: float, per: int, cues_ms: list) -> int | None:
     """Phrasenlage (Schlag-Index modulo per) aus den Cue-Punkten von Mixed In
@@ -197,9 +347,9 @@ async def _send_beatgrid(ws, path: str):
     """Raster aus der Bibliothek/dem Cache oder frisch messen und schicken."""
     lt = next((x for x in _state.get("library", []) if x.get("path") == path), None)
     g = None
-    if lt and lt.get("bpm_f"):
+    if lt and lt.get("bpm_f") and int(lt.get("grid_rev") or 1) >= GRID_REV:
         g = {k: lt[k] for k in _GRID_KEYS if k in lt}
-    elif path in _beatgrid_cache:
+    elif path in _beatgrid_cache and int(_beatgrid_cache[path].get("grid_rev") or 1) >= GRID_REV:
         g = _beatgrid_cache[path]
     elif os.path.isfile(path):
         hint = (lt or {}).get("bpm") or 0
@@ -208,13 +358,19 @@ async def _send_beatgrid(ws, path: str):
             hint = (q or {}).get("bpm") or 0
         loop = asyncio.get_running_loop()
         g = await loop.run_in_executor(None, _beatgrid_sync, path, float(hint or 0))
-        if g and lt and lt.get("mik_cues"):
+        # Tempo aus den MIK-Cues nur, wenn die eigene Gerade nicht ging
+        if g and not g.pop("grid_fit", False) and lt and lt.get("mik_cues"):
             g = _grid_from_mik(g, lt["mik_cues"])
         if g:
             _beatgrid_cache[path] = g
             if lt is not None:
+                # neues Raster, neue Lage: Takt und Phrasen neu bestimmen
+                for k in ("phrase_off", "bar_beats", "phrase_src"):
+                    lt.pop(k, None)
                 lt.update(g)
                 store.save_library()
+    elif lt and lt.get("bpm_f"):                # Datei gerade nicht da: altes Raster besser als keins
+        g = {k: lt[k] for k in _GRID_KEYS if k in lt}
     # Takt und Phrasen: auch fuer Raster, die vor 1.6 gemessen wurden
     if g and g.get("bpm_f") and "phrase_off" not in g and os.path.isfile(path) \
             and float(g.get("beat_conf") or 0) >= 0.3:

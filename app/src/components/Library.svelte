@@ -50,13 +50,6 @@
       .trim()
   }
 
-  // ── Primary artist — used for filtering, needs standalone-set context ──────
-  function primaryArtist(raw, standaloneSet) {
-    if (!raw) return ''
-    const s = _cleanArtist(raw)
-    return _resolvePrimary(s, standaloneSet ?? _standaloneArtists)
-  }
-
   // Resolve "A & B" → primary using known standalone artists
   function _resolvePrimary(s, standaloneSet) {
     const parts = s.split(' & ')
@@ -69,7 +62,6 @@
   // ── Derive artists with two-pass algorithm ─────────────────────────────────
   // Pass 1: find all artists that appear WITHOUT "&" (= solo / band names)
   // Pass 2: for "A & B", check if A is in the standalone set → group under A
-  let _standaloneArtists = new Set()
   const artists = $derived.by(() => {
     const raws = []
     for (const t of $library) {
@@ -79,7 +71,6 @@
 
     // Pass 1: standalone = cleaned artists with no "&"
     const standaloneSet = new Set(raws.filter(r => !r.includes(' & ')).map(r => r.toLowerCase()))
-    _standaloneArtists = standaloneSet
 
     // Pass 2: determine primary for each
     const seen = new Map()
@@ -112,9 +103,7 @@
     return [...seen.values()].sort((a, b) => a.localeCompare(b, 'de'))
   })
 
-  // ── Download directory tree ───────────────────────────────────────────────
-  let dlFolderOpen  = $state({})  // folder path → bool
-
+  // Download-Ordner einlesen (fuer die Ansicht "Downloads")
   function loadDlTree() {
     send({ type: 'get_download_tree' })
   }
@@ -140,7 +129,6 @@
   let secArtistOpen   = $state(_secSaved.artist   ?? false)
   let secAlbumOpen    = $state(_secSaved.album    ?? false)
   let secGenreOpen    = $state(_secSaved.genre    ?? false)
-  let secDlOpen       = $state(_secSaved.dl       ?? true)
   let secPlaylistOpen = $state(_secSaved.playlist ?? true)
   let secQuickOpen    = $state(_secSaved.quick    ?? true)
   let secDirsOpen     = $state(_secSaved.dirs     ?? true)
@@ -163,7 +151,7 @@
   let _navRestored = false
   $effect(() => {
     const sections = { fs: secFsOpen, artist: secArtistOpen, album: secAlbumOpen,
-                       genre: secGenreOpen, dl: secDlOpen, playlist: secPlaylistOpen,
+                       genre: secGenreOpen, playlist: secPlaylistOpen,
                        quick: secQuickOpen, dirs: secDirsOpen, filter: secFilterOpen }
     const mode = navMode
     // Waehrend der Suche aufgeklappte Abschnitte sind kein gewollter Zustand.
@@ -224,18 +212,6 @@
   const filteredPlaylists = $derived(
     navQ ? $playlists.filter(pl => pl.name.toLowerCase().includes(navQ)) : $playlists
   )
-  const filteredDlFolders = $derived(
-    navQ && $downloadTreeLoaded
-      ? $downloadTree.folders.filter(f => f.name.toLowerCase().includes(navQ))
-      : ($downloadTreeLoaded ? $downloadTree.folders : [])
-  )
-  const filteredDlFiles = $derived.by(() => {
-    const raw = navQ && $downloadTreeLoaded
-      ? $downloadTree.files.filter(f => f.name.toLowerCase().includes(navQ))
-      : ($downloadTreeLoaded ? $downloadTree.files : [])
-    const seen = new Set()
-    return raw.filter(f => seen.has(f.path) ? false : (seen.add(f.path), true))
-  })
   // Abschnitte mit Treffern aufklappen — und nach dem Leeren des Suchfelds
   // wieder in den Zustand von vorher bringen. Frueher blieben sie offen.
   let _preFilterSec = null
@@ -245,19 +221,18 @@
         const s = _preFilterSec
         _preFilterSec = null
         secArtistOpen = s.artist; secAlbumOpen = s.album; secGenreOpen = s.genre
-        secPlaylistOpen = s.playlist; secDlOpen = s.dl
+        secPlaylistOpen = s.playlist
       }
       return
     }
     if (!_preFilterSec) {
       _preFilterSec = untrack(() => ({ artist: secArtistOpen, album: secAlbumOpen, genre: secGenreOpen,
-                                       playlist: secPlaylistOpen, dl: secDlOpen }))
+                                       playlist: secPlaylistOpen }))
     }
     if (filteredArtists.length)  secArtistOpen   = true
     if (filteredAlbums.length)   secAlbumOpen    = true
     if (filteredGenres.length)   secGenreOpen    = true
     if (filteredPlaylists.length) secPlaylistOpen = true
-    if (filteredDlFolders.length || filteredDlFiles.length) secDlOpen = true
   })
 
   // Titelanzahl je Album und Genre, einmal pro Bibliotheksstand berechnet.
@@ -283,36 +258,13 @@
 
   // Zaehler im Abschnittskopf: beim Filtern "Treffer / gesamt"
   const zahl = (gefiltert, gesamt) => navQ ? `${gefiltert} / ${gesamt}` : gesamt
-  // ── Favoriten dropdown ────────────────────────────────────────────────────
-  let favOpen = $state(false)
-
-  // ── Total download count (all files + all subfolder tracks recursively) ──
-  const dlTotalCount = $derived.by(() => {
-    if (!$downloadTreeLoaded) return 0
-    function countFolder(f) {
-      return f.tracks.length + (f.folders ?? []).reduce((s, sub) => s + countFolder(sub), 0)
-    }
-    return ($downloadTree.files ?? []).length +
-           ($downloadTree.folders ?? []).reduce((s, f) => s + countFolder(f), 0)
-  })
-
-  // ── Angeheftete Download-Ordner (localStorage-persistent) ────────────────
+  // ── Frueher angeheftete Download-Ordner (nur noch fuer die Uebernahme in den Schnellzugriff)
   let pinnedDlFolders = $state(
     (() => { try { return JSON.parse(localStorage.getItem('synthimix-pinned-dl') ?? '[]') } catch { return [] } })()
   )
   $effect(() => {
     localStorage.setItem('synthimix-pinned-dl', JSON.stringify(pinnedDlFolders))
   })
-  function pinDlFolder(folder) {
-    if (!pinnedDlFolders.find(p => p.path === folder.path))
-      pinnedDlFolders = [...pinnedDlFolders, { name: folder.name, path: folder.path }]
-  }
-  function unpinDlFolder(path) {
-    pinnedDlFolders = pinnedDlFolders.filter(p => p.path !== path)
-  }
-  function isDlPinned(path) {
-    return pinnedDlFolders.some(p => p.path === path)
-  }
 
   // ── A-Z Schnellsprung für Künstler ────────────────────────────────────────
   const AZ_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')
@@ -324,41 +276,17 @@
     if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
-  // ── Download subfolder expand state ──────────────────────────────────────
-  let dlExpandedFolders = $state(new Set())
-  function toggleDlFolder(path) {
-    const s = new Set(dlExpandedFolders)
-    s.has(path) ? s.delete(path) : s.add(path)
-    dlExpandedFolders = s
-  }
-
   // ── Duplicate scope tracking ──────────────────────────────────────────────
   let dupeSourceMode = $state('all')
 
   let fsRoots = $state([])
   let fsKids  = $state({})
-  let fsOpen  = $state({})
   let fsReady = $state(false)
 
   async function loadFsRoots() {
     if (!window.electron?.listDir) return
     fsRoots = await window.electron.listDir(null)
     fsReady = true
-  }
-
-  async function clickFsNode(node) {
-    navMode = 'fs:' + node.path
-    search = ''
-    selected = new Set()
-    if (node.isDir) {
-      if (fsOpen[node.path]) {
-        fsOpen = { ...fsOpen, [node.path]: false }
-      } else {
-        if (!fsKids[node.path] && window.electron?.listDir)
-          fsKids = { ...fsKids, [node.path]: await window.electron.listDir(node.path) }
-        fsOpen = { ...fsOpen, [node.path]: true }
-      }
-    }
   }
 
   // ── Ordnerbaum (Schnellzugriff, Musikordner, Computer) ──────────────────
@@ -472,10 +400,6 @@
     else if (sec === 'artist')   secArtistOpen = !secArtistOpen
     else if (sec === 'album')    secAlbumOpen  = !secAlbumOpen
     else if (sec === 'genre')    secGenreOpen  = !secGenreOpen
-    else if (sec === 'dl') {
-      secDlOpen = !secDlOpen
-      if (secDlOpen && !$downloadTreeLoaded) loadDlTree()
-    }
     else if (sec === 'playlist') secPlaylistOpen = !secPlaylistOpen
     else if (sec === 'quick')    secQuickOpen    = !secQuickOpen
     else if (sec === 'dirs')     secDirsOpen     = !secDirsOpen
@@ -637,63 +561,6 @@
       return dlColSort ? applySort(list) : list
     }
 
-    // ── dl_all: all downloaded files (root + all subfolders recursively) ───
-    if (navMode === 'dl_all') {
-      if (!$downloadTreeLoaded) return []
-      const libByPath = new Map($library.map(t => [t.path, t]))
-      const make = (f) => libByPath.get(f.path) ?? { path: f.path, title: f.name, artist: '', duration_sec: 0, lufs: -99, bpm: 0 }
-      function gatherFolder(folders) {
-        let r = []
-        for (const folder of folders) {
-          r.push(...folder.tracks.map(make))
-          if (folder.folders?.length) r.push(...gatherFolder(folder.folders))
-        }
-        return r
-      }
-      let list = [
-        ...($downloadTree.files ?? []).map(make),
-        ...gatherFolder($downloadTree.folders ?? [])
-      ]
-      if (q) list = list.filter(t => {
-        const { artist, title } = getTrackArtistTitle(t)
-        return title.toLowerCase().includes(q) || artist.toLowerCase().includes(q)
-      })
-      return applySort(list)
-    }
-
-    // ── dl: modes — show tracks from download tree (may not be in library) ──
-    if (navMode.startsWith('dl:file:')) {
-      const filePath = navMode.slice(8)
-      const file = $downloadTree.files.find(f => f.path === filePath)
-      if (!file) return []
-      const libEntry = $library.find(lt => lt.path === filePath)
-      return [libEntry ?? { path: filePath, title: file.name, artist: '', duration_sec: 0, lufs: -99, bpm: 0 }]
-    }
-    if (navMode.startsWith('dl:')) {
-      const folderPath = navMode.slice(3)
-      // Rekursiv suchen: Unterordner (auch angeheftete) zeigten sonst eine
-      // Zahl im Baum, aber eine leere Liste.
-      const findFolder = (list) => {
-        for (const f of list ?? []) {
-          if (f.path === folderPath) return f
-          const sub = findFolder(f.folders)
-          if (sub) return sub
-        }
-        return null
-      }
-      const folder = findFolder($downloadTree.folders)
-      if (!folder) return []
-      const libByPath = new Map($library.map(t => [t.path, t]))
-      let list = folder.tracks.map(f =>
-        libByPath.get(f.path) ?? { path: f.path, title: f.name, artist: '', duration_sec: 0, lufs: -99, bpm: 0 }
-      )
-      if (q) list = list.filter(t => {
-        const { artist, title } = getTrackArtistTitle(t)
-        return title.toLowerCase().includes(q) || artist.toLowerCase().includes(q)
-      })
-      return applySort(list)
-    }
-
     // ── Ordner: alle Titel darin samt Unterordnern ─────────────────────────
     if (navMode.startsWith('dir:')) {
       const dirPath = navMode.slice(4)
@@ -713,29 +580,8 @@
       return applySort(list)
     }
 
-    // ── Filesystem browser: show audio files from that directory ─────────────
-    if (navMode.startsWith('fs:')) {
-      const fsPath = navMode.slice(3)
-      const AUDIO = /\.(mp3|flac|wav|m4a|ogg|aac|opus|wma)$/i
-      const kids = fsKids[fsPath] ?? []
-      const audioFiles = kids.filter(k => !k.isDir && AUDIO.test(k.name))
-      const libByPath = new Map($library.map(t => [t.path, t]))
-      let list = audioFiles.map(f =>
-        libByPath.get(f.path) ?? {
-          path: f.path, title: f.name.replace(/\.[^.]+$/, ''),
-          artist: '', duration_sec: 0, lufs: -99, bpm: 0, bitrate_kbps: 0
-        }
-      )
-      if (q) list = list.filter(t => {
-        const { artist, title } = getTrackArtistTitle(t)
-        return title.toLowerCase().includes(q) || artist.toLowerCase().includes(q)
-      })
-      return applySort(list)
-    }
-
     let list = $library.filter(t => {
       if (navMode === 'recent')          return (t.play_count ?? 0) > 0
-      if (navMode.startsWith('folder:')) return t.folder === navMode.slice(7)
       if (navMode.startsWith('artist:')) {
         const target = navMode.slice(7).toLowerCase()
         return getTrackArtistTitle(t).artist.toLowerCase().includes(target)
@@ -2287,7 +2133,7 @@
 </div>
 
 <!-- Click-outside / right-click-outside to close context menu -->
-<svelte:window onclick={() => { closeCtx(); folderCtx = null; playlistCtx = null; colPickerOpen = false; favOpen = false; libMenu = null }} oncontextmenu={() => { if (!ctxMenu) return; closeCtx() }} onkeydown={libKey} />
+<svelte:window onclick={() => { closeCtx(); folderCtx = null; playlistCtx = null; colPickerOpen = false; libMenu = null }} oncontextmenu={() => { if (!ctxMenu) return; closeCtx() }} onkeydown={libKey} />
 
 {#if qTip && qTip.reasons.length}
   <div class="q-tip" role="tooltip" style="left:{qTip.x}px;top:{qTip.y}px">
@@ -2655,7 +2501,7 @@
     transition: opacity .12s, background .12s, color .12s;
   }
   .t-child:hover .row-act, .t-sec-hdr:hover .row-act,
-  .fav-item:hover .row-act, .row-act:focus-visible, .row-act.is-on { opacity: 1; }
+  .row-act:focus-visible, .row-act.is-on { opacity: 1; }
   .row-act:hover { background: var(--c-bg5); color: var(--c-tx1); }
   .row-act.is-on { color: var(--c-accent-tx); }
   .row-act-danger:hover { background: var(--c-red-bg); color: var(--c-red-tx); }

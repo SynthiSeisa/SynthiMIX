@@ -1,28 +1,38 @@
-"""AutoMix und Radio-Modus."""
+"""Radio: haelt die Warteschlange mit passenden Titeln gefuellt — per Knopf
+dauerhaft oder erst am Ende der Warteschlange (Queue-Ende: Radio, frueher
+Auto-Mix).
+
+Die Richtung kommt aus den letzten Titeln der Warteschlange, nicht nur aus
+dem laufenden: der zuletzt eingereihte zaehlt am meisten, ein einzelner
+Ausreisser kippt die Stimmung nicht. Gewaehlt wird wie beim harmonischen
+Sortieren (Tonart, Tempo, Energie, alle 4-6 Titel ein Energie-Schub), dazu
+Aehnlichkeit von Last.fm (Titel und Kuenstler), Genre und Tempo der Richtung.
+Meist aus der eigenen Bibliothek; jeder fuenfte Titel ist neu und wird im
+Hintergrund von YouTube Music geladen.
+"""
 import asyncio
 import json
+import math
 import os
 import random
 import re
+import time
+import urllib.parse
+import urllib.request
 from difflib import SequenceMatcher
 from pathlib import Path
 from .core import _state
-from . import core, download, keys, media, search, store
+from . import core, download, keys, media, search, store, tags
 
-_automix_running = False
+NEW_EVERY = 5            # jeder 5. Radio-Titel ist neu (aus dem Netz)
+_AHEAD = 3               # so viele ungespielte Titel haelt das Radio vorraetig
+_SEEDS = 5               # Richtung aus so vielen Titeln
+_BLOCK_PLAYS = 150       # die zuletzt gespielten Titel kommen nicht wieder ...
+_BLOCK_SEC = 8 * 3600    # ... und nichts aus den letzten 8 Stunden
+_TOP = 12                # gewuerfelt wird unter den besten
+_LFM_TTL = 6 * 3600
 
-async def _do_automix(last_title: str):
-    """Search YouTube for a similar song, download it, and add to queue."""
-    global _automix_running
-    if _automix_running:
-        return  # Already downloading a suggestion, skip duplicate trigger
-    _automix_running = True
-    try:
-        await _do_automix_inner(last_title)
-    finally:
-        _automix_running = False
-
-# ── Similar-artist pool — grows as AutoMix discovers artists via YTM results ──
+# ── Kuenstler-Pool: waechst mit jeder YouTube-Music-Suche (Radio ohne Last.fm) ─
 _similar_artist_pool: list[str] = []    # ordered by discovery, no duplicates
 _similar_artist_set:  set[str]  = set() # lowercase for fast lookup
 
@@ -61,266 +71,6 @@ def _ingest_similar_artists(results: list[dict], seed_artist: str) -> None:
             removed = _similar_artist_pool.pop(0)
             _similar_artist_set.discard(removed.lower())
 
-_NOISE_RE = re.compile(
-    r'\b(official|music|video|audio|lyrics?|lyric|hd|hq|4k|'
-    r'original|mix|remix|edit|version|remaster(?:ed)?|'
-    r'feat|ft|prod|explicit|clean|radio|extended|instrumental)\b',
-    re.IGNORECASE
-)
-
-def _norm_title(t: str) -> str:
-    """Normalise a title for duplicate detection."""
-    t = re.sub(r'\s*[\(\[][^\)\]]*[\)\]]', '', t)   # strip (anything in brackets)
-    t = re.sub(r'[|–—].*$', '', t)                  # cut off after | or em-dash
-    t = _NOISE_RE.sub('', t)
-    return ' '.join(re.sub(r'[^\w\s]', '', t.lower()).split())
-
-def _titles_similar(a: str, b: str) -> bool:
-    """True if two raw titles refer to the same song (fuzzy word overlap)."""
-    wa = set(_norm_title(a).split())
-    wb = set(_norm_title(b).split())
-    if not wa or not wb:
-        return False
-    overlap = len(wa & wb) / min(len(wa), len(wb))
-    return overlap >= 0.75
-
-async def _do_automix_inner(last_title: str):
-    await core.broadcast({"type": "automix_status", "text": "⟳ Auto-Mix sucht…"})
-
-    clean = re.sub(r'\s*[\(\[][^\)\]]*[\)\]]', '', last_title).strip() or last_title
-
-    # ── Already-played blacklist ──────────────────────────────────────────────
-    existing_urls = {h.get("url", "") for h in _state.get("history", [])}
-    played_norm: set[str] = set()
-    queue_paths: set[str] = set()
-    for t in _state.get("queue", []):
-        n = _norm_title(t.get("title", ""))
-        if n: played_norm.add(n)
-        if t.get("path"): queue_paths.add(t["path"])
-    for h in _state.get("play_log", [])[:100]:
-        n = _norm_title(h.get("title", ""))
-        if n: played_norm.add(n)
-
-    # ── Artist pool: last 50 actually played tracks (not just downloaded) ─────
-    # Kept un-deduplicated so random.choice() naturally weights toward artists
-    # played more often recently, not just artists played at all.
-    recent_artists: list[str] = []
-    for h in _state.get("play_log", [])[:50]:
-        ht = h.get("title", "")
-        if h.get("artist"):
-            a = str(h["artist"]).strip()
-        elif " - " in ht:
-            a = ht.split(" - ", 1)[0].strip()
-        else:
-            a = ""
-        if a:
-            recent_artists.append(a)
-    # Also consider library tracks that are in queue for artist hints
-    for t in _state.get("queue", []):
-        if t.get("artist"):
-            a = str(t["artist"]).strip()
-            if a:
-                recent_artists.append(a)
-
-    chosen_artist = random.choice(recent_artists) if recent_artists else ""
-    if not chosen_artist and ' - ' in clean:
-        chosen_artist = clean.split(' - ', 1)[0].strip()
-
-    # ── Try local library first ───────────────────────────────────────────────
-    if chosen_artist:
-        artist_lo = chosen_artist.lower()
-        candidates = [
-            lt for lt in _state.get("library", [])
-            if lt.get("path") not in queue_paths
-            and (lt.get("artist", "").lower() == artist_lo
-                 or lt.get("title", "").lower().startswith(artist_lo + " - "))
-            and _norm_title(lt.get("title", "")) not in played_norm
-        ]
-        if candidates:
-            ci = _state.get("current_idx", -1)
-            cur_path = _state["queue"][ci].get("path", "") if 0 <= ci < len(_state["queue"]) else ""
-            pick = _pick_harmonic(candidates, cur_path)
-            _state["queue"].append({
-                "path":         pick["path"],
-                "title":        pick["title"],
-                "duration_sec": pick.get("duration_sec", 0),
-                "lufs":         pick.get("lufs", -99.0),
-                "bpm":          pick.get("bpm", 0),
-                "bitrate_kbps": pick.get("bitrate_kbps", 0),
-                "played":       False,
-            })
-            store.save_queue()
-            await core.push_queue()
-            await core.broadcast({"type": "automix_status",
-                             "text": f"✓ {pick['title']}"})
-            return
-
-    # ── Fallback: YouTube search ──────────────────────────────────────────────
-    has_split = ' - ' in clean
-    artist_part = chosen_artist or (clean.split(' - ', 1)[0].strip() if has_split else clean)
-    title_part  = clean.split(' - ', 1)[1].strip() if has_split else ''
-    title_words = set(re.sub(r'[^\w\s]', '', title_part.lower()).split()) if title_part else set()
-
-    search_queries: list[str] = []
-    seen_sq: set[str] = set()
-
-    def _add_sq(a: str) -> None:
-        if a and a.lower() not in seen_sq:
-            search_queries.append(a)
-            seen_sq.add(a.lower())
-
-    if artist_part:
-        _add_sq(artist_part)
-        if _similar_artist_pool:
-            _add_sq(random.choice(_similar_artist_pool))
-    else:
-        _add_sq(clean + " music")
-
-    try:
-        base_args = ["--flat-playlist", "-j", "--no-playlist", "--quiet"]
-        if core.FFMPEG_DIR:
-            base_args += ["--ffmpeg-location", core.FFMPEG_DIR]
-
-        # Search across all queries, collect unique results
-        all_results: list[dict] = []
-        seen_result_urls: set[str] = set()
-        for sq in search_queries:
-            batch = await search._ytm_songs(sq, 8, details=True)
-            # Learn similar artists from whatever YTM returned
-            _ingest_similar_artists(batch, sq)
-            for r in batch:
-                u = r.get("url", "")
-                if u and u not in seen_result_urls:
-                    seen_result_urls.add(u)
-                    all_results.append(r)
-
-        # Fallback to regular YouTube only if YouTube Music returned nothing at all.
-        # Plain YouTube search isn't scoped to music, so bias the query toward songs
-        # and mark these results as "unverified" — they get extra scrutiny below.
-        fallback_urls: set[str] = set()
-        if not all_results:
-            for sq in search_queries:
-                batch = await search._run_search_cmd(core._yt(f"ytsearch15:{sq} song", *base_args))
-                for r in batch:
-                    u = r.get("url", "")
-                    if u and u not in seen_result_urls:
-                        seen_result_urls.add(u)
-                        fallback_urls.add(u)
-                        all_results.append(r)
-
-        all_results.sort(key=lambda r: r.get("_score", 0), reverse=True)
-
-        found_url   = None
-        found_title = ""
-        for r in all_results:
-            u = r.get("url", "")
-            if not u or u in existing_urls:
-                continue
-            r_title = r.get("title", "")
-            # Skip mixes / compilations / podcasts
-            if search.MIX_RE.search(r_title):
-                continue
-            # Skip interviews, reactions, talk content etc. — common in the unscoped
-            # plain-YouTube fallback, since the YTM song search never surfaces these
-            if search.NON_MUSIC_RE.search(r_title):
-                continue
-            # Skip live recordings / concert performances
-            if search.LIVE_RE.search(r_title):
-                continue
-            # Keine Musikvideos (Intro, Pausen) — auch die Song-Suche laesst vereinzelt eins durch
-            if search._MV_TITLE_RE.search(r_title):
-                continue
-            # Skip playlists / full albums
-            if download._is_playlist(u):
-                continue
-            dur = r.get("duration") or 0
-            # Skip tracks over 8 min (likely a mix/medley) and very short clips (<40s)
-            if dur > 480 or (dur and dur < 40):
-                continue
-            # Unverified (plain-YouTube fallback) results: require a Topic-channel or
-            # audio/lyrics title match — otherwise too easy to grab non-music uploads
-            if u in fallback_urls and r.get("_score", 0) < 40:
-                continue
-            # Skip if exact normalised title already played
-            r_norm = _norm_title(r_title)
-            if r_norm in played_norm:
-                continue
-            # Fuzzy check only against the trigger song (avoids O(n²) over full history)
-            if title_part and _titles_similar(r_title, title_part):
-                continue
-            found_url   = u
-            found_title = r_title
-            break
-
-        if not found_url:
-            await core.broadcast({"type": "automix_status", "text": "⚠ Kein Song gefunden"})
-            await asyncio.sleep(4)
-            await core.broadcast({"type": "automix_status", "text": ""})
-            return
-
-        await core.broadcast({"type": "automix_status", "text": f"⬇ {found_title[:48]}…"})
-        path = await download.run_download(found_url, "mp3-best")
-
-        if path and os.path.exists(path):
-            loop = asyncio.get_running_loop()
-            probe = await loop.run_in_executor(None, media._probe_sync, path)
-            track = {
-                "path":         path,
-                "title":        probe["title"] or Path(path).stem,
-                "duration_sec": probe["duration_sec"],
-                "lufs":         -99.0,
-                "bpm":          probe["bpm"],
-                "bitrate_kbps": probe["bitrate_kbps"],
-                "played":       False,
-            }
-            _state["queue"].append(track)
-            store.save_queue()
-            await core.push_queue()
-            # Auto-play if player was idle
-            if not _state["playing"] or _state["current_idx"] < 0:
-                idx = len(_state["queue"]) - 1
-                _state["current_idx"] = idx
-                _state["playing"]     = True
-                _state["position_ms"] = 0
-                track["played"]       = True
-                track["play_count"]   = 1
-                await core.push_player()
-                await core.broadcast({"type": "now_playing", "track": dict(track)})
-                asyncio.create_task(media._enrich_track(path))
-            await core.broadcast({"type": "automix_status", "text": f"✓ {track['title'][:48]}"})
-        else:
-            await core.broadcast({"type": "automix_status", "text": "⚠ Download fehlgeschlagen"})
-
-    except Exception as e:
-        await core.broadcast({"type": "automix_status", "text": f"⚠ Fehler: {str(e)[:40]}"})
-
-    await asyncio.sleep(5)
-    await core.broadcast({"type": "automix_status", "text": ""})
-
-
-# ── Radio mode ────────────────────────────────────────────────────────────────
-_radio_fill_running = False
-
-async def _lastfm_similar(artist: str, title: str, api_key: str, limit: int = 30) -> list[dict]:
-    import urllib.request as _req, urllib.parse as _parse
-    params = _parse.urlencode({
-        'method': 'track.getSimilar', 'artist': artist, 'track': title,
-        'api_key': api_key, 'format': 'json', 'limit': limit, 'autocorrect': 1,
-    })
-    url = f"https://ws.audioscrobbler.com/2.0/?{params}"
-    loop = asyncio.get_running_loop()
-    def _fetch():
-        try:
-            req = _req.Request(url, headers={'User-Agent': 'SynthiMIX/1.4'})
-            with _req.urlopen(req, timeout=8) as r:
-                return json.loads(r.read().decode())
-        except Exception:
-            return {}
-    data = await loop.run_in_executor(None, _fetch)
-    tracks = data.get('similartracks', {}).get('track', [])
-    return [{'artist': t.get('artist', {}).get('name', '') if isinstance(t.get('artist'), dict) else str(t.get('artist', '')),
-             'title': t.get('name', '')} for t in tracks]
-
 def _library_key(path: str) -> str:
     lt = next((x for x in _state.get("library", []) if x.get("path") == path), None)
     return (lt or {}).get("key", "") or ""
@@ -336,95 +86,450 @@ def _pick_harmonic(candidates: list[dict], ref_path: str) -> dict:
             return random.choice(passend)
     return random.choice(candidates)
 
-async def _radio_fill():
-    global _radio_fill_running
-    if _radio_fill_running:
-        return
-    _radio_fill_running = True
+
+# ── Titel vergleichbar machen ────────────────────────────────────────────────
+_ARTIST_SPLIT = re.compile(r"\s*(?:,|&|\+|/|\bx\b|\band\b|\bvs\.?(?=\s)|\bfeat\.?|\bft\.?|\bfeaturing\b|\bwith\b)\s*", re.I)
+_BRACKETS = re.compile(r"\s*[\(\[][^\)\]]*[\)\]]")
+# Einzelspuren, Samples, Gesangsaufnahmen: keine Lieder fuers Radio
+_NOT_A_SONG = re.compile(r"\b(stems?|instrumental|karaoke|a[\s-]?cap+ella|sample[\s-]*pack|drums|drm|perc|fx|"
+                         r"unprocessed|take\s*\d+|(?:full|lead|wet|dry)\s+vocals?|kick\s*drum|no\s+kick|looperman)\b|_instrum|[\s-](?:wet|dry)\s*$|"
+                         # Stem-Trennung: "Titel_bass", "Titel (vocals)"
+                         r"(?:_|[(\[])(?:bass|drums|other|vocals|piano|guitar|no[\s_]vocals)[)\]]?\s*$",
+                         re.IGNORECASE)
+
+def _split(lt: dict) -> tuple[str, str]:
+    """(Kuenstler, Titel) — aus den Tags oder aus "Kuenstler - Titel"."""
+    title = (lt.get("title") or lt.get("name") or "").strip()
+    artist = (lt.get("artist") or "").strip()
+    if " - " in title:
+        a, t = (x.strip() for x in title.split(" - ", 1))
+        if not artist:
+            artist, title = a, t
+        elif _artists(a) & _artists(artist):
+            title = t
+    return artist, title
+
+def _artists(artist: str) -> frozenset:
+    return frozenset(n for n in (search._dupe_norm(x) for x in _ARTIST_SPLIT.split(artist or "")) if n)
+
+def _tnorm(title: str) -> str:
+    """Titel ohne Klammern (Remix, Radio Edit …): dasselbe Lied in anderer Fassung zaehlt gleich."""
+    return search._dupe_norm(_BRACKETS.sub("", title or "")) or search._dupe_norm(title)
+
+def _feat(lt: dict) -> dict:
+    a, t = _split(lt)
+    return {"lt": lt, "a": a, "t": t, "artists": _artists(a), "title": _tnorm(t),
+            "folder": os.path.dirname(lt.get("path") or "").lower(),
+            "genre": tags._genre_map(lt.get("genre") or ""), "pre": keys._pre(lt)}
+
+def _same_song(index: dict, artists: frozenset, title: str) -> bool:
+    """Liegt dieses Lied (Titel + ein gemeinsamer Kuenstler) im Index {titel: [kuenstler]}?"""
+    return any(not arts or not artists or arts & artists for arts in index.get(title, ()))
+
+
+# ── Last.fm ──────────────────────────────────────────────────────────────────
+_lfm_cache: dict[str, tuple[float, list]] = {}
+
+def _lfm_sync(params: dict, api_key: str) -> dict:
+    q = urllib.parse.urlencode({**params, "api_key": api_key, "format": "json", "autocorrect": 1})
     try:
-        ci = _state['current_idx']
-        q  = _state['queue']
-        if ci < 0 or ci >= len(q):
-            return
+        req = urllib.request.Request("https://ws.audioscrobbler.com/2.0/?" + q,
+                                     headers={"User-Agent": "SynthiMIX"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return json.loads(r.read().decode())
+    except Exception:
+        return {}
 
-        np = q[ci]
-        raw_title = np.get('title', '') or ''
-        if ' - ' in raw_title:
-            parts  = raw_title.split(' - ', 1)
-            artist = parts[0].strip()
-            title  = parts[1].strip()
-        else:
-            artist = np.get('artist', '') or ''
-            title  = raw_title
-        if not title:
-            return
+def _lfm_name(a) -> str:
+    return str(a.get("name", "") if isinstance(a, dict) else a or "")
 
-        in_queue = {t.get('path', '') for t in q}
-        lib = _state.get('library', [])
+async def _lfm(kind: str, artist: str, title: str = "") -> list[tuple[str, str, float]]:
+    """Aehnliche Titel (kind="track") oder Kuenstler ("artist") als
+    [(kuenstler, titel, match 0..1)], je 6 Stunden gemerkt."""
+    api_key = (_state.get("lastfm_api_key") or "").strip()
+    if not api_key or not artist:
+        return []
+    ck = f"{kind}|{artist.lower()}|{title.lower()}"
+    hit = _lfm_cache.get(ck)
+    if hit and time.time() - hit[0] < _LFM_TTL:
+        return hit[1]
+    loop = asyncio.get_running_loop()
+    if kind == "track":
+        d = await loop.run_in_executor(None, _lfm_sync, {"method": "track.getSimilar", "artist": artist,
+                                                         "track": title, "limit": 60}, api_key)
+        items = (d.get("similartracks") or {}).get("track", []) if isinstance(d, dict) else []
+        items = [items] if isinstance(items, dict) else items
+        out = [(_lfm_name(x.get("artist")), str(x.get("name", "")), float(x.get("match") or 0)) for x in items]
+    else:
+        d = await loop.run_in_executor(None, _lfm_sync, {"method": "artist.getSimilar", "artist": artist,
+                                                         "limit": 60}, api_key)
+        items = (d.get("similarartists") or {}).get("artist", []) if isinstance(d, dict) else []
+        items = [items] if isinstance(items, dict) else items
+        out = [(str(x.get("name", "")), "", float(x.get("match") or 0)) for x in items]
+    if d:                                  # nur Antworten merken, keine Netzfehler
+        _lfm_cache[ck] = (time.time(), out)
+        if len(_lfm_cache) > 400:
+            _lfm_cache.pop(next(iter(_lfm_cache)))
+    return out
 
-        # Bug fix: all tracks already in queue → nothing to add, stop trying
-        candidates_total = [lt for lt in lib if lt.get('path', '') not in in_queue
-                            and float(lt.get('duration_sec', 0) or 0) > 60]
-        if not candidates_total:
-            return
 
-        best_match: dict | None = None
-        api_key = _state.get('lastfm_api_key', '').strip()
-        if api_key:
-            similar = await _lastfm_similar(artist, title, api_key)
-            if similar:
-                treffer: list[dict] = []    # in Last.fm-Reihenfolge
-                for s in similar:
-                    s_artist = s['artist'].lower()
-                    s_title  = s['title'].lower()
-                    best: dict | None = None
-                    best_score = 0.0
-                    for lt in candidates_total:
-                        lt_title  = (lt.get('title')  or lt.get('name', '') or '').lower()
-                        lt_artist = (lt.get('artist') or '').lower()
-                        t_score = SequenceMatcher(None, s_title, lt_title).ratio()
-                        a_score = SequenceMatcher(None, s_artist, lt_artist).ratio() if lt_artist else 0.5
-                        score   = t_score * 0.7 + a_score * 0.3
-                        if score > best_score and t_score > 0.7:
-                            best_score = score
-                            best = lt
-                    if best and best not in treffer:
-                        treffer.append(best)
-                        if len(treffer) >= 8:
-                            break
-                # Der aehnlichste Titel, dessen Tonart passt — sonst der aehnlichste
-                ref = _library_key(np.get('path', ''))
-                passend = [t for t in treffer if ref and keys._key_compat(ref, t.get('key')) >= 2]
-                if passend or treffer:
-                    best_match = (passend or treffer)[0]
+# ── Richtung ─────────────────────────────────────────────────────────────────
+def _seed_tracks() -> list[dict]:
+    """Die letzten Titel, auf die der naechste folgt (aeltester zuerst), mit den
+    Angaben aus der Bibliothek. Reicht die Warteschlange nicht, zaehlt der Verlauf."""
+    lib = {lt.get("path"): lt for lt in _state.get("library", [])}
+    seeds = [{**t, **lib.get(t.get("path"), {})} for t in _state.get("queue", [])[-_SEEDS:] if t.get("path")]
+    if len(seeds) < _SEEDS:
+        have = {s.get("path") for s in seeds}
+        extra = []
+        for h in _state.get("play_log", [])[:30]:
+            p = h.get("path")
+            if p in lib and p not in have:
+                have.add(p)
+                extra.append(lib[p])
+            if len(extra) + len(seeds) >= _SEEDS:
+                break
+        seeds = list(reversed(extra)) + seeds
+    return seeds
 
-        # Fallback: Titel aus der Bibliothek, bevorzugt harmonisch passend
-        if not best_match:
-            best_match = _pick_harmonic(candidates_total, np.get('path', ''))
+def _tempo_of(feats: list[dict]) -> float:
+    """Tempo der Richtung: Median der bekannten (halbes/doppeltes Tempo gefaltet)."""
+    ref = next((f["pre"][1] for f in reversed(feats) if f["pre"][1]), 0.0)
+    if not ref:
+        return 0.0
+    vals = sorted(min((b * m for m in (0.5, 1.0, 2.0)), key=lambda v: abs(v - ref))
+                  for b in (f["pre"][1] for f in feats) if b)
+    return vals[len(vals) // 2]
 
-        track = {
-            'path':         best_match.get('path', ''),
-            'title':        best_match.get('title') or best_match.get('name', ''),
-            'duration_sec': float(best_match.get('duration_sec', 0) or 0),
-            'lufs':         float(best_match.get('lufs', -99.0) or -99.0),
-            'bpm':          int(best_match.get('bpm', 0) or 0),
-            'bitrate_kbps': int(best_match.get('bitrate_kbps', 0) or 0),
-            'played':       False,
-        }
-        _state['queue'].append(track)
-        store.save_queue()
-        await core.push_queue()
-        await core.broadcast({'type': 'radio_added',
-                         'title': track['title'],
-                         'similar_to': f"{artist} – {title}"})
+async def _profile(seeds: list[dict]) -> dict:
+    n = len(seeds)
+    w = [0.5 ** (n - 1 - i) for i in range(n)]        # der neueste zaehlt am meisten
+    feats = [_feat(s) for s in seeds]
+    genres: dict[str, float] = {}
+    for f, wi in zip(feats, w):
+        if f["genre"]:
+            genres[f["genre"]] = genres.get(f["genre"], 0.0) + wi
+    tot = sum(genres.values())
+    prof = {
+        "prev":           feats[-1]["pre"],
+        "tempo":          _tempo_of(feats),
+        "genres":         {g: v / tot for g, v in genres.items()} if tot else {},
+        "seed_artists":   frozenset().union(*(f["artists"] for f in feats)),
+        "recent_artists": frozenset().union(*(f["artists"] for f in feats[-2:])),
+        "seed_titles":    {},
+        "sim_t":          {},    # titel -> [(kuenstler, staerke, "Kuenstler – Titel")]
+        "sim_a":          {},    # kuenstler -> (staerke, Seed-Kuenstler)
+        "folders":        {},    # Ordner -> Anteil (die eigene Sortierung, oft nach Genre)
+    }
+    for f, wi in zip(feats, w):
+        if f["folder"]:
+            prof["folders"][f["folder"]] = prof["folders"].get(f["folder"], 0.0) + wi / sum(w)
+    for f in feats:
+        prof["seed_titles"].setdefault(f["title"], []).append(f["artists"])
+    jobs, labels = [], []
+    for f, wi in list(zip(feats, w))[-2:]:
+        if f["a"] and f["t"]:
+            jobs.append(_lfm("track", _ARTIST_SPLIT.split(f["a"])[0], _BRACKETS.sub("", f["t"]) or f["t"]))
+            labels.append(("track", wi, f"{f['a']} – {f['t']}"))
+    seen: set[str] = set()
+    for f, wi in reversed(list(zip(feats, w))[-3:]):
+        a0 = _ARTIST_SPLIT.split(f["a"])[0].strip() if f["a"] else ""
+        if a0 and a0.lower() not in seen:
+            seen.add(a0.lower())
+            jobs.append(_lfm("artist", a0))
+            labels.append(("artist", wi, a0))
+    for (kind, wi, label), out in zip(labels, await asyncio.gather(*jobs)):
+        for a, t, m in out:
+            strength = wi * (0.4 + 0.6 * max(0.0, min(1.0, m)))
+            if kind == "track":
+                prof["sim_t"].setdefault(_tnorm(t), []).append((_artists(a), strength, label))
+            else:
+                for an in _artists(a):
+                    if strength > prof["sim_a"].get(an, (0.0, ""))[0]:
+                        prof["sim_a"][an] = (strength, label)
+    return prof
+
+def _blocked() -> tuple[set, dict]:
+    """Zuletzt gespielt: Pfade und {titel: [kuenstler]} (andere Fassungen desselben Lieds)."""
+    now = time.time()
+    paths: set[str] = set()
+    titles: dict[str, list] = {}
+    for i, h in enumerate(_state.get("play_log", [])):
+        if i >= _BLOCK_PLAYS and now - float(h.get("played_at") or 0) > _BLOCK_SEC:
+            break
+        if h.get("path"):
+            paths.add(h["path"])
+        a, t = _split({"title": h.get("title", ""), "artist": h.get("artist", "")})
+        if t:
+            titles.setdefault(_tnorm(t), []).append(_artists(a))
+    for q in _state.get("queue", []):
+        a, t = _split(q)
+        if t:
+            titles.setdefault(_tnorm(t), []).append(_artists(a))
+    return paths, titles
+
+def _camelot_txt(pre: tuple) -> str:
+    c = pre[0]
+    return f"{c[0]}{c[1]}" if c else ""
+
+def _pick_sync(lib: list[dict], prof: dict, block_paths: set, block_titles: dict,
+               queue_paths: set, boost_due: bool, rng: random.Random):
+    """Bester Titel aus der Bibliothek (gewuerfelt unter den besten) oder None.
+    Liefert (Titel, Grund, Tonart-Schritt, Energie-Unterschied)."""
+    cands = []
+    for lt in lib:
+        p = lt.get("path")
+        if not p or p in queue_paths or p in block_paths or lt.get("missing"):
+            continue
+        d = float(lt.get("duration_sec") or 0)
+        if d < 60 or d > 900:                  # Samples, FX, DJ-Sets
+            continue
+        f = _feat(lt)
+        if not f["title"] or _NOT_A_SONG.search(lt.get("title") or "") \
+                or _same_song(block_titles, f["artists"], f["title"]):
+            continue
+        cands.append(f)
+    if not cands:
+        return None
+    # Nicht zweimal hintereinander derselbe Kuenstler (wenn es anders geht)
+    pool = [f for f in cands if not (f["artists"] & prof["recent_artists"])] or cands
+    scored = []
+    for f in pool:
+        s, step, de = keys._trans_score(prof["prev"], f["pre"], boost_due)
+        why = ""
+        st, st_lbl = 0.0, ""
+        for arts, strength, label in prof["sim_t"].get(f["title"], ()):
+            if (not arts or arts & f["artists"]) and strength > st:
+                st, st_lbl = strength, label
+        if st:
+            s += 3.0 * st
+            why = f"ähnlich zu {st_lbl}"
+        sa, sa_lbl = max((prof["sim_a"].get(a, (0.0, "")) for a in f["artists"]), default=(0.0, ""))
+        if sa:
+            s += 2.0 * sa
+            why = why or f"ähnlich wie {sa_lbl}"
+        if f["artists"] & prof["seed_artists"]:
+            s += 0.6
+        s += 1.0 * prof["folders"].get(f["folder"], 0.0)
+        if not f["a"] and not f["lt"].get("key") and not f["genre"]:
+            s -= 1.0                           # ohne jede Angabe: oft Schnipsel aus Projekten
+        if prof["genres"]:
+            share = prof["genres"].get(f["genre"], 0.0) if f["genre"] else None
+            if share is None:
+                s -= 0.3
+            elif share:
+                s += 1.5 * share
+                why = why or f["genre"]
+            else:
+                s -= 1.5                       # anderes Genre als die Richtung
+        # Tempo gegen die Richtung, nicht nur gegen den letzten Titel
+        gap = keys._tempo_gap(prof["tempo"], f["pre"][1])
+        if gap > 0.08:
+            s -= min(2.0, (gap - 0.08) * 20)
+        s += rng.random() * 0.3                # Gleichstand: nicht immer dieselben
+        scored.append((s, f, step, de, why))
+    scored.sort(key=lambda z: -z[0])
+    top = scored[:_TOP]
+    s0 = top[0][0]
+    s, f, step, de, why = rng.choices(top, weights=[math.exp((z[0] - s0) / 0.35) for z in top])[0]
+    extra = [x for x in (_camelot_txt(f["pre"]), f"{f['pre'][1]:.0f} BPM" if f["pre"][1] else "") if x]
+    if boost_due and (step in keys._BOOST_KEY_SCORE or (f["lt"].get("energy") and de >= 0.6)):
+        extra.append("Energie-Schub")
+    return f["lt"], " · ".join([why] + extra if why else extra), step, de
+
+
+# ── Anhaengen ────────────────────────────────────────────────────────────────
+_fill_running = False
+_discover_running = False
+_since_new = 0
+_since_boost = 0
+_boost_at = random.randint(4, 6)
+_rng = random.Random()
+
+def _remaining() -> int:
+    ci, q = _state.get("current_idx", -1), _state.get("queue", [])
+    return sum(1 for t in q[max(0, ci + 1):] if not t.get("played", False))
+
+def _queue_entry(lt: dict) -> dict:
+    return {
+        "path":         lt.get("path", ""),
+        "title":        lt.get("title") or lt.get("name", ""),
+        "duration_sec": float(lt.get("duration_sec", 0) or 0),
+        "lufs":         float(lt.get("lufs", -99.0) or -99.0),
+        "bpm":          int(lt.get("bpm", 0) or 0),
+        "bitrate_kbps": int(lt.get("bitrate_kbps", 0) or 0),
+        "played":       False,
+    }
+
+async def _fill(count: int):
+    """Haengt bis zu count passende Titel an; jeder NEW_EVERY-te ist neu."""
+    global _fill_running, _since_new, _since_boost, _boost_at
+    if _fill_running:
+        return
+    _fill_running = True
+    added: list[tuple[str, str]] = []
+    try:
+        loop = asyncio.get_running_loop()
+        for _ in range(count):
+            if _since_new >= NEW_EVERY - 1 and not _discover_running:
+                _since_new = 0
+                core.spawn(_discover())
+            seeds = _seed_tracks()
+            if not seeds:
+                break
+            prof = await _profile(seeds)
+            block_paths, block_titles = _blocked()
+            queue_paths = {t.get("path") for t in _state.get("queue", [])}
+            boost_due = _since_boost >= _boost_at
+            pick = await loop.run_in_executor(None, _pick_sync, list(_state.get("library", [])), prof,
+                                              block_paths, block_titles, queue_paths, boost_due, _rng)
+            if not pick:
+                core.spawn(_discover())          # Bibliothek ausgeschoepft: dann eben Neues
+                break
+            lt, why, step, de = pick
+            _state["queue"].append(_queue_entry(lt))
+            added.append((lt.get("title") or "", why))
+            _since_new += 1
+            _since_boost += 1
+            if boost_due and (step in keys._BOOST_KEY_SCORE or de >= 0.6):
+                _since_boost, _boost_at = 0, _rng.randint(4, 6)
+        if added:
+            store.save_queue()
+            await core.push_queue()
+            title, why = added[-1]
+            await core.broadcast({"type": "radio_added", "title": title, "similar_to": why})
     finally:
-        _radio_fill_running = False
+        _fill_running = False
 
 async def _check_radio_queue():
-    if not _state.get('radio_enabled'):
+    """Radio an: immer _AHEAD Titel vorraetig halten."""
+    if not _state.get("radio_enabled"):
         return
-    ci = _state['current_idx']
-    q  = _state['queue']
-    remaining = sum(1 for t in q[max(0, ci+1):] if not t.get('played', False))
-    if remaining < 3:
-        asyncio.create_task(_radio_fill())
+    need = _AHEAD - _remaining()
+    if need > 0:
+        core.spawn(_fill(need))
+
+async def _at_queue_end():
+    """Letzter Titel laeuft (Queue-Ende: Radio): einen passenden anhaengen."""
+    if _state.get("radio_enabled"):
+        await _check_radio_queue()
+    elif _remaining() == 0:
+        await _fill(1)
+
+
+# ── Neues aus dem Netz ───────────────────────────────────────────────────────
+def _acceptable(r: dict, existing_urls: set) -> bool:
+    """Ein einzelnes Lied in Studiofassung: keine Mixe, Live-Aufnahmen, Musikvideos, Playlists."""
+    u, title = r.get("url", ""), r.get("title", "")
+    if not u or u in existing_urls or download._is_playlist(u):
+        return False
+    if (search.MIX_RE.search(title) or search.NON_MUSIC_RE.search(title)
+            or search.LIVE_RE.search(title) or search._MV_TITLE_RE.search(title)):
+        return False
+    dur = r.get("duration") or 0
+    return not (dur > 480 or (dur and dur < 40))
+
+def _known_index() -> dict:
+    """{titel: [kuenstler]} fuer alles, was schon da ist oder gerade lief."""
+    idx: dict[str, list] = {}
+    for lt in _state.get("library", []):
+        a, t = _split(lt)
+        if t:
+            idx.setdefault(_tnorm(t), []).append(_artists(a))
+    for k, v in _blocked()[1].items():
+        idx.setdefault(k, []).extend(v)
+    return idx
+
+def _matches(r: dict, artist: str, title: str) -> bool:
+    """Ist das Suchergebnis wirklich das gesuchte Lied?"""
+    ra = _extract_ytm_artist(r) or ""
+    a, t = _split({"title": r.get("title", ""), "artist": ra})
+    want, got = _tnorm(title), _tnorm(t)
+    if not want or not got:
+        return False
+    same_title = want in got or got in want or SequenceMatcher(None, want, got).ratio() >= 0.75
+    have = search._dupe_norm(f"{a} {r.get('uploader') or ''} {r.get('title') or ''}")
+    return same_title and any(x in have for x in _artists(artist))
+
+async def _discover():
+    """Einen neuen, passenden Titel suchen, laden und anhaengen. Mit Last.fm:
+    ein aehnlicher Titel, der noch nicht in der Bibliothek ist. Ohne (oder
+    wenn nichts passt): Songs der Kuenstler aus der Richtung und aus dem
+    Kuenstler-Pool von YouTube Music."""
+    global _discover_running
+    if _discover_running:
+        return
+    _discover_running = True
+    try:
+        seeds = _seed_tracks()
+        if not seeds:
+            return
+        feats = [_feat(s) for s in seeds]
+        known = _known_index()
+        existing_urls = {h.get("url", "") for h in _state.get("history", [])}
+        found: tuple[dict, str] | None = None
+
+        opts: list[tuple[str, str, float, str]] = []
+        for f in feats[-2:]:
+            if f["a"] and f["t"]:
+                for a, t, m in await _lfm("track", _ARTIST_SPLIT.split(f["a"])[0], _BRACKETS.sub("", f["t"]) or f["t"]):
+                    if a and t and not _same_song(known, _artists(a), _tnorm(t)):
+                        opts.append((a, t, m, f"{f['a']} – {f['t']}"))
+        opts.sort(key=lambda o: -o[2])
+        tries = opts[:15]
+        _rng.shuffle(tries)
+        for a, t, _m, label in tries[:3]:
+            for r in await search._ytm_songs(f"{a} {t}", 5, details=True):
+                if _acceptable(r, existing_urls) and _matches(r, a, t):
+                    found = (r, f"neu · ähnlich zu {label}")
+                    break
+            if found:
+                break
+
+        if not found:
+            artists = [x for x in (_ARTIST_SPLIT.split(f["a"])[0].strip() for f in feats[-3:] if f["a"]) if x]
+            queries = ([_rng.choice(artists)] if artists else []) + \
+                      ([_rng.choice(_similar_artist_pool)] if _similar_artist_pool else [])
+            for q in queries:
+                batch = await search._ytm_songs(q, 8, details=True)
+                _ingest_similar_artists(batch, q)
+                for r in sorted(batch, key=lambda r: -r.get("_score", 0)):
+                    if not _acceptable(r, existing_urls):
+                        continue
+                    a, t = _split({"title": r.get("title", ""), "artist": _extract_ytm_artist(r) or ""})
+                    if t and not _same_song(known, _artists(a), _tnorm(t)):
+                        found = (r, f"neu · von {q}" if q in artists else f"neu · wie {q}")
+                        break
+                if found:
+                    break
+
+        if not found:
+            await core.broadcast({"type": "automix_status", "text": "Radio: nichts Neues gefunden"})
+            await asyncio.sleep(4)
+            await core.broadcast({"type": "automix_status", "text": ""})
+            return
+        r, why = found
+        await core.broadcast({"type": "automix_status", "text": f"⬇ Radio lädt: {r.get('title', '')[:40]}…"})
+        path = await download.run_download(r["url"], "mp3-best")
+        if not path or not os.path.exists(path):
+            await core.broadcast({"type": "automix_status", "text": "⚠ Radio: Download fehlgeschlagen"})
+            await asyncio.sleep(4)
+            return
+        probe = await asyncio.get_running_loop().run_in_executor(None, media._probe_sync, path)
+        track = {
+            "path":         path,
+            "title":        probe["title"] or Path(path).stem,
+            "duration_sec": probe["duration_sec"],
+            "lufs":         -99.0,
+            "bpm":          probe["bpm"],
+            "bitrate_kbps": probe["bitrate_kbps"],
+            "played":       False,
+            "radio_new":    True,
+        }
+        _state["queue"].append(track)
+        store.save_queue()
+        await core.push_queue()
+        await core.broadcast({"type": "radio_added", "title": track["title"], "similar_to": why})
+    finally:
+        _discover_running = False
+        await core.broadcast({"type": "automix_status", "text": ""})

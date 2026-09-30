@@ -46,7 +46,7 @@ def schedule_save():
         await asyncio.sleep(3)
         _save_scheduled = False
         save_library()
-    asyncio.create_task(_do())
+    core.spawn(_do())
 
 _notes_save_scheduled: bool = False
 
@@ -61,7 +61,7 @@ def schedule_notes_save():
         await asyncio.sleep(1)
         _notes_save_scheduled = False
         save_notes()
-    asyncio.create_task(_do())
+    core.spawn(_do())
 
 def load_queue():
     raw = _load_json(core.QUEUE_FILE, {})
@@ -187,7 +187,8 @@ def load_library():
             **({"mik_cues": [int(c) for c in t["mik_cues"]][:16]} if t.get("mik_cues") else {}),
             # Taktraster fuer Beat-Sync (genaues Tempo, erster Schlag, Verlaesslichkeit)
             **({"bpm_f": float(t["bpm_f"]), "beat_off": float(t.get("beat_off", 0)),
-                "beat_conf": float(t.get("beat_conf", 0))} if t.get("bpm_f") else {}),
+                "beat_conf": float(t.get("beat_conf", 0)),
+                **({"grid_rev": int(t["grid_rev"])} if t.get("grid_rev") else {})} if t.get("bpm_f") else {}),
             # Takt und Phrasen (Uebergang auf Phrasenanfang, Bass-Tausch)
             **({"phrase_off": float(t["phrase_off"]), "bar_beats": int(t.get("bar_beats") or 4),
                 "phrase_src": str(t.get("phrase_src") or "")} if t.get("bpm_f") and t.get("phrase_off") is not None else {}),

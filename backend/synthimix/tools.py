@@ -174,9 +174,7 @@ async def _update_ytdlp(ws: WebSocket | None = None):
 _FPCALC_URL = "https://github.com/acoustid/chromaprint/releases/download/v1.5.1/chromaprint-fpcalc-1.5.1-windows-x86_64.zip"
 
 async def _download_fpcalc(ws):
-    async def _send(t, **kw):
-        try: await ws.send_text(json.dumps({"type": t, **kw}))
-        except Exception: pass
+    _send = core.sender(ws)
 
     await _send("fpcalc_install_progress", text="Wird heruntergeladen…")
     loop = asyncio.get_running_loop()
@@ -279,18 +277,8 @@ async def _install_spotdl(ws):
         await _send("spotdl_install_error", text=str(e))
         return
 
-    # Detect version after install
-    cmd = _find_spotdl_cmd()
-    version = None
-    if cmd:
-        try:
-            r = subprocess.run(cmd + ["--version"], capture_output=True,
-                               text=True, encoding="utf-8", errors="replace",
-                               timeout=8, creationflags=_NO_WINDOW)
-            m = re.search(r'(\d+\.\d+[\.\d]*)', r.stdout + r.stderr)
-            version = m.group(1) if m else "installiert"
-        except Exception:
-            version = "installiert"
+    # Version der neuen Datei (im Hintergrund-Thread: der erste Start entpackt ~46 MB)
+    version = await asyncio.get_running_loop().run_in_executor(None, _spotdl_version_sync)
     tu = _state.setdefault("tool_updates", {})
     alt = tu.get("spotdl") or {}
     tu["spotdl"] = {"current": version or "", "latest": alt.get("latest", ""),

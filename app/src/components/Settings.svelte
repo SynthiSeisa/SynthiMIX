@@ -464,7 +464,7 @@
             <div class="group-title">BPM-Schätzung</div>
             <div class="row">
               <span class="lbl">BPM beim Abspielen analysieren</span>
-              <button class="tog {$appSettings.bpmAnalysis ? 'on' : ''}"
+              <button class="tog {$appSettings.bpmAnalysis ? 'on' : ''}" aria-label="BPM beim Abspielen analysieren"
                 onclick={() => {
                   const next = !$appSettings.bpmAnalysis
                   appSettings.update(s => ({...s, bpmAnalysis: next}))
@@ -479,7 +479,7 @@
             <div class="row">
               <span class="lbl">Wenn die Warteschlange leer ist</span>
               <div class="btn-group">
-                {#each [['stop','Stopp'],['automix','Auto-Mix'],['repeat','Wiederholen']] as [val, label]}
+                {#each [['stop','Stopp'],['automix','Radio'],['repeat','Wiederholen']] as [val, label]}
                   <button class="btn btn-sm" class:is-active={queueEnd === val}
                           onclick={() => setQueueEnd(val)}>
                     {label}
@@ -489,7 +489,7 @@
             </div>
             <div class="hint keep sub">
               {#if queueEnd === 'stop'}Wiedergabe endet nach dem letzten Track
-              {:else if queueEnd === 'automix'}Sucht automatisch ähnliche Songs weiter
+              {:else if queueEnd === 'automix'}Spielt passende Titel weiter — meist aus der Bibliothek, ab und zu etwas Neues
               {:else}Queue startet von vorne (alle Tracks){/if}
             </div>
           </div>
@@ -562,7 +562,7 @@
 
             <div class="row">
               <span class="lbl">Aktiv</span>
-              <button class="tog {$appSettings.smartFade ? 'on' : ''}"
+              <button class="tog {$appSettings.smartFade ? 'on' : ''}" aria-label="Intelligenter Fade aktiv"
                 onclick={() => appSettings.update(s => ({...s, smartFade: !s.smartFade}))}></button>
             </div>
 
@@ -743,7 +743,7 @@
 
             <div class="row">
               <span class="lbl">In eigenem Ordner speichern</span>
-              <button class="tog {$playlistFolderEnabled ? 'on' : ''}"
+              <button class="tog {$playlistFolderEnabled ? 'on' : ''}" aria-label="In eigenem Ordner speichern"
                 onclick={() => setPlaylistFolder(!$playlistFolderEnabled)}></button>
             </div>
             <div class="hint keep sub">
@@ -768,7 +768,7 @@
 
             <div class="row">
               <span class="lbl">Loudnorm aktiv</span>
-              <button class="tog {$loudnormOnDl ? 'on' : ''}"
+              <button class="tog {$loudnormOnDl ? 'on' : ''}" aria-label="Loudnorm aktiv"
                 onclick={() => { loudnormOnDl.update(v => !v); sendLoudnorm() }}></button>
             </div>
             <div class="hint">Fügt einen ffmpeg loudnorm-Pass zu yt-dlp hinzu (etwas langsamer)</div>
@@ -1375,8 +1375,8 @@
           </div>
 
           <div class="group">
-            <div class="group-title">Auto-Mix</div>
-            <div class="hint">Sucht ähnliche Songs aus der Bibliothek wenn die Queue leer ist. Aktivierbar im Queue-Menü oder unter Wiedergabe → Queue-Ende.</div>
+            <div class="group-title">Radio</div>
+            <div class="hint">Hält die Warteschlange mit passenden Titeln gefüllt: Richtung aus den letzten Titeln, Tonart, Tempo, Energie und Genre wie beim harmonischen Sortieren; mit Last.fm-Key auch ähnliche Titel und Künstler. Jeder 5. Titel ist neu und wird im Hintergrund geladen. Radio-Knopf in der Warteschlange (dauerhaft) oder Wiedergabe → Queue-Ende → Radio (erst am Ende).</div>
           </div>
 
         {/if}
@@ -1486,7 +1486,6 @@
   .svc-note.err { color: var(--c-red-tx); }
   .svc-actions { display: flex; justify-content: flex-end; }
   .opt { font-size: var(--fs-cap); color: var(--c-tx4); margin-left: 4px; }
-  .hint strong { color: var(--c-tx1); }
   .dimmed { opacity: .5; }
   .st-ok { color: var(--c-green-tx); font-weight: 600; }
   .st-busy { color: var(--c-accent-tx); }

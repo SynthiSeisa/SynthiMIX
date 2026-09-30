@@ -30,15 +30,15 @@ async def lifespan(application: FastAPI):
     store.load_notes()
     remote.load_wishes()
     remote._resume_wishes()
-    asyncio.create_task(library._watcher_loop())
-    asyncio.create_task(library._auto_scan_loop())
-    asyncio.create_task(tools._ytdlp_autoupdate_loop())
-    asyncio.create_task(media._refresh_tag_meta_loop())
-    asyncio.create_task(quality._quality_scan_loop())
-    asyncio.create_task(media._loud_main_loop())
-    asyncio.create_task(download._temp_cleanup_loop())
-    asyncio.create_task(download._follow_startup())
-    asyncio.create_task(library._fileid_scan_task())
+    core.spawn(library._watcher_loop())
+    core.spawn(library._auto_scan_loop())
+    core.spawn(tools._ytdlp_autoupdate_loop())
+    core.spawn(media._refresh_tag_meta_loop())
+    core.spawn(quality._quality_scan_loop())
+    core.spawn(media._loud_main_loop())
+    core.spawn(download._temp_cleanup_loop())
+    core.spawn(download._follow_startup())
+    core.spawn(library._fileid_scan_task())
     print(f"[backend] ready on ws://127.0.0.1:{core._BACKEND_PORT}/ws", flush=True)
     yield
     # Beenden (auch vor einem Update): nichts Gemessenes verlieren
@@ -126,7 +126,7 @@ async def handle_message(ws: WebSocket, msg: dict):
 
     if t == "get_state":
         # Laufwerksbuchstabe geaendert? Nebenher pruefen und ggf. vorschlagen
-        asyncio.create_task(_send_relocate(ws, manual=False))
+        core.spawn(_send_relocate(ws, manual=False))
         await ws.send_text(json.dumps({"type": "queue", "items": _state["queue"],
                                        "current_idx": _state["current_idx"]}))
         await core.push_player()
@@ -177,7 +177,7 @@ async def handle_message(ws: WebSocket, msg: dict):
             saved = _state.get("remote_services_saved") or {"remote": True, "wishes": True}
             remote._remote_services.update(remote=bool(saved.get("remote")), wishes=bool(saved.get("wishes")))
             if any(remote._remote_services.values()):
-                asyncio.create_task(remote._start_remote_server(ws))
+                core.spawn(remote._start_remote_server(ws))
         else:
             await ws.send_text(json.dumps(remote._remote_status_msg()))
 
@@ -201,7 +201,7 @@ async def handle_message(ws: WebSocket, msg: dict):
                 await core.push_queue()
                 await core.push_player()
                 await core.broadcast({"type": "now_playing", "track": track})
-                asyncio.create_task(media._enrich_track(track["path"]))
+                core.spawn(media._enrich_track(track["path"]))
             else:
                 await core.push_queue()
 
@@ -246,16 +246,16 @@ async def handle_message(ws: WebSocket, msg: dict):
             await core.push_library()
             now = {**track}
             await core.broadcast({"type": "now_playing", "track": now})
-            asyncio.create_task(media._enrich_track(track["path"]))
+            core.spawn(media._enrich_track(track["path"]))
             # Pre-enrich next track so Deck 2 has real LUFS before crossfade
             nxt_idx = idx + 1
             if 0 <= nxt_idx < len(_state["queue"]):
                 nxt_path = _state["queue"][nxt_idx].get("path", "")
                 if nxt_path and nxt_path not in media._unanalyzable_paths and _state["queue"][nxt_idx].get("lufs", -99) <= -90:
-                    asyncio.create_task(media._enrich_track(nxt_path))
-            # Auto-Mix: start download early when this is the last track
+                    core.spawn(media._enrich_track(nxt_path))
+            # Queue-Ende: Radio — beim letzten Titel schon den naechsten anhaengen
             elif nxt_idx >= len(_state["queue"]) and _state.get("auto_mix", True):
-                asyncio.create_task(automix._do_automix(track.get("title", "")))
+                core.spawn(automix._at_queue_end())
 
     elif t == "play_now":
         track = {
@@ -283,17 +283,13 @@ async def handle_message(ws: WebSocket, msg: dict):
         await core.push_queue()
         await core.push_player()
         await core.broadcast({"type": "now_playing", "track": track})
-        asyncio.create_task(media._enrich_track(track["path"]))
+        core.spawn(media._enrich_track(track["path"]))
         # Pre-enrich next track so Deck 2 has real LUFS before crossfade
         nxt_idx = _state["current_idx"] + 1
         if 0 <= nxt_idx < len(_state["queue"]):
             nxt_path = _state["queue"][nxt_idx].get("path", "")
             if nxt_path and _state["queue"][nxt_idx].get("lufs", -99) <= -90:
-                asyncio.create_task(media._enrich_track(nxt_path))
-
-    elif t == "get_wishes":
-        await ws.send_text(json.dumps({"type": "wishes", "items": _state.get("wishes", [])}))
-
+                core.spawn(media._enrich_track(nxt_path))
     elif t == "wish_accept":
         wid = msg.get("id")
         w = next((x for x in _state.get("wishes", []) if x.get("id") == wid), None)
@@ -348,7 +344,7 @@ async def handle_message(ws: WebSocket, msg: dict):
         path = msg.get("path", "")
         force = bool(msg.get("force", False))
         if path and os.path.exists(path):
-            asyncio.create_task(media._enrich_track(path, force=force))
+            core.spawn(media._enrich_track(path, force=force))
 
     elif t == "play_next":
         nxt = _state["current_idx"] + 1
@@ -385,7 +381,7 @@ async def handle_message(ws: WebSocket, msg: dict):
         _state["position_ms"] = msg.get("position_ms", 0)
         _state["duration_ms"] = msg.get("duration_ms", _state["duration_ms"])
         if remote._remote_clients:
-            asyncio.create_task(remote._broadcast_remote_pos())
+            core.spawn(remote._broadcast_remote_pos())
 
     elif t == "seek_relative":
         delta  = int(msg.get("delta_ms", 0))
@@ -394,13 +390,6 @@ async def handle_message(ws: WebSocket, msg: dict):
             new_pos = min(new_pos, _state["duration_ms"] - 200)
         _state["position_ms"] = new_pos
         await core.push_player()
-
-    elif t == "library_remove":
-        path = msg.get("path", "")
-        _state["library"] = [lt for lt in _state["library"] if lt.get("path") != path]
-        store.save_library()
-        await core.push_library()
-
     elif t == "library_remove_disk_many":
         # Mehrere Titel auf einmal: ein Papierkorb-Aufruf, einmal speichern und
         # schicken. Frueher je Titel alles einzeln — bei 190 Kopien Minuten.
@@ -420,30 +409,12 @@ async def handle_message(ws: WebSocket, msg: dict):
                 await core.broadcast({"type": "scan_status", "text": f"{len(gone)} Titel in den Papierkorb verschoben"})
                 await asyncio.sleep(4)
                 await core.broadcast({"type": "scan_status", "text": ""})
-
-    elif t == "library_remove_disk":
-        path = msg.get("path", "")
-        if path:
-            # Erst in den Papierkorb, dann aus der Bibliothek. Frueher lief es
-            # andersherum, und ein fehlgeschlagenes Loeschen fiel niemandem auf:
-            # Eintrag weg, Datei noch da.
-            ok = True
-            if os.path.exists(path):
-                ok = await asyncio.get_running_loop().run_in_executor(None, library._move_to_trash, path)
-            if ok:
-                _state["library"] = [lt for lt in _state["library"] if lt.get("path") != path]
-                store.save_library()
-                await core.push_library()
-            else:
-                await core.broadcast({"type": "scan_status",
-                                 "text": f"Konnte nicht in den Papierkorb: {Path(path).name} (in Benutzung?)"})
-
     elif t == "set_volume":
         _state["volume"] = min(100, max(0, int(float(msg.get("value", 80)))))
         store.save_settings()
         await core.broadcast({"type": "settings", "volume": _state["volume"], "crossfade_s": _state["crossfade_s"]})
         if remote._remote_clients:
-            asyncio.create_task(remote._broadcast_remote_state())
+            core.spawn(remote._broadcast_remote_state())
 
     elif t == "set_normalize_volume":
         _state["normalize_volume"] = bool(msg.get("value", True))
@@ -452,7 +423,7 @@ async def handle_message(ws: WebSocket, msg: dict):
         store.save_settings()
         await core.broadcast({"type": "settings", "normalize_volume": _state["normalize_volume"], "target_lufs": _state["target_lufs"]})
         if remote._remote_clients:
-            asyncio.create_task(remote._broadcast_remote_state())
+            core.spawn(remote._broadcast_remote_state())
 
     elif t == "set_crossfade":
         _state["crossfade_s"] = msg.get("seconds", 4)
@@ -536,16 +507,16 @@ async def handle_message(ws: WebSocket, msg: dict):
     elif t in ("get_waveform", "get_waveform_next", "get_waveform_third"):
         # Nebenher: frueher wartete jede weitere Anfrage des Fensters, bis die
         # Waveform fertig war. Die Oberflaeche prueft den Pfad der Antwort.
-        asyncio.create_task(_send_waveform(ws, t[4:], msg.get("path", "")))
+        core.spawn(_send_waveform(ws, t[4:], msg.get("path", "")))
 
     elif t == "get_changelog":
         # Fragt GitHub — bei langsamer Leitung Sekunden. Nicht in der Reihe warten.
-        asyncio.create_task(_send_changelog(ws))
+        core.spawn(_send_changelog(ws))
 
     elif t == "get_beatgrid":
         path = msg.get("path", "")
         if path:
-            asyncio.create_task(beatgrid._send_beatgrid(ws, path))
+            core.spawn(beatgrid._send_beatgrid(ws, path))
 
 
     elif t == "scan_library":
@@ -566,7 +537,7 @@ async def handle_message(ws: WebSocket, msg: dict):
             # schlicht nichts, etwa wenn der Knopf aus dem Remote kam.
             for f in library._scan_folders():
                 await library.scan_folder(f)
-        asyncio.create_task(_scan_all())
+        core.spawn(_scan_all())
 
     elif t == "get_watched_folders":
         await ws.send_text(json.dumps({"type": "watched_folders", "items": library._watched_folders_info()}))
@@ -636,31 +607,31 @@ async def handle_message(ws: WebSocket, msg: dict):
         dupe_checked = bool(msg.get("dupe_checked"))
         if url:
             if download._is_spotify(url):
-                asyncio.create_task(download.run_spotify_download(url, fmt))
+                core.spawn(download.run_spotify_download(url, fmt))
             elif msg.get("plan_id") is not None:
                 # Entscheidung aus dem Playlist-Kaestchen: nur neue / alle / als Playlist
                 plan = download._plans.pop(int(msg["plan_id"]), None)
                 if plan:
-                    asyncio.create_task(download.run_download(
+                    core.spawn(download.run_download(
                         plan["url"], fmt, entries=plan["entries"], folder=download._folder_name(plan["title"]),
                         label=plan["title"] or None, mode=msg.get("plist_mode") or "new",
                         follow_new=bool(msg.get("follow"))))
             elif channels._channel_base(url) and not msg.get("direct"):
                 # Kanal-Link: Playlists des Kanals zur Auswahl (verfolgen)
                 if url not in download._plan_tasks:
-                    asyncio.create_task(channels._plan_channel(url, fmt, ws))
+                    core.spawn(channels._plan_channel(url, fmt, ws))
             elif choice is None and download._is_mixed_playlist_url(url):
-                asyncio.create_task(download._ask_playlist_choice(url, fmt, ws))
+                core.spawn(download._ask_playlist_choice(url, fmt, ws))
             elif choice != "single" and url.startswith("http") and download._is_playlist(url) and not msg.get("direct"):
                 if url not in download._plan_tasks:
-                    asyncio.create_task(download._plan_playlist(url, fmt, ws))
+                    core.spawn(download._plan_playlist(url, fmt, ws))
             else:
                 if choice == "single":
                     url = download._strip_playlist_params(url)
                 if video_choice is None and search._is_single_link(url):
-                    asyncio.create_task(download._check_video_then_download(url, fmt, ws, check_dupes=not dupe_checked))
+                    core.spawn(download._check_video_then_download(url, fmt, ws, check_dupes=not dupe_checked))
                 else:
-                    asyncio.create_task(download.run_download(url, fmt))
+                    core.spawn(download.run_download(url, fmt))
 
     elif t == "set_spotify_creds":
         _state["spotify_client_id"]     = str(msg.get("client_id", "")).strip()
@@ -682,9 +653,9 @@ async def handle_message(ws: WebSocket, msg: dict):
         store.save_settings()
         await core.broadcast({"type": "radio_status", "enabled": _state["radio_enabled"]})
         if remote._remote_clients:
-            asyncio.create_task(remote._broadcast_remote_state())
+            core.spawn(remote._broadcast_remote_state())
         if _state["radio_enabled"]:
-            asyncio.create_task(automix._check_radio_queue())
+            core.spawn(automix._check_radio_queue())
 
     elif t == "identify_track":
         path = msg.get("path", "")
@@ -693,10 +664,10 @@ async def handle_message(ws: WebSocket, msg: dict):
             await ws.send_text(json.dumps({"type": "track_identified", **result}))
 
     elif t == "download_fpcalc":
-        asyncio.create_task(tools._download_fpcalc(ws))
+        core.spawn(tools._download_fpcalc(ws))
 
     elif t == "install_spotdl":
-        asyncio.create_task(tools._install_spotdl(ws))
+        core.spawn(tools._install_spotdl(ws))
 
     elif t == "download_stop":
         # Kill entire session (all tracks) and terminate subprocess
@@ -751,13 +722,13 @@ async def handle_message(ws: WebSocket, msg: dict):
         await core.broadcast({"type": "mix_now"})
 
     elif t == "channel_follow":
-        asyncio.create_task(channels._channel_follow(msg))
+        core.spawn(channels._channel_follow(msg))
 
     elif t == "channel_plan_open":
         # Auswahl der Playlists eines verfolgten Kanals erneut oeffnen
         ch = channels._channel_of(msg.get("url") or "")
         if ch and ch["url"] not in download._plan_tasks:
-            asyncio.create_task(channels._plan_channel(ch["url"], ch.get("fmt") or "mp3-best", ws))
+            core.spawn(channels._plan_channel(ch["url"], ch.get("fmt") or "mp3-best", ws))
 
     elif t == "channel_set":
         ch = channels._channel_of(msg.get("url") or "")
@@ -772,7 +743,7 @@ async def handle_message(ws: WebSocket, msg: dict):
 
     elif t == "follow_check":
         url = msg.get("url")
-        asyncio.create_task(download._follow_check_all([url] if url else None))
+        core.spawn(download._follow_check_all([url] if url else None))
 
     elif t == "download_retry_failed":
         # z. B. zuhause, wenn unterwegs vieles gesperrt war
@@ -786,7 +757,7 @@ async def handle_message(ws: WebSocket, msg: dict):
             await core.push_downloads(force=True)
             entries = [{"url": d["url"], "title": d.get("title") or "", "replaced": False, "duration": 0}
                        for d in failed]
-            asyncio.create_task(download.run_download("", hdr.get("fmt") or "mp3-best", entries=entries,
+            core.spawn(download.run_download("", hdr.get("fmt") or "mp3-best", entries=entries,
                                              folder=hdr.get("folder"),
                                              label=f"Nochmal: {hdr.get('session_label') or 'Downloads'}"[:60]))
 
@@ -1050,12 +1021,7 @@ async def handle_message(ws: WebSocket, msg: dict):
     elif t == "get_download_tree":
         # Im Hintergrund-Thread: beim ganzen Musikordner dauerte das Einlesen
         # ~0,4 s und hielt so lange den ganzen Server an (auch die Waveform)
-        asyncio.create_task(_send_download_tree(ws))
-
-    elif t == "get_playlists":
-        await ws.send_text(json.dumps({"type": "playlists",
-                                       "items": library._get_playlists()}))
-
+        core.spawn(_send_download_tree(ws))
     elif t == "get_playlist_content":
         pl_path = msg.get("path", "")
         if os.path.exists(pl_path):
@@ -1134,35 +1100,18 @@ async def handle_message(ws: WebSocket, msg: dict):
                                                "path": pl_path, "tracks": result}))
             except Exception as e:
                 print(f"[playlist_remove_track] {e}")
-
-    elif t == "find_duplicates":
-        import unicodedata
-        def norm_title(s):
-            s = unicodedata.normalize('NFKC', (s or '').lower().strip())
-            return re.sub(r'[^\w\s]', '', re.sub(r'\s+', ' ', s))
-        seen = {}
-        dupes = []
-        for lt in _state["library"]:
-            key = norm_title(lt.get("title", ""))
-            if key in seen:
-                if seen[key] not in dupes: dupes.append(seen[key])
-                dupes.append(lt["path"])
-            else:
-                seen[key] = lt["path"]
-        await ws.send_text(json.dumps({"type": "duplicates", "paths": dupes}))
-
     elif t == "title_suggest":
         paths = msg.get("paths")
-        asyncio.create_task(tags._title_suggest(ws, online=bool(msg.get("online", False)),
+        core.spawn(tags._title_suggest(ws, online=bool(msg.get("online", False)),
                                            only=set(paths) if isinstance(paths, list) and paths else None))
 
     elif t == "title_apply":
-        asyncio.create_task(tags._title_apply(msg.get("items") or [], ws))
+        core.spawn(tags._title_apply(msg.get("items") or [], ws))
 
     elif t == "fingerprint_suggest":
         paths = msg.get("paths")
         if isinstance(paths, list) and paths:
-            asyncio.create_task(tags._fingerprint_suggest(ws, [p for p in paths if isinstance(p, str)]))
+            core.spawn(tags._fingerprint_suggest(ws, [p for p in paths if isinstance(p, str)]))
 
     elif t == "title_cancel":
         tags._title_cancel = True
@@ -1170,10 +1119,10 @@ async def handle_message(ws: WebSocket, msg: dict):
     elif t == "genre_suggest":
         if "folder_rules" in msg:
             tags._genre_rules_save(msg.get("folder_rules") or {})
-        asyncio.create_task(tags._genre_suggest(ws, online=bool(msg.get("online", True))))
+        core.spawn(tags._genre_suggest(ws, online=bool(msg.get("online", True))))
 
     elif t == "genre_apply":
-        asyncio.create_task(tags._genre_apply(msg.get("items") or [], ws))
+        core.spawn(tags._genre_apply(msg.get("items") or [], ws))
 
     elif t == "genre_cancel":
         tags._genre_cancel = True
@@ -1190,10 +1139,10 @@ async def handle_message(ws: WebSocket, msg: dict):
     elif t == "quality_batch":
         paths = [str(x) for x in (msg.get("paths") or [])]
         if paths:
-            asyncio.create_task(quality._quality_batch(paths, ws))
+            core.spawn(quality._quality_batch(paths, ws))
 
     elif t == "quality_batch_replace":
-        asyncio.create_task(quality._quality_batch_replace(msg.get("items") or [], ws))
+        core.spawn(quality._quality_batch_replace(msg.get("items") or [], ws))
 
     elif t == "quality_batch_cancel":
         quality._qbatch_cancel = True
@@ -1201,16 +1150,16 @@ async def handle_message(ws: WebSocket, msg: dict):
     elif t == "quality_candidates":
         path = msg.get("path", "")
         if path:
-            asyncio.create_task(quality._quality_candidates(path, msg.get("query", ""), ws))
+            core.spawn(quality._quality_candidates(path, msg.get("query", ""), ws))
 
     elif t == "quality_replace":
         path, url = msg.get("path", ""), msg.get("url", "")
         if path and url:
-            asyncio.create_task(quality._quality_replace(path, url, ws))
+            core.spawn(quality._quality_replace(path, url, ws))
 
     elif t == "analyze_library_meta":
         paths = msg.get("paths")
-        asyncio.create_task(media._analyze_library_meta_task(
+        core.spawn(media._analyze_library_meta_task(
             [str(p) for p in paths] if isinstance(paths, list) else None))
 
     elif t == "cancel_analyze":
@@ -1221,16 +1170,15 @@ async def handle_message(ws: WebSocket, msg: dict):
         title  = (msg.get("title") or "").strip()
         artist = (msg.get("artist") or "").strip()
         if path and os.path.exists(path) and title:
-            asyncio.create_task(media._update_track_meta(path, title, artist))
+            core.spawn(media._update_track_meta(path, title, artist))
 
     elif t == "set_bpm_analysis":
         _state["bpm_analysis"] = bool(msg.get("enabled", True))
         store.save_settings()
 
     elif t == "automix_trigger":
-        title = (msg.get("title") or "").strip()
-        if title and _state.get("auto_mix", True):
-            asyncio.create_task(automix._do_automix(title))
+        if _state.get("auto_mix", True):
+            core.spawn(automix._at_queue_end())
 
     elif t == "set_auto_mix":
         _state["auto_mix"] = bool(msg.get("value", True))
@@ -1238,7 +1186,7 @@ async def handle_message(ws: WebSocket, msg: dict):
         # Kann jetzt auch vom Handy kommen — App und Fernbedienung nachziehen
         await core.broadcast({"type": "settings", "auto_mix": _state["auto_mix"]})
         if remote._remote_clients:
-            asyncio.create_task(remote._broadcast_remote_state())
+            core.spawn(remote._broadcast_remote_state())
 
     elif t == "get_history":
         await ws.send_text(json.dumps(store._history_payload()))
@@ -1321,16 +1269,16 @@ async def handle_message(ws: WebSocket, msg: dict):
         target_lufs = float(msg.get("target_lufs", -14.0))
         target_tp   = float(msg.get("target_tp", -1.5))
         if paths:
-            asyncio.create_task(media._normalize_files(paths, target_lufs, target_tp, ws))
+            core.spawn(media._normalize_files(paths, target_lufs, target_tp, ws))
 
     elif t == "get_logs":
         await ws.send_json({"type": "logs", "lines": list(core._log_buffer)})
 
     elif t == "check_tools":
-        asyncio.create_task(tools._check_tools(ws))
+        core.spawn(tools._check_tools(ws))
 
     elif t == "relocate_detect":
-        asyncio.create_task(_send_relocate(ws, manual=True))
+        core.spawn(_send_relocate(ws, manual=True))
 
     elif t == "relocate_apply":
         old, new = str(msg.get("from") or ""), str(msg.get("to") or "")
@@ -1340,13 +1288,13 @@ async def handle_message(ws: WebSocket, msg: dict):
             await core.broadcast({"type": "relocated", "from": old, "to": new, **res})
 
     elif t == "update_ytdlp":
-        asyncio.create_task(tools._update_ytdlp(ws))
+        core.spawn(tools._update_ytdlp(ws))
 
     elif t == "update_ffmpeg":
-        asyncio.create_task(tools._update_ffmpeg(ws))
+        core.spawn(tools._update_ffmpeg(ws))
 
     elif t == "check_tool_updates":
-        asyncio.create_task(tools._tools_check_once(force=True))
+        core.spawn(tools._tools_check_once(force=True))
 
     elif t == "dismiss_ytdlp_updated":
         # Ein OK fuer alle Hinweise "wurde aktualisiert"
@@ -1393,14 +1341,16 @@ async def websocket_endpoint(ws: WebSocket):
     try:
         while True:
             data = await ws.receive_text()
-            msg  = json.loads(data)
-            # Isolate per-message failures: a bug in one handler must not tear
-            # down the whole connection (which would break all playback).
+            # Fehler in einer Nachricht (auch kaputtes JSON) duerfen nie die
+            # ganze Verbindung beenden — daran haengt die Wiedergabe
             try:
+                msg = json.loads(data)
+                if not isinstance(msg, dict):
+                    continue
                 await handle_message(ws, msg)
             except Exception:
                 import traceback
-                print(f"[handler error] type={msg.get('type')!r}", file=sys.stderr)
+                print(f"[handler error] {data[:80]!r}", file=sys.stderr)
                 traceback.print_exc()
     except WebSocketDisconnect:
         pass

@@ -2,7 +2,7 @@
 import os
 
 from tests.support import BackendTest, main
-from synthimix import beatgrid, core, media, relocate, store
+from synthimix import beatgrid, core, relocate, store
 
 
 class Relocate(BackendTest):

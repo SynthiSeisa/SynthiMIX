@@ -127,9 +127,7 @@ async def _plan_channel(url: str, fmt: str, ws: WebSocket):
     """Playlists des Kanals lesen und zur Auswahl schicken."""
     global _channel_plan_counter
 
-    async def _send(t, **kw):
-        try: await ws.send_text(json.dumps({"type": t, **kw}))
-        except Exception: pass
+    _send = core.sender(ws)
 
     base = _channel_base(url)
     await _send("playlist_plan_pending", url=url, kind="channel")
@@ -191,7 +189,7 @@ async def _channel_follow(msg: dict):
     await download._push_followed()
     if new:
         # Alles laden: jede neue Playlist einmal komplett (was schon da ist, wird verknuepft/uebersprungen)
-        asyncio.create_task(download._follow_check_all([f["url"] for f in new]))
+        core.spawn(download._follow_check_all([f["url"] for f in new]))
 
 
 async def _channel_check(ch: dict) -> list[str]:

@@ -71,10 +71,10 @@ async def _playlist_probe(url: str) -> dict:
         except Exception:
             return []
 
-    pl_task = asyncio.create_task(_run(
+    pl_task = core.spawn(_run(
         ["--flat-playlist", "--playlist-items", "1",
          "--print", "%(playlist_title)s", "--print", "%(playlist_count)s"]))
-    tr_task = asyncio.create_task(_run(
+    tr_task = core.spawn(_run(
         ["--no-playlist", "--skip-download", "--print", "%(title)s"]))
     pl_lines, tr_lines = await asyncio.gather(pl_task, tr_task)
 
@@ -93,9 +93,7 @@ async def _playlist_probe(url: str) -> dict:
 
 async def _ask_playlist_choice(url: str, fmt: str, ws: WebSocket):
     """Nachfragen, ob nur der Titel oder die ganze Playlist geladen wird."""
-    async def _send(t, **kw):
-        try: await ws.send_text(json.dumps({"type": t, **kw}))
-        except Exception: pass
+    _send = core.sender(ws)
 
     await _send("playlist_choice_pending", url=url)
     info = await _playlist_probe(url)
@@ -104,7 +102,7 @@ async def _ask_playlist_choice(url: str, fmt: str, ws: WebSocket):
     # mit einer sinnlosen Rueckfrage aufhalten, sondern einfach den Titel laden.
     if info["count"] <= 1:
         await _send("playlist_choice_cancel")
-        asyncio.create_task(_check_video_then_download(_strip_playlist_params(url), fmt, ws))
+        core.spawn(_check_video_then_download(_strip_playlist_params(url), fmt, ws))
         return
 
     await _send("playlist_choice", url=url, format=fmt, **info)
@@ -292,9 +290,7 @@ async def _check_video_then_download(url: str, fmt: str, ws: WebSocket, check_du
     gefragt (trotzdem laden oder zur Datei springen). Bei YouTube-Musikvideos
     wird die Studio-Version angeboten. Faellt die Pruefung aus (kein Netz,
     Zeitlimit), wird ohne Rueckfrage geladen wie bisher."""
-    async def _send(t, **kw):
-        try: await ws.send_text(json.dumps({"type": t, **kw}))
-        except Exception: pass
+    _send = core.sender(ws)
 
     await _send("video_check_pending", url=url)
     matches: list[dict] = []
@@ -324,7 +320,7 @@ async def _check_video_then_download(url: str, fmt: str, ws: WebSocket, check_du
                     song={"url": song["url"], "title": song["title"],
                           "uploader": song.get("artist") or song["uploader"], "duration": song["duration"]})
         return
-    asyncio.create_task(run_download(url, fmt))
+    core.spawn(run_download(url, fmt))
 
 async def run_spotify_download(url: str, fmt_id: str = "mp3-best"):
     """Download a Spotify track/album/playlist via spotdl."""
@@ -405,7 +401,7 @@ async def run_spotify_download(url: str, fmt_id: str = "mp3-best"):
                 if ln:
                     error_lines.append(ln)
                     print('[spotdl err] ' + ln, flush=True)
-        asyncio.create_task(_read_stderr())
+        core.spawn(_read_stderr())
 
         async for raw in proc.stdout:
             if hdr not in _state['downloads']:
@@ -449,7 +445,7 @@ async def run_spotify_download(url: str, fmt_id: str = "mp3-best"):
                 hdr['status']      = 'done'
                 hdr['status_text'] = '✓ ' + str(track_done) + ' Titel'
                 hdr['progress']    = 100
-                asyncio.create_task(library.scan_folder(out_dir))
+                core.spawn(library.scan_folder(out_dir))
             else:
                 err_msg = 'spotdl Fehler'
                 for ln in reversed(error_lines):
@@ -512,9 +508,7 @@ def _plan_stats(entries: list[dict]) -> dict:
     return {"total": total, "have": have, "dupes": dupes, "new": total - have - dupes}
 
 async def _plan_playlist(url: str, fmt: str, ws):
-    async def _send(t, **kw):
-        try: await ws.send_text(json.dumps({"type": t, **kw}))
-        except Exception: pass
+    _send = core.sender(ws)
     global _plan_counter
     await _send("playlist_plan_pending", url=url)
     last = [0.0]
@@ -539,7 +533,7 @@ async def _plan_playlist(url: str, fmt: str, ws):
     if not entries:
         # Pruefung ging nicht: wie frueher einfach laden
         await _send("playlist_plan_cancel", url=url)
-        asyncio.create_task(run_download(url, fmt))
+        core.spawn(run_download(url, fmt))
         return
     if not title:
         try: title = (await _playlist_probe(url)).get("playlist_title") or ""
@@ -672,7 +666,7 @@ async def _follow_check(f: dict):
         f["last_new"] = len(neu)
         if neu:
             await asyncio.sleep(2)            # Bibliothek traegt neue Dateien nach
-            asyncio.create_task(media._analyze_library_meta_task(neu))
+            core.spawn(media._analyze_library_meta_task(neu))
     except Exception as e:
         print(f"[verfolgen] {url}: {e}", flush=True)
     finally:
@@ -855,7 +849,7 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
         item["status_text"] = "✓ Vorhanden" if skipped else "✓ Fertig" if ok else "✗ Fehler"
         # Auto-add to library when a new file is downloaded
         if ok and not skipped and item.get("path") and os.path.exists(item["path"]):
-            asyncio.create_task(media._auto_add_to_library(item["path"]))
+            core.spawn(media._auto_add_to_library(item["path"]))
 
     track_n     = 0
     track_total = 0

@@ -1538,11 +1538,6 @@
     if (v !== volume) setVolume(v)
   }
 
-  function setCrossfade(v) {
-    cfS = +v
-    send({ type: 'set_crossfade', seconds: cfS })
-  }
-
   const pos = $derived(durMs > 0 ? posMs / durMs : 0)
 
   // Nur beim Entwickeln: Einblick fuer automatische Tests (fehlt im fertigen Build)
@@ -1621,14 +1616,13 @@
           {#if $nowPlaying?.bpm}<span class="m-num">{$nowPlaying.bpm} BPM</span>
           {:else if $nowPlaying}<span class="bpm-pending">BPM wird gemessen…</span>{/if}
           <!-- LUFS nur auf Wunsch (Einstellungen → Darstellung) -->
-          {#if !$appSettings.playerShowLufs}
-          {:else if lufsOf($nowPlaying) > -90}
+          {#if $appSettings.playerShowLufs && lufsOf($nowPlaying) > -90}
             {#if $appSettings.normalizeVolume}
               <span class="m-num norm-on" title="Lautstärke-Angleichung an: der Hauptteil ({lufsOf($nowPlaying).toFixed(1)} LUFS) wird auf {$appSettings.targetLUFS} LUFS gebracht (Einstellungen → Wiedergabe)"><b>≋</b> {lufsOf($nowPlaying).toFixed(1)} → {$appSettings.targetLUFS} LUFS</span>
             {:else}
               <span class="m-num" title="Lautstärke-Angleichung aus (Einstellungen → Wiedergabe)">{lufsOf($nowPlaying).toFixed(1)} LUFS</span>
             {/if}
-          {:else if $appSettings.normalizeVolume && $nowPlaying}
+          {:else if $appSettings.playerShowLufs && $appSettings.normalizeVolume && $nowPlaying}
             <span class="lufs-warn" title="Keine Lautstärkemessung — Normalisierung nicht aktiv für diesen Track">kein LUFS-Wert</span>
           {/if}
           {#if bassSwapOn}<span class="swap-badge" title="Übergang im Takt: Bass wird weich getauscht (Einstellungen → Blend)"><i class="ti ti-arrows-exchange" aria-hidden="true"></i> Bass</span>{/if}
@@ -1643,7 +1637,7 @@
              style={blendP > 0 ? `transform:translateY(${-blendP * 100}%);opacity:${1 - blendP}` : ''}>
           <Waveform data={$waveform} position={pos} onclick={seek} height={WF1_H}
                     outroStart={outroBarStart} outroEnd={outroBarEnd}
-                    band introMark={curIntroMark} outroMark={curOutroMark}
+                    introMark={curIntroMark} outroMark={curOutroMark}
                     dragZone="outro" onzonedrag={dragOutro}
                     zoneTitle="MIX-Zone ziehen: Übergang früher oder später starten (nur dieses Mal)"
                     loading={$nowPlaying !== null && $waveform.length === 0} />
@@ -1674,7 +1668,7 @@
               <Waveform data={$waveformNext} position={blendP > 0 ? blendNextPos : 0} height={WF2_H}
                         introStart={nextIntroStart} introEnd={nextIntroEnd}
                         outroStart={nextOutroZone?.[0] ?? -1} outroEnd={nextOutroZone?.[1] ?? -1}
-                        band bandLabels={blendP === 0} introMark={nextIntroMark} outroMark={nextOutroMark}
+                        bandLabels={blendP === 0} introMark={nextIntroMark} outroMark={nextOutroMark}
                         dragZone="both" onzonedrag={(f, done, kind) => kind === 'outro' ? dragNextOutro(f, done) : dragIntro(f, done)}
                         zoneTitle={{ intro: 'MIX-Zone ziehen: an anderer Stelle in den nächsten Titel einsteigen (nur dieses Mal)',
                                      outro: 'MIX-Zone ziehen: wenn dieser Titel läuft, früher oder später ausmischen (nur dieses Mal)' }} />
@@ -1697,7 +1691,7 @@
               <Waveform data={thirdWf} position={0} height={WF2_H}
                         introStart={thirdIntroStart} introEnd={thirdIntroEnd}
                         outroStart={thirdOutroZone?.[0] ?? -1} outroEnd={thirdOutroZone?.[1] ?? -1}
-                        band introMark={thirdIntroMark} outroMark={thirdOutroMark} />
+                        introMark={thirdIntroMark} outroMark={thirdOutroMark} />
             </div>
           {/if}
         {/if}

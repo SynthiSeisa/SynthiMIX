@@ -101,9 +101,7 @@ async def _title_suggest(ws: WebSocket, online: bool = False, only: set | None =
     global _title_cancel
     _title_cancel = False
 
-    async def send(t, **kw):
-        try: await ws.send_text(json.dumps({"type": t, **kw}))
-        except Exception: pass
+    send = core.sender(ws)
 
     cands = _title_candidates(only)
     lfm_key = (_state.get("lastfm_api_key") or "").strip()
@@ -192,9 +190,7 @@ async def _title_apply(items: list, ws: WebSocket):
     global _title_cancel
     _title_cancel = False
 
-    async def send(t, **kw):
-        try: await ws.send_text(json.dumps({"type": t, **kw}))
-        except Exception: pass
+    send = core.sender(ws)
 
     by_path = {lt.get("path"): lt for lt in _state["library"]}
     ci = _state.get("current_idx", -1)
@@ -424,9 +420,7 @@ async def _genre_suggest(ws: WebSocket, online: bool = True):
         return
     _genre_running, _genre_cancel = True, False
 
-    async def send(t, **kw):
-        try: await ws.send_text(json.dumps({"type": t, **kw}))
-        except Exception: pass
+    send = core.sender(ws)
 
     try:
         rules = _genre_rules_load()
@@ -548,9 +542,7 @@ async def _genre_apply(items: list, ws: WebSocket):
     global _genre_cancel
     _genre_cancel = False
 
-    async def send(t, **kw):
-        try: await ws.send_text(json.dumps({"type": t, **kw}))
-        except Exception: pass
+    send = core.sender(ws)
 
     by_path = {lt.get("path"): lt for lt in _state["library"]}
     ci = _state.get("current_idx", -1)
@@ -853,9 +845,7 @@ async def _fingerprint_suggest(ws: WebSocket, paths: list[str]):
     global _title_cancel
     _title_cancel = False
 
-    async def send(t, **kw):
-        try: await ws.send_text(json.dumps({"type": t, **kw}))
-        except Exception: pass
+    send = core.sender(ws)
 
     if not (_state.get("acoustid_api_key") or "").strip():
         await send("title_suggestions", items=[], total=0, fp=True, fix_tab="services",

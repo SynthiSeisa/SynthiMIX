@@ -273,7 +273,7 @@ body.sheet-on .sheet{transform:none}
     <div class="card">
       <div class="card-h">Mix</div>
       <div class="tg-grid">
-        <button id="amb" class="tg" onclick="send({type:'set_auto_mix',value:!st.auto_mix})">Auto-Mix</button>
+        <button id="amb" class="tg" onclick="send({type:'set_auto_mix',value:!st.auto_mix})">Am Ende: Radio</button>
         <button id="rdb" class="tg" onclick="toggleRadio()">Radio</button>
       </div>
       <div class="norm">
@@ -434,7 +434,7 @@ function render(){
 }
 function setTg(id,on){document.getElementById(id).classList.toggle('on',!!on)}
 function mixNow(){send({type:'mix_now'});_mixUntil=Date.now()+6000;render();buzz();setTimeout(render,6100)}
-function toggleRadio(){if(!st.radio_ok&&!st.radio_enabled){toast('Radio braucht einen Last.fm-Key (in der App unter Dienste)');return}send({type:'set_radio',enabled:!st.radio_enabled})}
+function toggleRadio(){send({type:'set_radio',enabled:!st.radio_enabled})}
 function toggleNorm(){st.normalize_volume=!st.normalize_volume;send({type:'set_normalize_volume',value:st.normalize_volume});render()}
 var _pv=null,_vt,_nv=null,_nt
 function onVol(v){document.getElementById('vv').textContent=v+'%';_pv=+v;clearTimeout(_vt);_vt=setTimeout(flushVol,120)}
