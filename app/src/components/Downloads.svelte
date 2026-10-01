@@ -1,5 +1,6 @@
 <script>
   import { untrack } from 'svelte'
+  import { startFileDrag } from '../lib/fileDrag.js'
   import { downloads, searchResults, send, openSettings, videoCheckPending, followed, followedChannels } from '../stores/ws.js'
 
   // ── Verfolgte Playlists: Liste steht in den Einstellungen (Download) ──
@@ -145,6 +146,14 @@
     g.tracks.forEach(dl => send({ type: 'download_cancel', id: dl.id }))
   }
   function openInExplorer(dl) { window.electron?.openPath(dl.path ?? null) }
+  // Fertige Titel herausziehen: in die Warteschlange oder nach FL Studio, Explorer …
+  function dragOut(e, dl) {
+    const t = { path: dl.path, title: dl.title }
+    if (startFileDrag(e, [t])) return
+    e.dataTransfer.setData('text/plain', dl.path)
+    e.dataTransfer.setData('application/x-ytdl-track', JSON.stringify(t))
+    e.dataTransfer.effectAllowed = 'copy'
+  }
 
   const hasDone = $derived(groups.some(g => g.hdr?.status !== 'active'))
 
@@ -349,7 +358,9 @@
               {#each g.tracks as dl (dl.id)}
                 <div class="track-row {dl.status}"
                      ondblclick={() => openInExplorer(dl)} role="listitem"
-                     title="Doppelklick: Im Explorer öffnen">
+                     draggable={dl.status === 'done' && !!dl.path}
+                     ondragstart={(e) => dragOut(e, dl)}
+                     title="Doppelklick: Im Explorer öffnen · Ziehen: in die Warteschlange, nach FL Studio …">
                   <span class="track-title">{dl.title}</span>
 
                   {#if dl.status === 'active'}

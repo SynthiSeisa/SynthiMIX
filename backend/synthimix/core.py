@@ -289,12 +289,17 @@ async def push_player():
 
 _dl_last_push: float = 0.0
 
+def downloads_public() -> list:
+    """Download-Liste ohne stille Pruefungen verfolgter Playlists."""
+    quiet = {d.get("session") for d in _state["downloads"] if d.get("quiet") and d.get("id") == d.get("session")}
+    return [d for d in _state["downloads"] if d.get("session") not in quiet] if quiet else _state["downloads"]
+
 async def push_downloads(force: bool = False):
     global _dl_last_push
     now = time.monotonic()
     if force or (now - _dl_last_push) >= 0.2:
         _dl_last_push = now
-        await broadcast({"type": "downloads", "items": _state["downloads"]})
+        await broadcast({"type": "downloads", "items": downloads_public()})
 
 # Bibliothek an die Oberflaeche: nur geaenderte Titel. Frueher ging bei jeder
 # Kleinigkeit (ein Tag, ein Messwert) die ganze Liste (~2.700 Titel, ~1 MB)

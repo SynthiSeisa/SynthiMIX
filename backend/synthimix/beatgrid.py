@@ -23,6 +23,11 @@ _PLAYBACK_SHIFT = {".opus": -0.0046, ".webm": -0.0046, ".ogg": -0.0029}
 # bei modernem DnB oft eine Achtel daneben, weil der Sub-Bass durchlaeuft.
 _BANDS = ((180, 1000, 1.0), (1000, 5000, 1.0), (6000, 11025, 0.5), (0, 11025, 1.0))
 _SR, _HOP = 22050, 32                       # 1,45 ms je Schritt
+# DnB wird ohne Tag oft mit 2/3 des Tempos gemessen (116 statt 174): dann
+# liegen die echten Schlaege auf 1/3 und 2/3 des gemessenen. Grenzen an 104
+# Titeln (80 echte mit MIK-Tag, 24 kuenstliche) bestimmt: noetig 1,96-2,0,
+# sonst hoechstens 1,37.
+_TRIPLET_MIN, _TRIPLET_OVER_HALF = 1.7, 1.0
 _OFFBEAT_BASS = 3.0                         # so viel mehr Bass auf der Achtel dazwischen: Raster verschieben
 
 
@@ -101,8 +106,29 @@ def _tempo(onset, fps, bpm_hint, np):
     good = [r_ for r_ in res if _conf_of(r_) >= 0.85 * top]
     tagged = [r_ for r_ in good if bpm_hint and abs(r_[1] - bpm_hint) <= 2]
     c = tagged[0] if tagged else max(good, key=lambda r_: r_[1])
-    fine = _comb(onset, fps, np.arange(c[1] - 0.06, c[1] + 0.0601, 0.005), np)
+    bpm = c[1]
+    if not tagged and bpm * 1.5 <= 200 and _triplet_up(onset, fps, bpm, np):
+        bpm *= 1.5
+    fine = _comb(onset, fps, np.arange(bpm - 0.06, bpm + 0.0601, 0.005), np)
     return fine[1], _conf_of(fine)
+
+
+def _triplet_up(onset, fps, bpm, np) -> bool:
+    """Ist bpm nur 2/3 des echten Tempos? Auf einen gemessenen Schlag gefaltet
+    liegen die echten Schlaege dann auf 1/3 und 2/3, bei geradem Tempo
+    liegt der Zwischenschlag auf 1/2."""
+    T, nb = 60.0 / bpm, 48
+    t = np.arange(onset.size) / fps
+    h = np.bincount((np.mod(t, T) / T * nb).astype(int) % nb, weights=onset, minlength=nb)
+    h = np.convolve(np.concatenate([h[-2:], h, h[:2]]), np.ones(3) / 3, mode="same")[2:-2]
+    if h.max() <= 0:
+        return False
+    h = np.roll(h, -int(np.argmax(h))) / h.max()          # Schlag auf 0
+
+    def at(x):
+        return float(h[[int(round(x * nb + d)) % nb for d in (-1, 0, 1)]].max())
+    tri = at(1 / 3) + at(2 / 3)
+    return tri >= _TRIPLET_MIN and tri - at(1 / 2) >= _TRIPLET_OVER_HALF
 
 
 def _fold_phase(onset, fps, period, np, smooth_ms=5):

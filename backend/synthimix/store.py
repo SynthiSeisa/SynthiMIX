@@ -164,6 +164,9 @@ def load_library():
             "duration_sec": float(str(t.get("duration_sec") or t.get("duration") or 0).replace(",", ".")),
             "lufs":         float(str(t.get("lufs", -99)).replace(",", ".")),
             "bpm":          t.get("bpm", 0),
+            # Herkunft der BPM ("tag" | "analyse") und Stand der Schaetzung
+            **({"bpm_src": str(t["bpm_src"])} if t.get("bpm_src") else {}),
+            **({"bpm_rev": int(t["bpm_rev"])} if t.get("bpm_rev") else {}),
             "bitrate_kbps": t.get("bitrate_kbps") or t.get("bitrate") or 0,
             "comment":      _fix_mojibake(str(t.get("comment", ""))),
             "album_artist": _fix_mojibake(str(t.get("album_artist", ""))),

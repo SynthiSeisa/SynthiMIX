@@ -36,6 +36,7 @@ async def lifespan(application: FastAPI):
     core.spawn(media._refresh_tag_meta_loop())
     core.spawn(quality._quality_scan_loop())
     core.spawn(media._loud_main_loop())
+    core.spawn(media._bpm_fix_loop())
     core.spawn(download._temp_cleanup_loop())
     core.spawn(download._follow_startup())
     core.spawn(library._fileid_scan_task())
@@ -131,7 +132,7 @@ async def handle_message(ws: WebSocket, msg: dict):
                                        "current_idx": _state["current_idx"]}))
         await core.push_player()
         await core.send_library_full(ws)
-        await ws.send_text(json.dumps({"type": "downloads", "items": _state["downloads"]}))
+        await ws.send_text(json.dumps({"type": "downloads", "items": core.downloads_public()}))
         await ws.send_text(json.dumps({"type": "playlists", "items": library._get_playlists()}))
         # Ohne das hier haette ein frisch gestarteter Client die Wuensche erst
         # gesehen, wenn sich der naechste geaendert hat.
@@ -742,6 +743,12 @@ async def handle_message(ws: WebSocket, msg: dict):
 
     elif t == "channel_remove":
         await channels._channel_remove(msg.get("url") or "")
+
+    elif t == "follow_tracks":
+        # Titel einer verfolgten Playlist (Stand der letzten Pruefung)
+        url = msg.get("url", "")
+        await ws.send_text(json.dumps({"type": "follow_tracks", "url": url,
+                                       **(download.follow_tracks(url) or {"items": None})}))
 
     elif t == "follow_check":
         url = msg.get("url")

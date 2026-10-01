@@ -3,6 +3,7 @@
   import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected, qualityScan, revealPath, excludedFolders, watchedFolders, downloadDir, startQualityBatch } from '../stores/ws.js'
   import BetterVersionDialog from './BetterVersionDialog.svelte'
   import { keySortValue } from '../lib/keys.js'
+  import { startFileDrag, ownDrag, hasFiles, droppedPaths } from '../lib/fileDrag.js'
   import KeyChip from './KeyChip.svelte'
   import { density } from '../lib/prefs.js'
   import DuplicateScanDialog from './DuplicateScanDialog.svelte'
@@ -450,8 +451,17 @@
              path: t.path, title: t.title, duration_sec: t.duration_sec ?? 0 })
     }
 
-    const multiRaw = e.dataTransfer.getData('application/x-ytdl-multi')
-    if (multiRaw) {
+    const own = ownDrag(e)
+    const multiRaw = own ? '' : e.dataTransfer.getData('application/x-ytdl-multi')
+    if (own) {
+      own.tracks.forEach(addTrack)
+    } else if (hasFiles(e)) {
+      // Dateien aus dem Explorer: was in der Bibliothek ist, kommt in die Playlist
+      for (const p of droppedPaths(e)) {
+        const t = $library.find(lt => lt.path.toLowerCase() === p.toLowerCase())
+        if (t) addTrack(t)
+      }
+    } else if (multiRaw) {
       try { JSON.parse(multiRaw).forEach(addTrack) } catch {}
     } else {
       const rich = e.dataTransfer.getData('application/x-ytdl-track')
@@ -1295,6 +1305,9 @@
   }
 
   function dragStart(e, track) {
+    // In der App: echter Datei-Zug — auch nach FL Studio, Explorer, rekordbox
+    const multi = selected.has(track.path) && selected.size > 1
+    if (startFileDrag(e, multi ? filtered.filter(t => selected.has(t.path)) : [track])) return
     if (selected.has(track.path) && selected.size > 1) {
       // Drag all selected tracks
       const tracks = filtered.filter(t => selected.has(t.path))

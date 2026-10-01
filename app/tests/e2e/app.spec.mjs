@@ -92,7 +92,7 @@ test('Einstellungen: DJ-Schalter und verfolgte Playlists', async () => {
   await expect(page.getByText('Application-Key', { exact: true })).toBeVisible()
   await page.locator('.svc-head', { hasText: 'yt-dlp' }).click()
   await expect(page.locator('.svc.open .svc-body').getByText('Version', { exact: true })).toBeVisible()
-  await expect(page.getByText('Programme automatisch aktuell halten')).toBeVisible()
+  await expect(page.getByText('yt-dlp, spotdl und ffmpeg automatisch aktuell halten')).toBeVisible()
   // Ausgabegeraet und Uebergangslaenge
   await page.locator('.tab-btn', { hasText: 'Wiedergabe' }).click()
   await expect(page.getByLabel('Ausgabegerät')).toBeVisible()

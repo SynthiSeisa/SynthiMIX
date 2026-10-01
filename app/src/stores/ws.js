@@ -66,6 +66,7 @@ export const changelog           = writable(null)
 export const followed            = writable([])
 // Verfolgte Kanaele: [{url, title, auto_new, last_check, last_new, playlists, pending:[{url,title}], checking}]
 export const followedChannels    = writable([])
+export const followTracks        = writable({})   // url -> { ts, items: [{t, s}] | null } (aufgeklappte Playlists)
 // Auswahl der Playlists eines Kanals: null | {plan_id, url, title, playlists:[{url,title,thumb,followed}], existing, auto_new, excluded} | {error}
 export const channelPlan         = writable(null)
 // "Jetzt mischen" von der Fernbedienung: Zeitstempel der Anforderung
@@ -417,6 +418,7 @@ function connect() {
       case 'wishes':                  wishes.set(msg.items || []); wishesLoaded.set(true); break
       case 'changelog':               changelog.set(msg.items || []); break
       case 'followed':                followed.set(msg.items || []); followedChannels.set(msg.channels || []); break
+      case 'follow_tracks':           followTracks.update(m => ({ ...m, [msg.url]: { ts: msg.ts, items: msg.items ?? null } })); break
       case 'mix_now':                 mixNowRequest.set(Date.now()); break
       case 'channel_plan':
         planChecks.update(l => l.filter(c => c.url !== msg.src))

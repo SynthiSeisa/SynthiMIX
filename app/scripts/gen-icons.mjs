@@ -101,6 +101,9 @@ const ICONS = [
   ['brand-spotify',   'outline'],
   ['brand-lastfm',    'outline'],
   ['fingerprint',     'outline'],
+  // 01.10.2026: Titel verfolgter Playlists
+  ['folder-check',    'outline'],
+  ['ban',             'outline'],
 ]
 
 function maskUrl(name, variant) {

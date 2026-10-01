@@ -11,7 +11,7 @@
            lastfmApiKey, acoustidApiKey,
            fpcalcInstalling, fpcalcInstallError,
            spotdlInstalling, spotdlInstallError, spotdlInstallText,
-           watchedFolders, watchedFolderImpact, ytdlpAutoupdate, excludedFolders, toolUpdates, servicesTest, setupOpen, changelog, followed, followedChannels, dlParallel, relocateState } from '../stores/ws.js'
+           watchedFolders, watchedFolderImpact, ytdlpAutoupdate, excludedFolders, toolUpdates, servicesTest, setupOpen, changelog, followed, followedChannels, followTracks, dlParallel, relocateState } from '../stores/ws.js'
   import { infoHints } from '../lib/infohints.js'
 
   let tab = $state('playback')
@@ -76,6 +76,36 @@
   let chOpen = $state(new Set())
   const soloFollowed = $derived($followed.filter(f => !f.channel))
   function chToggle(url) { const s = new Set(chOpen); s.has(url) ? s.delete(url) : s.add(url); chOpen = s }
+  // Aufgeklappte Playlist: ihre Titel (Stand der letzten Pruefung) mit Zustand
+  let ftOpen = $state(new Set())
+  function ftToggle(url) {
+    const s = new Set(ftOpen)
+    if (s.has(url)) s.delete(url)
+    else { s.add(url); send({ type: 'follow_tracks', url }) }
+    ftOpen = s
+  }
+  // Nach einer Pruefung die offene Liste neu holen
+  let ftChecked = {}
+  $effect(() => {
+    for (const f of $followed) {
+      if (ftOpen.has(f.url) && f.last_check && ftChecked[f.url] !== f.last_check) {
+        if (ftChecked[f.url] !== undefined) send({ type: 'follow_tracks', url: f.url })
+        ftChecked[f.url] = f.last_check
+      }
+    }
+  })
+  const FT = {
+    folder:  { ico: 'ti-folder-check',   lbl: 'im Ordner' },
+    lib:     { ico: 'ti-music',          lbl: 'in der Sammlung, nicht im Ordner' },
+    fail:    { ico: 'ti-alert-triangle', lbl: 'fehlgeschlagen — wird wieder versucht' },
+    gone:    { ico: 'ti-ban',            lbl: 'gelöscht oder privat — übersprungen' },
+    missing: { ico: 'ti-trash',          lbl: 'nicht mehr da (selbst gelöscht)' },
+  }
+  function ftSummary(items) {
+    const n = {}
+    for (const it of items) n[it.s] = (n[it.s] || 0) + 1
+    return Object.keys(FT).filter(k => n[k]).map(k => `${n[k]} ${FT[k].lbl.split(' — ')[0]}`)
+  }
   function followAgo(ts) {
     if (!ts) return 'noch nie geprüft'
     const min = Math.round((Date.now() / 1000 - ts) / 60)
@@ -790,8 +820,26 @@
           </div>
 
           <div class="group">
+            {#snippet ftView(f)}
+              {@const d = $followTracks[f.url]}
+              <div class="ftracks">
+                {#if d === undefined}
+                  <div class="ft-note">Lädt…</div>
+                {:else if !d.items}
+                  <div class="ft-note">Die Titelliste gibt es ab der nächsten Prüfung.
+                    <button class="btn btn-sm" onclick={() => send({ type: 'follow_check', url: f.url })} disabled={f.checking}>Jetzt prüfen</button></div>
+                {:else}
+                  <div class="ft-sum">{#each ftSummary(d.items) as s}<span>{s}</span>{/each}</div>
+                  <ol class="ft-list">
+                    {#each d.items as it, i (i)}
+                      <li class={it.s} title={FT[it.s]?.lbl}><i class="ti {FT[it.s]?.ico}" aria-hidden="true"></i><span>{it.t}</span></li>
+                    {/each}
+                  </ol>
+                {/if}
+              </div>
+            {/snippet}
             <div class="group-title">Verfolgte Playlists und Kanäle</div>
-            <div class="hint">Werden beim Start und auf Knopfdruck auf neue Titel geprüft; neue Titel werden automatisch geladen. Einen ganzen Kanal verfolgen: Kanal-Link (z. B. youtube.com/@name) in die Download-Zeile einfügen.</div>
+            <div class="hint">Werden beim Start und auf Knopfdruck im Hintergrund geprüft; in den Downloads erscheint nur, was wirklich geladen wird. Klick auf eine Playlist zeigt ihre Titel. Ganzen Kanal verfolgen: Kanal-Link (z. B. youtube.com/@name) in die Download-Zeile einfügen.</div>
             {#each $followedChannels as c (c.url)}
               <div class="follow-list ch">
                 <div class="follow-row">
@@ -827,17 +875,19 @@
                   {#if chOpen.has(c.url)}
                     {#each $followed.filter(f => f.channel === c.url) as f (f.url)}
                       <div class="follow-row sub">
-                        <div class="follow-main">
-                          <span class="follow-name" title={f.url}>{f.title}</span>
+                        <button class="follow-main ftoggle" onclick={() => ftToggle(f.url)} aria-expanded={ftOpen.has(f.url)} title="Titel anzeigen">
+                          <span class="follow-name" title={f.url}><i class="ti ti-chevron-right fchev" class:open={ftOpen.has(f.url)} aria-hidden="true"></i> {f.title}</span>
                           <span class="follow-meta">
                             {#if f.checking}<i class="ti ti-refresh spin" aria-hidden="true"></i>{' wird geprüft…'}{:else}{followAgo(f.last_check)}{/if}{#if !f.checking && f.last_check && f.last_new}{' · '}<b>{f.last_new} neu</b>{/if}{` · ${f.known} bekannt`}
                           </span>
-                        </div>
+                          {#if !f.checking && f.last_result}<span class="follow-res">{f.last_result}</span>{/if}
+                        </button>
                         <button class="btn btn-icon btn-sm" onclick={() => send({ type: 'follow_check', url: f.url })} disabled={f.checking}
                                 title="Jetzt auf neue Titel prüfen" aria-label="Jetzt prüfen"><i class="ti ti-refresh"></i></button>
                         <button class="btn btn-icon btn-sm" onclick={() => send({ type: 'follow_remove', url: f.url })}
                                 title="Nicht mehr verfolgen (geladene Titel bleiben)" aria-label="Nicht mehr verfolgen"><i class="ti ti-x"></i></button>
                       </div>
+                      {#if ftOpen.has(f.url)}{@render ftView(f)}{/if}
                     {/each}
                   {/if}
                 {/if}
@@ -848,17 +898,19 @@
                 {#each soloFollowed as f (f.url)}
                   <div class="follow-row">
                     <i class="ti ti-bookmark-filled follow-ico" aria-hidden="true"></i>
-                    <div class="follow-main">
-                      <span class="follow-name" title={f.url}>{f.title}</span>
+                    <button class="follow-main ftoggle" onclick={() => ftToggle(f.url)} aria-expanded={ftOpen.has(f.url)} title="Titel anzeigen">
+                      <span class="follow-name" title={f.url}><i class="ti ti-chevron-right fchev" class:open={ftOpen.has(f.url)} aria-hidden="true"></i> {f.title}</span>
                       <span class="follow-meta">
                         {#if f.checking}<i class="ti ti-refresh spin" aria-hidden="true"></i>{' wird geprüft…'}{:else}{followAgo(f.last_check)}{/if}{#if !f.checking && f.last_check && f.last_new}{' · '}<b>{f.last_new} neu</b>{/if}{` · ${f.known} bekannt`}{FOLLOW_MODE[f.mode] ? ` · ${FOLLOW_MODE[f.mode]}` : ''}
                       </span>
-                    </div>
+                      {#if !f.checking && f.last_result}<span class="follow-res">{f.last_result}</span>{/if}
+                    </button>
                     <button class="btn btn-icon btn-sm" onclick={() => send({ type: 'follow_check', url: f.url })} disabled={f.checking}
                             title="Jetzt auf neue Titel prüfen" aria-label="Jetzt prüfen"><i class="ti ti-refresh"></i></button>
                     <button class="btn btn-icon btn-sm" onclick={() => send({ type: 'follow_remove', url: f.url })}
                             title="Nicht mehr verfolgen (geladene Titel bleiben)" aria-label="Nicht mehr verfolgen"><i class="ti ti-x"></i></button>
                   </div>
+                  {#if ftOpen.has(f.url)}{@render ftView(f)}{/if}
                 {/each}
               </div>
             {:else if !$followedChannels.length}
@@ -896,7 +948,7 @@
                     </button>
                   </div>
                   {#if $updateProgress && $updateProgress.tool !== 'ffmpeg'}<div class="svc-note">{$updateProgress.text}</div>{/if}
-                  <div class="svc-note">YouTube ändert regelmäßig etwas — ältere Versionen scheitern dann mit „403 Forbidden“. Neue Versionen landen im Datenordner und bleiben auch nach einem SynthiMIX-Update erhalten.</div>
+                  <div class="svc-note">Bei „403 Forbidden“ hilft meist ein Update.</div>
                 </div>
               {/if}
             </div>
@@ -1040,17 +1092,17 @@
               </div>
             {/if}
             <div class="row">
-              <span class="lbl">Programme automatisch aktuell halten</span>
+              <span class="lbl">yt-dlp, spotdl und ffmpeg automatisch aktuell halten</span>
               <button class="tog {$ytdlpAutoupdate ? 'on' : ''}" aria-label="Programme automatisch aktuell halten"
                 onclick={() => send({ type: 'set_ytdlp_autoupdate', value: !$ytdlpAutoupdate })}></button>
             </div>
             <div class="row">
-              <span class="lbl">Nach neuen Versionen suchen</span>
+              <span class="lbl">Jetzt nach neuen Versionen suchen</span>
               <button class="btn btn-sm" onclick={checkToolUpdates} disabled={toolCheckRunning}>
                 <i class="ti ti-refresh" class:spin={toolCheckRunning}></i> {toolCheckRunning ? 'Prüfe…' : 'Jetzt prüfen'}
               </button>
             </div>
-            <div class="hint">yt-dlp und spotdl werden täglich geprüft und ersetzt, sobald kein Download läuft; ffmpeg wöchentlich, neu geladen erst, wenn der eigene Build älter als zwei Monate ist. Ohne Automatik gibt es einen Hinweis (Punkt am Zahnrad). Ein selbst installiertes spotdl bleibt unangetastet.</div>
+            <div class="hint">Täglich (ffmpeg wöchentlich), nie während eines Downloads. SynthiMIX selbst: Info → Nach Updates suchen.</div>
           </div>
 
         <!-- ── DARSTELLUNG ─────────────────────────────────────────────── -->
@@ -1582,6 +1634,22 @@
   .follow-name { font-size: var(--fs-body); font-weight: 600; color: var(--c-tx1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .follow-meta { font-size: var(--fs-sm); color: var(--c-tx3); }
   .follow-meta b { color: var(--c-accent-tx); }
+  .ftoggle { background: none; border: none; padding: 0; margin: 0; text-align: left; cursor: pointer; color: inherit; font: inherit; }
+  .ftoggle:hover .follow-name { color: var(--c-accent-tx); }
+  .ftoggle .fchev { font-size: 12px; color: var(--c-tx4); vertical-align: -1px; }
+  .follow-res { font-size: var(--fs-sm); color: var(--c-tx4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ftracks { border-top: 1px solid var(--c-br1); padding: 6px 10px 8px 34px; }
+  .ft-note { font-size: var(--fs-sm); color: var(--c-tx3); display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+  .ft-sum { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: var(--fs-sm); color: var(--c-tx3); margin-bottom: 4px; }
+  .ft-list { list-style: none; margin: 0; padding: 0; max-height: 240px; overflow-y: auto; }
+  .ft-list li { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: var(--fs-sm); color: var(--c-tx2); min-width: 0; }
+  .ft-list li span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ft-list li i { flex: none; font-size: 13px; }
+  .ft-list li.folder i { color: var(--c-green-tx); }
+  .ft-list li.lib i, .ft-list li.missing i { color: var(--c-tx4); }
+  .ft-list li.fail i { color: var(--c-warn-tx); }
+  .ft-list li.gone i { color: var(--c-red-tx); }
+  .ft-list li.gone span, .ft-list li.missing span { color: var(--c-tx4); text-decoration: line-through; }
   .follow-list.ch { margin-bottom: var(--sp-2); }
   .follow-row.sub { padding-left: 34px; border-top: 1px solid var(--c-br1); }
   .ch-auto { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-sm); color: var(--c-tx3); white-space: nowrap; cursor: pointer; }

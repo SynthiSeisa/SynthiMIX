@@ -135,8 +135,83 @@ async def _loud_main_loop():
             print(f"[lufs] Hauptteil: {e}", flush=True)
         await asyncio.sleep(600)
 
+# BPM ohne Tag: bis 1.6.6 grob aus der Lautstaerke-Huellkurve (an 80 Titeln
+# mit MIK-Tag 39 ganz daneben), jetzt aus dem Taktraster (80/80, Oktave egal).
+# Alte Schaetzungen werden im Hintergrund einmal neu bestimmt (_bpm_fix_loop).
+_BPM_REV = 2
+
+def _bpm_grid_sync(path: str) -> tuple[int, dict | None]:
+    """BPM aus dem Taktraster, dazu das Raster selbst (spart die Messung beim
+    Abspielen). Zu kurz oder ohne numpy: die alte Schaetzung."""
+    g = beatgrid._beatgrid_sync(path, 0)
+    if not g or not g.get("bpm_f"):
+        return _estimate_bpm_sync(path), None
+    return int(round(g["bpm_f"])), g
+
+def _apply_bpm(lt: dict, bpm: int, g: dict | None):
+    """Geschaetzte BPM (und Raster, falls noch keins da ist) in den Eintrag."""
+    lt["bpm"] = bpm
+    lt["bpm_src"] = "analyse"
+    lt["bpm_rev"] = _BPM_REV
+    if g and int(lt.get("grid_rev") or 1) < beatgrid.GRID_REV:
+        g = {k: v for k, v in g.items() if k != "grid_fit"}
+        for k in ("phrase_off", "bar_beats", "phrase_src"):
+            lt.pop(k, None)
+        lt.update({k: g[k] for k in beatgrid._GRID_KEYS if k in g})
+        beatgrid._beatgrid_cache.pop(lt.get("path"), None)
+    for qt in _state.get("queue", []):
+        if qt.get("path") == lt.get("path"):
+            qt["bpm"] = bpm
+
+async def _bpm_fix_once() -> int:
+    """Alte BPM-Schaetzungen (und fehlende BPM) einmal mit dem Taktraster neu
+    bestimmen — nur Titel ohne BPM-Tag, einer nach dem anderen. BPM aus dem
+    Tag (Mixed In Key, rekordbox) bleiben unangetastet."""
+    if not _state.get("bpm_analysis", True) or not _numpy_ok():
+        return 0
+    loop = asyncio.get_running_loop()
+    todo = [lt for lt in _state["library"]
+            if lt.get("path") and not lt.get("missing") and not lt.get("unanalyzable")
+            and lt.get("bpm_src") != "tag" and int(lt.get("bpm_rev") or 0) < _BPM_REV
+            and int(lt.get("meta_rev") or 0) >= _TAG_META_REV]       # Tags schon gelesen
+    n = 0
+    for lt in todo:
+        if not _state.get("bpm_analysis", True):
+            break
+        if lt.get("bpm_src") == "tag" or not os.path.exists(lt["path"]):
+            continue
+        try:
+            bpm, g = await loop.run_in_executor(None, _bpm_grid_sync, lt["path"])
+        except Exception as e:
+            print(f"[bpm] {Path(lt['path']).name}: {e}", flush=True)
+            bpm, g = 0, None
+        if bpm:
+            _apply_bpm(lt, bpm, g)
+            n += 1
+            await core.broadcast({"type": "track_meta_update", "track": lt})
+        else:
+            lt["bpm_rev"] = _BPM_REV                 # nicht immer wieder versuchen
+        if n and n % 25 == 0:
+            store.save_library()
+        await asyncio.sleep(0.2)
+    if todo:
+        store.save_library()
+    if n:
+        print(f"[bpm] {n} Titel neu bestimmt", flush=True)
+    return n
+
+async def _bpm_fix_loop():
+    await asyncio.sleep(150)           # erst Start, Tag-Abgleich und Wiedergabe
+    while True:
+        try:
+            await _bpm_fix_once()
+        except Exception as e:
+            print(f"[bpm] Neubestimmung: {e}", flush=True)
+        await asyncio.sleep(1800)
+
 def _estimate_bpm_sync(path: str) -> int:
-    """BPM via onset-energy autocorrelation (60-180 BPM range)."""
+    """BPM via onset-energy autocorrelation (60-180 BPM range) — nur noch
+    Rueckfall fuer sehr kurze Dateien bzw. ohne numpy (_bpm_grid_sync)."""
     try:
         sr, hop = 22050, 512
         proc = subprocess.Popen(
@@ -209,6 +284,7 @@ def _make_library_entry(path: str, probe: dict, **overrides) -> dict:
         "duration_sec": probe.get("duration_sec", 0),
         "lufs":         -99.0,
         "bpm":          probe.get("bpm", 0),
+        **({"bpm_src": "tag"} if probe.get("bpm") else {}),
         "bitrate_kbps": probe.get("bitrate_kbps", 0),
         "comment":      probe.get("comment", "") or "",
         "mtime":        int(os.path.getmtime(path)) if os.path.exists(path) else 0,
@@ -348,7 +424,7 @@ def _probe_sync(path: str) -> dict:
 
 # Erhoehen, wenn Bibliothekseintraege neue Tag-Felder bekommen: der Bestand wird
 # dann beim naechsten Start einmal nachgelesen (siehe _refresh_tag_meta_task).
-_TAG_META_REV = 4      # 2: Tonart, 3: Energie und Cues von Mixed In Key, 4: BPM aus dem Tag
+_TAG_META_REV = 5      # 2: Tonart, 3: Energie und Cues von Mixed In Key, 4: BPM aus dem Tag, 5: BPM-Herkunft
 
 def _tag_bpm(raw) -> int:
     """BPM-Tag ("174", "173.98", "128,00") als ganze Zahl, 0 wenn leer/unsinnig."""
@@ -426,7 +502,7 @@ async def _refresh_tag_meta_task():
     """
     FIELDS = ("artist", "album_artist", "album", "genre", "key", "energy", "mik_cues", "bpm")
     snapshot = [(lt["path"], int(lt.get("mtime", 0) or 0), lt.get("meta_rev", 0),
-                 {k: lt.get(k, "") for k in FIELDS}, lt.get("key_src", ""))
+                 {**{k: lt.get(k, "") for k in FIELDS}, "bpm_src": lt.get("bpm_src", "")}, lt.get("key_src", ""))
                 for lt in _state["library"] if lt.get("path")]
 
     def _work():
@@ -457,6 +533,8 @@ async def _refresh_tag_meta_task():
             if tags.get("bpm") and tags["bpm"] != current.get("bpm"):
                 upd["bpm"] = tags["bpm"]
                 upd["_regrid"] = True
+            if tags.get("bpm") and current.get("bpm_src") != "tag":
+                upd["bpm_src"] = "tag"
             tag_key = tags.get("key")
             if tag_key and (tag_key != current.get("key") or key_src != "tag"):
                 upd["key"] = tag_key
@@ -649,9 +727,9 @@ async def _analyze_library_meta_task(only_paths: list[str] | None = None):
                         changed = True
                     # lufs == -98.0 → Datei nicht gefunden (temporär) → nichts setzen
                 if need_bpm:
-                    bpm = await loop.run_in_executor(None, _estimate_bpm_sync, path)
+                    bpm, g = await loop.run_in_executor(None, _bpm_grid_sync, path)
                     if bpm:
-                        lt["bpm"] = bpm
+                        _apply_bpm(lt, bpm, g)
                         changed = True
                 if need_key:
                     est = await loop.run_in_executor(None, _detect_key_sync, path)
@@ -741,7 +819,11 @@ async def _enrich_track(path: str, force: bool = False):
         lufs = cached_lufs
     else:
         lufs, main = await loop.run_in_executor(None, _measure_loudness_sync, path)
-    bpm      = cached_bpm  if ((cached_bpm and not force) or not _state.get("bpm_analysis", True)) else await loop.run_in_executor(None, _estimate_bpm_sync, path)
+    grid = None
+    if (cached_bpm and not force) or not _state.get("bpm_analysis", True):
+        bpm = cached_bpm
+    else:
+        bpm, grid = await loop.run_in_executor(None, _bpm_grid_sync, path)
     duration = cached_duration if (cached_duration > 0 and not force) else (await loop.run_in_executor(None, _probe_sync, path)).get("duration_sec", 0)
 
     # Update queue entry
@@ -762,8 +844,9 @@ async def _enrich_track(path: str, force: bool = False):
             path, probe,
             duration_sec=duration or probe.get("duration_sec", 0),
             lufs=lufs if lufs > -90 else -99.0,
-            bpm=bpm or probe.get("bpm", 0),
             **({"lufs_main": main} if main is not None else {}))
+        if not lib_entry.get("bpm") and bpm:
+            _apply_bpm(lib_entry, bpm, grid)
         _state["library"].append(lib_entry)
         lib_changed = True
     elif lib_entry is not None:
@@ -777,7 +860,8 @@ async def _enrich_track(path: str, force: bool = False):
             _unanalyzable_paths.add(path)
             lib_changed = True
         # lufs == -98.0 → Datei nicht gefunden (temporär) → nichts markieren
-        if bpm  and not lib_entry.get("bpm"):                       lib_entry["bpm"]          = bpm;      lib_changed = True
+        if bpm and not lib_entry.get("bpm"):
+            _apply_bpm(lib_entry, bpm, grid);  lib_changed = True
         if duration > 0 and not lib_entry.get("duration_sec", 0):  lib_entry["duration_sec"] = duration; lib_changed = True
 
     # Tonart nur schaetzen, wenn weder ein Tag eine liefert noch eine

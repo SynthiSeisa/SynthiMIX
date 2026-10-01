@@ -2,6 +2,7 @@
   import { get } from 'svelte/store'
   import { keyCompat } from '../lib/keys.js'
   import KeyChip from './KeyChip.svelte'
+  import { startFileDrag, ownDrag, hasFiles, droppedPaths } from '../lib/fileDrag.js'
   import { queue, playerState, library, playlists, playMode, send, automixStatus, introSkipPaths, settings, appSettings, skipNextCrossfade, autoRemovePlayed, livePositionMs, selectionOwner, radioEnabled, radioStatus, harmonicResult } from '../stores/ws.js'
 
   // Tonart kommt aus der Bibliothek: Queue-Eintraege entstehen an vielen Stellen
@@ -124,7 +125,7 @@
       return
     }
     if (!e.dataTransfer.types.some(t =>
-        t === 'text/plain' || t === 'application/x-ytdl-track' || t === 'application/x-ytdl-multi')) return
+        t === 'text/plain' || t === 'application/x-ytdl-track' || t === 'application/x-ytdl-multi' || t === 'Files')) return
     e.preventDefault()
     isDragOver = true
     e.dataTransfer.dropEffect = 'copy'
@@ -138,7 +139,9 @@
 
   function onContainerDrop(e) {
     e.preventDefault()
-    isDragOver = false; dragOver = null
+    isDragOver = false
+    if (_fileDrop(e, dragOver ?? $queue.length)) return
+    dragOver = null
     if (dragFrom !== null) {
       // Dropped a reordered row onto empty queue area → move to end
       const dest = dragOver ?? $queue.length
@@ -151,9 +154,40 @@
     _handleLibraryDrop(e, $queue.length)
   }
 
+  // Datei-Zug (Electron): eigener Zug = Umsortieren oder Titel aus der
+  // Bibliothek, sonst Dateien aus dem Explorer. true = erledigt.
+  function _fileDrop(e, at) {
+    if (!hasFiles(e)) return false
+    const own = ownDrag(e)
+    const from = own?.queueFrom ?? null
+    dragFrom = null; dragOver = null
+    if (from !== null) {
+      if (from !== at && from + 1 !== at) send({ type: 'queue_move', from, to: at })
+      return true
+    }
+    const lib = get(library)
+    const byPath = new Map(lib.map(t => [t.path.toLowerCase(), t]))
+    const tracks = (own ? own.tracks.map(t => t.path)
+      : droppedPaths(e).filter(p => /\.(mp3|m4a|aac|flac|wav|ogg|opus|webm|aiff?)$/i.test(p)))
+      .map(p => byPath.get(p.toLowerCase()) ?? { path: p, title: p.replace(/\\/g, '/').split('/').pop().replace(/\.[^.]+$/, '') })
+    const atEnd = at >= $queue.length
+    tracks.forEach((t, off) => send({ type: atEnd ? 'queue_add' : 'queue_insert_at', index: atEnd ? undefined : at + off,
+      path: t.path, title: t.title, duration_sec: t.duration_sec, lufs: t.lufs, bpm: t.bpm, bitrate_kbps: t.bitrate_kbps }))
+    return true
+  }
+
+  // Ein ausserhalb abgelegter Datei-Zug hinterlaesst dragFrom — der naechste Klick raeumt auf
+  $effect(() => {
+    const reset = () => { dragFrom = null; dragOver = null; isDragOver = false }
+    window.addEventListener('pointerdown', reset, true)
+    return () => window.removeEventListener('pointerdown', reset, true)
+  })
+
   // ── Drag: reorder within queue ─────────────────────────────────────────────
   function onRowDragStart(e, i) {
     dragFrom = i
+    // In der App: echter Datei-Zug (auch nach FL Studio); umsortiert wird ueber queueFrom
+    if (startFileDrag(e, [$queue[i]], { queueFrom: i })) return
     e.dataTransfer.setData('application/x-queue-move', String(i))
     e.dataTransfer.effectAllowed = 'move'
   }
@@ -190,6 +224,7 @@
   function onRowDrop(e, i) {
     e.preventDefault()
     isDragOver = false
+    if (_fileDrop(e, i)) return
     if (dragFrom !== null && dragFrom !== i && dragFrom + 1 !== i) {
       send({ type: 'queue_move', from: dragFrom, to: i })
     } else if (dragFrom === null) {

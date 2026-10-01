@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 contextBridge.exposeInMainWorld('electron', {
   minimize:         () => ipcRenderer.send('win-minimize'),
@@ -9,6 +9,10 @@ contextBridge.exposeInMainWorld('electron', {
   openPath:   (p) => ipcRenderer.invoke('open-path', p),
   listDir:    (p) => ipcRenderer.invoke('list-dir', p ?? null),
   onMediaKey:        (cb) => ipcRenderer.on('media-key',        (_, key)     => cb(key)),
+  setPlaying:        (playing) => ipcRenderer.send('player-playing', !!playing),
+  // Titel als echte Dateien herausziehen (src/lib/fileDrag.js)
+  startDrag:         (paths) => ipcRenderer.send('start-drag', paths),
+  pathForFile:       (file) => { try { return webUtils.getPathForFile(file) } catch { return '' } },
   onUpdateAvailable: (cb) => ipcRenderer.on('update-available',  (_, version, size, notes) => cb(version, size, notes)),
   onUpdateProgress:  (cb) => ipcRenderer.on('update-progress',   (_, pct)           => cb(pct)),
   onUpdateDownloaded:(cb) => ipcRenderer.on('update-downloaded', ()                 => cb()),

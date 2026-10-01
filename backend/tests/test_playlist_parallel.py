@@ -194,7 +194,8 @@ class PlaylistParallelTest(BackendTest):
             (folder / n).write_bytes(b"ID3")
         self.run_async(main._follow_check(f))
         self.assertTrue(os.path.samefile(folder / alt.name, alt))
-        self.assertIn("1 im Ordner ergänzt", main._state["downloads"][0]["status_text"])
+        self.assertIn("1 im Ordner ergänzt", f["last_result"])
+        self.assertEqual(main._state["downloads"], [])                       # still im Hintergrund
         self.assertEqual(set(f["placed"]), {"idaaaaaaaaa", "idccccccccc", "iddddddddd1"})
         # Von Hand aus dem Ordner geloescht: bleibt weg
         (folder / alt.name).unlink()
@@ -261,10 +262,20 @@ class PlaylistParallelTest(BackendTest):
             self.assertIn("idccccccccc", f["seen"])
             self.assertEqual(len(analysiert), 1)                    # neue Titel gehen zur Analyse
 
-            # Nichts Neues: kein Download
+            # Der Lauf mit dem neuen Titel steht in den Downloads
+            self.assertTrue(any(d.get("session_label") == "Party" for d in main.downloads_public()))
+
+            # Nichts Neues: kein Download, und die Pruefung taucht nicht in den Downloads auf
+            vorher = len(main._state["downloads"])
             self.run_async(main._follow_check(f))
             self.assertEqual(f["last_new"], 0)
-            self.assertIn("nichts Neues", main._state["downloads"][0]["status_text"])
+            self.assertIn("nichts Neues", f["last_result"])
+            self.assertEqual(len(main._state["downloads"]), vorher)
+            # Titelliste fuer die Einstellungen: a geloescht (fehlt), b und c im Ordner
+            ws = FakeWS()
+            self.run_async(main.handle_message(ws, {"type": "follow_tracks", "url": url}))
+            items = [m for m in ws.sent if m.get("type") == "follow_tracks"][0]["items"]
+            self.assertEqual([i["s"] for i in items], ["missing", "folder", "folder"])
         finally:
             main._analyze_library_meta_task = keep
 

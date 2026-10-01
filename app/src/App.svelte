@@ -34,6 +34,9 @@
   import './lib/prefs.js'
 
 
+  // Pause/Play-Knopf im Vorschaubild der Taskleiste nachfuehren
+  $effect(() => { window.electron?.setPlaying?.(!!$playerState.playing) })
+
   onMount(() => {
     window.electron?.onMediaKey?.((key) => {
       const state = get(playerState)

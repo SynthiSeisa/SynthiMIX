@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, globalShortcut } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, shell, globalShortcut, nativeImage, nativeTheme } = require('electron')
 const path = require('path')
 const { spawn } = require('child_process')
 const { autoUpdater } = require('electron-updater')
@@ -6,6 +6,11 @@ const { autoUpdater } = require('electron-updater')
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 
 let mainWindow = null
+
+// Vorschaubild in der Taskleiste: Chromium hoert auf zu zeichnen, sobald es
+// das Fenster fuer verdeckt haelt — beim Hovern zeigte Windows dann kein
+// Live-Bild. Die Verdeckt-Erkennung aus, Hintergrund nicht drosseln (Player).
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion')
 let pythonProcess = null
 let quitting = false          // beim Beenden das Backend nicht neu starten
 let backendRestarts = []      // Zeitpunkte der letzten Neustarts
@@ -94,9 +99,14 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
-      webSecurity: false
+      webSecurity: false,
+      backgroundThrottling: false
     }
   })
+  mainWindow.on('show', () => updateThumbar())
+  // Eine neben ein Ziel fallengelassene Datei darf die App nicht ersetzen
+  // (Chromium oeffnet sie sonst im Fenster). Die App selbst navigiert nie.
+  mainWindow.webContents.on('will-navigate', (e) => e.preventDefault())
 
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173')
@@ -121,6 +131,69 @@ function createWindow() {
     })
   }
 }
+
+// ── Knoepfe im Vorschaubild der Taskleiste: Zurueck, Pause/Play, Weiter ─────
+// Symbole werden hier gezeichnet (32 px, 4-fach abgetastet) — keine Bilddateien.
+let thumbPlaying = false
+function glyph(kind, dark, rgb = null) {
+  const S = 32, SS = 4, buf = Buffer.alloc(S * S * 4)
+  const tri = (ax, ay, bx, by, cx, cy) => (x, y) => {
+    const d1 = (x - bx) * (ay - by) - (ax - bx) * (y - by)
+    const d2 = (x - cx) * (by - cy) - (bx - cx) * (y - cy)
+    const d3 = (x - ax) * (cy - ay) - (cx - ax) * (y - ay)
+    return !((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0))
+  }
+  const rect = (x0, y0, x1, y1) => (x, y) => x >= x0 && x <= x1 && y >= y0 && y <= y1
+  const ell = (cx, cy, rx, ry) => (x, y) => ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2 <= 1
+  const shapes = {
+    note:  [ell(12, 23, 6, 4.5), rect(16, 5, 18.5, 23), tri(18.5, 5, 26, 10, 18.5, 13)],
+    play:  [tri(10, 7, 10, 25, 25, 16)],
+    pause: [rect(9, 8, 13.5, 24), rect(18.5, 8, 23, 24)],
+    next:  [tri(7, 8, 7, 24, 19, 16), rect(20.5, 8, 24, 24)],
+    prev:  [tri(25, 8, 25, 24, 13, 16), rect(8, 8, 11.5, 24)],
+  }[kind]
+  const [r, g, b] = rgb || (dark ? [255, 255, 255] : [30, 30, 30])
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    let hit = 0
+    for (let sy = 0; sy < SS; sy++) for (let sx = 0; sx < SS; sx++) {
+      const px = x + (sx + 0.5) / SS, py = y + (sy + 0.5) / SS
+      if (shapes.some(f => f(px, py))) hit++
+    }
+    const a = Math.round(255 * hit / (SS * SS)), i = (y * S + x) * 4
+    // BGRA, vormultipliziert
+    buf[i] = Math.round(b * a / 255); buf[i + 1] = Math.round(g * a / 255); buf[i + 2] = Math.round(r * a / 255); buf[i + 3] = a
+  }
+  return nativeImage.createFromBitmap(buf, { width: S, height: S, scaleFactor: 2 })
+}
+function updateThumbar() {
+  if (process.platform !== 'win32' || !mainWindow || mainWindow.isDestroyed()) return
+  const dark = nativeTheme.shouldUseDarkColors
+  const send = (key) => mainWindow?.webContents.send('media-key', key)
+  try {
+    mainWindow.setThumbarButtons([
+      { tooltip: 'Vorheriger Titel', icon: glyph('prev', dark), click: () => send('prev') },
+      { tooltip: thumbPlaying ? 'Pause' : 'Abspielen', icon: glyph(thumbPlaying ? 'pause' : 'play', dark),
+        click: () => send('play_pause') },
+      { tooltip: 'Nächster Titel', icon: glyph('next', dark), click: () => send('next') },
+    ])
+  } catch (_) {}
+}
+// ── Titel als Dateien herausziehen (FL Studio, Explorer, rekordbox …) ─────────
+let dragIcon = null
+ipcMain.on('start-drag', (e, paths) => {
+  const fs = require('fs')
+  const files = (Array.isArray(paths) ? paths : []).filter(p => typeof p === 'string' && fs.existsSync(p))
+  if (!files.length) return
+  dragIcon = dragIcon || glyph('note', true, [255, 154, 51])
+  try { e.sender.startDrag({ file: files[0], files, icon: dragIcon }) } catch (_) {}
+})
+
+ipcMain.on('player-playing', (_, playing) => {
+  if (thumbPlaying === !!playing) return
+  thumbPlaying = !!playing
+  updateThumbar()
+})
+nativeTheme.on('updated', () => updateThumbar())
 
 function registerMediaKeys() {
   const send = (key) => mainWindow?.webContents.send('media-key', key)

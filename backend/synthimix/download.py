@@ -732,6 +732,21 @@ async def _temp_cleanup_loop():
             print(f"[download] Aufraeumen: {e}", flush=True)
         await asyncio.sleep(1800)
 
+def _follow_tracks_file() -> Path:
+    return Path(core.BASE_DIR) / "follow_tracks.json"
+
+def _save_follow_tracks(url: str, items: list[dict]):
+    """Titelliste je verfolgter Playlist (eigene Datei — settings.json bleibt klein)."""
+    data = store._load_json(_follow_tracks_file(), {})
+    data = data if isinstance(data, dict) else {}
+    data[url] = {"ts": int(time.time()), "items": items}
+    keep = {f["url"] for f in _state.get("followed", [])} | {url}
+    store._save_json(_follow_tracks_file(), {k: v for k, v in data.items() if k in keep})
+
+def follow_tracks(url: str) -> dict | None:
+    data = store._load_json(_follow_tracks_file(), {})
+    return data.get(url) if isinstance(data, dict) else None
+
 def _remember_gone(vids: list[str]):
     """Video-IDs geloeschter/privater Titel merken (settings.json, die letzten 5000)."""
     g = list(_state.get("gone_ids") or [])
@@ -830,6 +845,8 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
         "fmt":           fmt_id,
         "folder":        playlist_folder,
         "follow":        bool(follow),
+        # Pruefung einer verfolgten Playlist: erst sichtbar, wenn etwas geladen wird
+        "quiet":         follow is not None,
         "mode":          mode,
         "path":          None,
         "track_n":       0,
@@ -985,10 +1002,12 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
         gone = set() if retry else set(_state.get("gone_ids") or [])
         n_gone = 0
         keep = []
+        pl_order = list(_audited_entries)             # fuer die Titelliste in den Einstellungen
         for e in _audited_entries:
             if (not retry and _PLACEHOLDER_TITLE_RE.match((e.get("title") or "").strip())) or \
                     (gone and (_vid(e["url"]) in gone or _vid(e.get("src") or "") in gone)):
                 n_gone += 1
+                e["_gone"] = True
             else:
                 keep.append(e)
         _audited_entries = keep
@@ -1004,6 +1023,42 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
 
         def _vids(e: dict) -> list[str]:
             return [v for v in (_vid(e["url"]), _vid(e.get("src") or "")) if v]
+
+        def _track_states_sync(fehl_urls: set) -> list[dict]:
+            """Jeder Titel der Playlist mit Zustand: im Ordner, anderswo in der
+            Sammlung, geloescht/privat, fehlgeschlagen oder nicht (mehr) da."""
+            hist = {h["url"]: h for h in reversed(_state.get("history", []))}
+            td = os.path.normcase(os.path.abspath(target_dir))
+            out_ = []
+            for e in pl_order:
+                if e.get("_gone"):
+                    st = "gone"
+                elif e["url"] in fehl_urls:
+                    st = "fail"
+                else:
+                    p = e.get("_path") or (e.get("_dupe_of") or {}).get("_path") or ""
+                    if not (p and os.path.exists(p)):
+                        p = (hist.get(e["url"]) or {}).get("path", "")
+                    if not (p and os.path.exists(p)):
+                        m = search._library_matches({"title": e.get("title", ""), "duration": e.get("duration")},
+                                                    limit=1, index=lib_idx)
+                        p = m[0]["path"] if m and os.path.exists(m[0]["path"]) else ""
+                    st = ("folder" if os.path.normcase(os.path.dirname(os.path.abspath(p))) == td else "lib") if p \
+                        else "missing"
+                out_.append({"t": (e.get("title") or "")[:120], "s": st})
+            return out_
+
+        async def _follow_done(f: dict, fehl_urls: set):
+            """Ergebnis fuer die Einstellungen merken; stille Pruefung aus der
+            Download-Liste nehmen (es wurde nichts geladen)."""
+            f["last_result"] = hdr.get("status_text", "")
+            try:
+                items = await asyncio.get_running_loop().run_in_executor(None, _track_states_sync, fehl_urls)
+                _save_follow_tracks(f["url"], items)
+            except Exception as ex:
+                print(f"[verfolgen] Titelliste: {ex}", flush=True)
+            if hdr.get("quiet"):
+                _state["downloads"][:] = [d for d in _state["downloads"] if d.get("session") != session_id]
 
         def _place_known_sync(entries_: list[dict]) -> list[tuple]:
             """Bekannte Titel, die noch nie im Ordner lagen, hineinverknuepfen.
@@ -1054,6 +1109,7 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
                 follow["_new_paths"] = []
                 follow["_seen_add"] = []
                 follow["_placed_add"] = placed_add
+                await _follow_done(follow, set())
                 _dl_procs.pop(session_id, None)
                 await core.push_downloads(force=True)
                 return None
@@ -1118,6 +1174,8 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
                 state["skipped_lib"] = state.get("skipped_lib", 0) + 1
                 continue
             todo.append(entry)
+        if todo:
+            hdr["quiet"] = False
         if linked_any:
             store.save_library()
             await core.push_library()
@@ -1298,8 +1356,11 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
                 "last_check": int(time.time()), "last_new": ok_n,
                 "seen": seen0, "placed": seen0 if fill_folder else [],
             })
+            await _follow_done(_state["followed"][-1], fehl_urls)
             store.save_settings()
             await _push_followed()
+        if follow is not None:
+            await _follow_done(follow, {d.get("url") for d in fehl})
         _dl_procs.pop(session_id, None)
         await core.push_downloads(force=True)
         return state["final"]
