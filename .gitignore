@@ -43,3 +43,6 @@ bin/yt-dlp.exe
 .env
 changelog_cache.json
 tools/
+ytm_search_cache.json
+follow_tracks.json
+quality_cache.json
