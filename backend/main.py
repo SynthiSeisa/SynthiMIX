@@ -173,6 +173,8 @@ async def handle_message(ws: WebSocket, msg: dict):
         known = store.known_service_tests()
         if known:
             await ws.send_text(json.dumps({"type": "services_test", **known}))
+        # ... und beim ersten Verbinden nach dem Start einmal echt pruefen
+        core.spawn(tags._check_services_on_start())
         if _state.get("remote_autostart") and remote._remote_server is None:
             saved = _state.get("remote_services_saved") or {"remote": True, "wishes": True}
             remote._remote_services.update(remote=bool(saved.get("remote")), wishes=bool(saved.get("wishes")))
@@ -759,7 +761,8 @@ async def handle_message(ws: WebSocket, msg: dict):
                        for d in failed]
             core.spawn(download.run_download("", hdr.get("fmt") or "mp3-best", entries=entries,
                                              folder=hdr.get("folder"),
-                                             label=f"Nochmal: {hdr.get('session_label') or 'Downloads'}"[:60]))
+                                             label=f"Nochmal: {hdr.get('session_label') or 'Downloads'}"[:60],
+                                             retry=True))
 
     elif t == "download_cancel":
         # Remove a single finished/error item from the list (doesn't kill subprocess)

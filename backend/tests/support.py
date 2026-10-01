@@ -69,7 +69,7 @@ _FILES = {
     "PLAY_LOG_FILE": "play_log.json", "NOTES_FILE": "notes.json",
     "WISHES_FILE": "wishes.json", "QUALITY_CACHE": "quality_cache.json", "YTM_CACHE_FILE": "ytm_search_cache.json",
 }
-_LIST_STATE = ("library", "queue", "downloads", "history", "play_log", "wishes")
+_LIST_STATE = ("library", "queue", "downloads", "history", "play_log", "wishes", "gone_ids")
 
 
 class BackendTest(unittest.TestCase):

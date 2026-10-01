@@ -156,6 +156,51 @@ class PlaylistParallelTest(BackendTest):
         self.assertEqual([d["status"] for d in alt], ["done"])  # Fehlgeschlagener ist umgezogen
         self.assertIn("1 nicht verfügbar", neu["status_text"])  # Attrappe: bleibt kaputt
 
+    def test_geloeschte_werden_gemerkt_und_uebersprungen(self):
+        self.fake_audit(["idaaaaaaaaa", "kaputt00000"], "Liste")
+        self.run_async(main.run_download("https://www.youtube.com/playlist?list=PLg", "mp3-best"))
+        self.assertIn("kaputt00000", main._state["gone_ids"])
+        main._state["downloads"] = []
+        self.log.write_text("", "utf-8")
+        self.run_async(main.run_download("https://www.youtube.com/playlist?list=PLg", "mp3-best"))
+        hdr = main._state["downloads"][0]
+        self.assertIn("1 gelöscht/privat übersprungen", hdr["status_text"])
+        self.assertNotIn("kaputt", self.log.read_text("utf-8") + str(main._state["downloads"]))
+        # Gemerkt ueber den Neustart
+        main.store.save_settings()
+        main._state["gone_ids"] = []
+        main.store.load_settings()
+        self.assertIn("kaputt00000", main._state["gone_ids"])
+
+    def test_platzhalter_titel_gar_nicht_versuchen(self):
+        self.fake_audit(["idaaaaaaaaa", "idbbbbbbbbb"], "Liste", titles=["Artist - Song", "[Private video]"])
+        self.run_async(main.run_download("https://www.youtube.com/playlist?list=PLp2", "mp3-best"))
+        hdr = main._state["downloads"][0]
+        self.assertIn("✓ 1 neu", hdr["status_text"])
+        self.assertIn("1 gelöscht/privat übersprungen", hdr["status_text"])
+        self.assertEqual(hdr.get("failed_n"), 0)
+
+    def test_verfolgte_playlist_fuellt_den_ordner(self):
+        import os
+        alt = self._lib_and_audit()
+        # Frueher verfolgt mit "Als Playlist": Witchcraft war schon in der Sammlung
+        # und lag nie im Ordner
+        f = {"url": "https://www.youtube.com/playlist?list=PLf", "mode": "playlist",
+             "seen": ["idaaaaaaaaa", "idccccccccc", "iddddddddd1"]}
+        main._state["followed"] = [f]
+        folder = self.tmp / "Downloads" / "Party"
+        folder.mkdir(parents=True)
+        for n in ("Titel idccccccccc.mp3", "Titel iddddddddd1.mp3"):
+            (folder / n).write_bytes(b"ID3")
+        self.run_async(main._follow_check(f))
+        self.assertTrue(os.path.samefile(folder / alt.name, alt))
+        self.assertIn("1 im Ordner ergänzt", main._state["downloads"][0]["status_text"])
+        self.assertEqual(set(f["placed"]), {"idaaaaaaaaa", "idccccccccc", "iddddddddd1"})
+        # Von Hand aus dem Ordner geloescht: bleibt weg
+        (folder / alt.name).unlink()
+        self.run_async(main._follow_check(f))
+        self.assertFalse((folder / alt.name).exists())
+
     # ── Derselbe Song zweimal in der Playlist, oder schon in der Bibliothek ──
 
     def test_doppelt_in_der_playlist(self):
@@ -281,11 +326,14 @@ class PlaylistParallelTest(BackendTest):
                                            entries=entries, folder="Party", label=title, mode="playlist")
         self.run_async(ablauf())
         folder = self.tmp / "Downloads" / "Party"
-        self.assertEqual(len(list(folder.glob("*.mp3"))), 2)                 # nur die neuen
+        # Ordner komplett: 2 neue + der vorhandene hineinverknuepft (vorher nur die neuen)
+        self.assertEqual(len(list(folder.glob("*.mp3"))), 3)
         m3u = (main.PLAYLISTS_DIR / "Party.m3u").read_text("utf-8").splitlines()
         pfade = [l for l in m3u if l and not l.startswith("#")]
         self.assertEqual(len(pfade), 3)                                      # alle drei
-        self.assertEqual(pfade[0], str(alt))                                  # Reihenfolge der Playlist
+        self.assertEqual(pfade[0], str(folder / alt.name))                    # Reihenfolge der Playlist
+        import os
+        self.assertTrue(os.path.samefile(pfade[0], alt))                     # Verknuepfung, keine Kopie
         self.assertTrue((folder / "Party.m3u8").exists())
         self.assertIn("Playlist mit 3 Titeln", main._state["downloads"][0]["status_text"])
 

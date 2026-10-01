@@ -644,6 +644,34 @@ async def _test_services() -> dict:
     return out
 
 
+_SVC_NET_FAIL = "Keine Verbindung"
+_services_checked = False
+
+async def _check_services_on_start(retries: int = 3, wait_s: float = 60):
+    """Einmal je Programmstart die eingetragenen Dienste wirklich pruefen
+    (Last.fm, AcoustID, Spotify) und allen Fenstern melden — vorher stand nach
+    jedem Start nur der gemerkte Stand da. Ohne Netz bleibt der gemerkte Stand
+    stehen und es wird spaeter noch einmal versucht."""
+    global _services_checked
+    if _services_checked:
+        return
+    _services_checked = True
+    keyed = {name for name, k in store._SVC_KEYS.items() if (_state.get(k) or "").strip()}
+    if not keyed:
+        return
+    for attempt in range(retries):
+        res = {k: v for k, v in (await _test_services()).items() if k in keyed}
+        offline = {k for k, v in res.items() if not v.get("ok") and v.get("text", "").startswith(_SVC_NET_FAIL)}
+        store.remember_service_tests({k: v for k, v in res.items() if k not in offline})
+        known = store.known_service_tests()
+        await core.broadcast({"type": "services_test",
+                              **{k: (known.get(k) or v) if k in offline else v for k, v in res.items()}})
+        if not offline:
+            return
+        if attempt < retries - 1:
+            await asyncio.sleep(wait_s)
+
+
 class _RateGate:
     """Hoechstens per_sec Anfragen je Sekunde, ueber alle gleichzeitigen Aufgaben."""
 

@@ -335,6 +335,8 @@ def load_settings():
     _state["lastfm_api_key"]          = str(raw.get("lastfm_api_key", ""))
     _state["acoustid_api_key"]        = str(raw.get("acoustid_api_key", ""))
     _state["radio_enabled"]           = bool(raw.get("radio_enabled", False))
+    # Geloeschte/private YouTube-Titel (Video-IDs): werden nicht mehr versucht
+    _state["gone_ids"]                = [str(v) for v in (raw.get("gone_ids") or [])][-5000:]
     # Wiederholen/Zufall wurden nie gespeichert — "Queue-Ende: Wiederholen"
     # in den Einstellungen war nach jedem Neustart wieder weg.
     _state["repeat"]                  = int(raw.get("repeat", 0)) % 3
@@ -404,6 +406,7 @@ def save_settings():
         "acoustid_api_key":        _state.get("acoustid_api_key", ""),
         "service_ok":              _state.get("service_ok", {}),
         "radio_enabled":           _state.get("radio_enabled", False),
+        "gone_ids":                _state.get("gone_ids", []),
         "repeat":                  _state.get("repeat", 0),
         "shuffle":                 _state.get("shuffle", False),
     })

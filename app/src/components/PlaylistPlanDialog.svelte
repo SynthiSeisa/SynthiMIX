@@ -75,7 +75,7 @@
             <i class="ti ti-list opt-ico" aria-hidden="true"></i>
             <span class="opt-text">
               <span class="opt-lbl">Als Playlist anlegen <span class="rec-tag">Empfohlen</span></span>
-              <span class="opt-sub">{plan.new ? `Lädt ${plan.new} neue` : 'Nichts zu laden'} · Playlist „{plan.title || 'Playlist'}“ mit allen {liste} Titeln, auch als .m3u8 für rekordbox / Virtual DJ</span>
+              <span class="opt-sub">{plan.new ? `Lädt ${plan.new} neue` : 'Nichts zu laden'} · Playlist „{plan.title || 'Playlist'}“ mit allen {liste} Titeln, auch als .m3u8 für rekordbox / Virtual DJ · Ordner komplett{plan.have ? ` (${plan.have} vorhandene verknüpft, kein zusätzlicher Platz)` : ''}</span>
             </span>
           </button>
           <button class="opt" onclick={() => pick('new')} disabled={!plan.new}>
