@@ -45,8 +45,8 @@
           <button class="opt" onclick={() => pick('all')}>
             <i class="ti ti-list opt-ico" aria-hidden="true"></i>
             <span class="opt-text">
-              <span class="opt-lbl">Ganze Playlist</span>
-              <span class="opt-sub" title={choice.playlist_title}>{choice.playlist_title || 'Playlist'} · {choice.count} Titel</span>
+              <span class="opt-lbl">{choice.mix ? 'Ganzer Mix' : 'Ganze Playlist'}</span>
+              <span class="opt-sub" title={choice.playlist_title}>{choice.playlist_title || 'Playlist'} · {choice.mix ? `die ersten ${choice.count}` : choice.count} Titel</span>
             </span>
           </button>
         </div>

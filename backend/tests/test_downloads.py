@@ -44,6 +44,41 @@ class UrlTest(BackendTest):
             with self.subTest(u=u):
                 self.assertFalse(main._is_mixed_playlist_url(u))
 
+    def test_youtube_mix_erkennen(self):
+        mix = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RDdQw4w9WgXcQ&start_radio=1"
+        self.assertEqual(main._mix_id(mix), "RDdQw4w9WgXcQ")
+        self.assertEqual(main._mix_id("https://www.youtube.com/watch?v=ABC&list=PL1"), "")
+        # playlist?list=RD<ID> liefert nichts — ueber das Startvideo oeffnen
+        self.assertEqual(main._mix_watch_url("https://www.youtube.com/playlist?list=RDdQw4w9WgXcQ"),
+                         "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RDdQw4w9WgXcQ")
+        self.assertEqual(main._mix_watch_url(mix), mix)
+
+    def test_mix_ohne_anzahl_gilt_als_playlist(self):
+        # yt-dlp meldet beim Mix keine Anzahl ("NA") — frueher wurde dann nur der
+        # eine Titel geladen, ohne zu fragen
+        import asyncio
+
+        class Proc:
+            def __init__(self, out): self.out = out
+            async def communicate(self): return self.out.encode(), b""
+
+        async def fake_exec(*args, **kw):
+            if "--flat-playlist" in args:
+                return Proc("Mix - Rick Astley - Never Gonna Give You Up\nNA\n")
+            return Proc("Rick Astley - Never Gonna Give You Up\n")
+
+        keep = main.download.asyncio.create_subprocess_exec
+        main.download.asyncio.create_subprocess_exec = fake_exec
+        try:
+            info = self.run_async(main._playlist_probe(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RDdQw4w9WgXcQ&start_radio=1"))
+            normal = self.run_async(main._playlist_probe("https://www.youtube.com/watch?v=ABC&list=PL1"))
+        finally:
+            main.download.asyncio.create_subprocess_exec = keep
+        self.assertEqual((info["count"], info.get("mix")), (main.download.MIX_MAX, True))
+        self.assertEqual(normal["count"], 0)                    # echte Playlist ohne Anzahl: wie bisher
+        self.assertNotIn("mix", normal)
+
     def test_playlist_teile_entfernen(self):
         self.assertEqual(main._strip_playlist_params(
             "https://www.youtube.com/watch?v=ABC&list=PL1&index=7&start_radio=1"),

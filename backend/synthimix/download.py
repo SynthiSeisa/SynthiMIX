@@ -34,6 +34,23 @@ _FMT_MAP = {
 def _is_playlist(url: str) -> bool:
     return "list=" in url or "/playlist" in url
 
+# Automatischer YouTube-Mix ("Mix - Kuenstler", list=RD…): YouTube verlaengert
+# ihn fast endlos (yt-dlp liefert ueber 1.000 Titel, aber keine Anzahl). Geladen
+# werden die ersten MIX_MAX — etwa so viele, wie YouTube beim Oeffnen zeigt.
+MIX_MAX = 50
+
+def _mix_id(url: str) -> str:
+    m = re.search(r"[?&]list=(RD[\w-]+)", url or "")
+    return m.group(1) if m else ""
+
+def _mix_watch_url(url: str) -> str:
+    """playlist?list=RD<Video-ID> liefert bei YouTube nichts — dann den Mix
+    ueber das Startvideo oeffnen (watch?v=<ID>&list=RD<ID>)."""
+    mid = _mix_id(url)
+    if mid and "v=" not in url and len(mid) == 13:
+        return f"https://www.youtube.com/watch?v={mid[2:]}&list={mid}"
+    return url
+
 def _is_mixed_playlist_url(url: str) -> bool:
     """Link auf einen einzelnen Titel, der zugleich eine Playlist mitfuehrt.
 
@@ -89,6 +106,9 @@ async def _playlist_probe(url: str) -> dict:
             info["count"] = int(pl_lines[1].strip())
         except Exception:
             pass
+    if _mix_id(url) and (info["count"] <= 0 or info["count"] > MIX_MAX):
+        info["count"] = MIX_MAX               # Mix: Anzahl unbekannt bzw. fast endlos
+        info["mix"] = True
     return info
 
 async def _ask_playlist_choice(url: str, fmt: str, ws: WebSocket):
@@ -180,6 +200,9 @@ async def _audit_playlist_for_videos(playlist_url: str, progress=None,
     base_args = ["--flat-playlist", "-j", "--quiet", "--no-warnings"]
     if core.FFMPEG_DIR:
         base_args += ["--ffmpeg-location", core.FFMPEG_DIR]
+    if _mix_id(playlist_url):
+        playlist_url = _mix_watch_url(playlist_url)
+        base_args += ["--playlist-end", str(MIX_MAX)]
 
     # Flat-list the whole playlist
     entries: list[dict] = []
@@ -546,7 +569,8 @@ async def _plan_playlist(url: str, fmt: str, ws):
         _plans.pop(k, None)
     _plans[pid] = {"url": url, "fmt": fmt, "title": title, "entries": entries, "ts": now}
     await _send("playlist_plan", plan_id=pid, url=url, format=fmt, title=title,
-                followed=any(f["url"] == url for f in _state.get("followed", [])), **stats)
+                followed=any(f["url"] == url for f in _state.get("followed", [])),
+                mix=bool(_mix_id(url)), **stats)
 
 def _playlist_tracks(entries: list[dict], lib_idx: list) -> list[tuple]:
     """Pfade aller Titel einer Playlist in deren Reihenfolge: geladen, schon in

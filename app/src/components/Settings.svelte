@@ -1093,7 +1093,7 @@
             {/if}
             <div class="row">
               <span class="lbl">yt-dlp, spotdl und ffmpeg automatisch aktuell halten</span>
-              <button class="tog {$ytdlpAutoupdate ? 'on' : ''}" aria-label="Programme automatisch aktuell halten"
+              <button class="tog {$ytdlpAutoupdate ? 'on' : ''}" aria-label="yt-dlp, spotdl und ffmpeg automatisch aktuell halten"
                 onclick={() => send({ type: 'set_ytdlp_autoupdate', value: !$ytdlpAutoupdate })}></button>
             </div>
             <div class="row">

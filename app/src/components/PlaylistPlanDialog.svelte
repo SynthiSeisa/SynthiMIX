@@ -97,6 +97,8 @@
         <div class="dlg-actions foot">
           {#if plan.followed}
             <span class="dlg-hint"><i class="ti ti-bookmark-filled"></i> Wird schon verfolgt</span>
+          {:else if plan.mix}
+            <span class="dlg-hint">YouTube-Mix: die ersten {plan.total} Titel</span>
           {:else}
             <label class="follow-chk" title="Beim Start und auf Knopfdruck neue Titel dieser Playlist laden">
               <input type="checkbox" bind:checked={follow} /> Playlist verfolgen (neue Titel automatisch)
