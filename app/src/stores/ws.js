@@ -132,6 +132,7 @@ export const analyzeProgress    = writable(null)  // null | { done, total }
 export const livePositionMs     = writable(0)      // live-updated aus Player.svelte (nicht vom Backend)
 export const skipNextCrossfade  = writable(false)  // set true before any user-initiated play_at/play_now
 export const playlistContent = writable({})   // { [path]: track[] }
+export const playlistRenamed = writable(null) // Antwort auf rename_playlist / follow_rename
 export const selectionOwner  = writable('')   // '' | 'library' | 'queue' — only one panel may have a selection at a time
 export const notes           = writable('')   // free-text scratchpad, persisted on the backend
 export const remoteStatus      = writable(null)  // null | {running, ip, port, url, error}
@@ -311,6 +312,7 @@ function connect() {
           phrase: msg.phrase_off ?? null, barBeats: msg.bar_beats || 0, phraseSrc: msg.phrase_src || '' } }))
         break
       case 'playlists':       playlists.set(msg.items ?? []); break
+      case 'playlist_renamed': playlistRenamed.set({ ...msg, at: Date.now() }); break
       case 'download_tree':   downloadTree.set(msg.tree ?? { folders: [], files: [] }); downloadTreeLoaded.set(true); break
       case 'search_results':  searchResults.set(msg); break
       case 'settings':

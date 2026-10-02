@@ -1069,6 +1069,22 @@ async def handle_message(ws: WebSocket, msg: dict):
                 await ws.send_text(json.dumps({"type": "playlist_content",
                                                "path": pl_path, "tracks": result}))
 
+    elif t == "rename_playlist":
+        res = library._rename_playlist(msg.get("path", ""), msg.get("name", ""))
+        await ws.send_text(json.dumps({"type": "playlist_renamed", "src": msg.get("src", ""), **res}))
+        if res.get("ok"):
+            store.save_settings()
+            await core.broadcast({"type": "playlists", "items": library._get_playlists()})
+            await download._push_followed()
+
+    elif t == "follow_rename":
+        res = library._rename_followed(msg.get("url", ""), msg.get("name", ""))
+        await ws.send_text(json.dumps({"type": "playlist_renamed", "src": msg.get("src", ""), **res}))
+        if res.get("ok"):
+            store.save_settings()
+            await core.broadcast({"type": "playlists", "items": library._get_playlists()})
+            await download._push_followed()
+
     elif t == "delete_playlist":
         pl_path = msg.get("path", "")
         if pl_path and os.path.exists(pl_path):

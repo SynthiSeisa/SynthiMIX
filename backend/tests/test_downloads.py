@@ -15,6 +15,14 @@ FAKE_YTDLP = textwrap.dedent('''
     args = sys.argv[1:]
     url = args[-1]
     out = args[args.index("-o") + 1]
+    if "flaky" in url:
+        # erster Versuch: Zeitueberschreitung, zweiter klappt
+        mark = os.path.join(os.path.dirname(out), "flaky.mark")
+        os.makedirs(os.path.dirname(mark), exist_ok=True)
+        if not os.path.exists(mark):
+            open(mark, "w").close()
+            print("ERROR: [youtube] flaky: Unable to download webpage: The read operation timed out", flush=True)
+            sys.exit(1)
     if "fail" in url:
         print("ERROR: [youtube] fail: Video unavailable", flush=True)
         sys.exit(1)
@@ -149,6 +157,48 @@ class RunDownloadTest(BackendTest):
         self.assertIsNotNone(pfad)
         self.assertEqual(self._header(url)["status"], "done")
         self.assertIn(pfad, [lt["path"] for lt in main._state["library"]])
+
+    def test_voruebergehender_fehler_zweiter_versuch(self):
+        # Von Hand nochmal laden klappte meist — jetzt macht SynthiMIX das selbst
+        keep = dict(main.download._RETRY_WAIT)
+        main.download._RETRY_WAIT.update(net=0.01, other=0.01, rate=0.01)
+        try:
+            url = "https://www.youtube.com/watch?v=flaky"
+            self.assertIsNotNone(self.run_async(main.run_download(url)))
+        finally:
+            main.download._RETRY_WAIT.clear(); main.download._RETRY_WAIT.update(keep)
+        heads = [d for d in main._state["downloads"] if d.get("url") == url and d["id"] == d["session"]]
+        self.assertEqual([h["status"] for h in heads], ["done"])           # kein Fehler-Eintrag uebrig
+
+    def test_geloeschte_werden_nicht_wiederholt(self):
+        keep = dict(main.download._RETRY_WAIT)
+        main.download._RETRY_WAIT.update(net=0.01, other=0.01, rate=0.01)
+        calls = []
+        orig = main.download.run_download
+
+        async def counting(*a, **kw):
+            calls.append(kw.get("attempt", 1))
+            return await orig(*a, **kw)
+        main.download.run_download = counting
+        try:
+            self.run_async(counting("https://www.youtube.com/watch?v=fail"))
+        finally:
+            main.download.run_download = orig
+            main.download._RETRY_WAIT.clear(); main.download._RETRY_WAIT.update(keep)
+        self.assertEqual(calls, [1])                                        # "Video unavailable" = geloescht
+
+    def test_fehlergruende(self):
+        r = main._dl_error_reason
+        self.assertEqual(r("Unable to download webpage: The read operation timed out"), "net")
+        self.assertEqual(r("unable to download video data: HTTP Error 403: Forbidden"), "net")
+        self.assertEqual(r("[youtube] x: Video unavailable"), "gone")
+        self.assertEqual(r("HTTP Error 429: Too Many Requests"), "rate")
+        self.assertEqual(r("Sign in to confirm you're not a bot"), "bot")
+
+    def test_kommandozeile_mit_pausen_zwischen_versuchen(self):
+        cmd = main._ytdlp_cmd("https://www.youtube.com/watch?v=ABC", "mp3-best", str(self.tmp))
+        self.assertIn("--retry-sleep", cmd)
+        self.assertIn("http:exp=1:8", cmd)
 
     def test_teilerfolg_einzeltitel_ohne_fehlertext(self):
         url = "https://www.youtube.com/watch?v=partial"

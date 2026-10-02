@@ -104,6 +104,8 @@ const ICONS = [
   // 01.10.2026: Titel verfolgter Playlists
   ['folder-check',    'outline'],
   ['ban',             'outline'],
+  // 01.10.2026: Playlist umbenennen
+  ['pencil',          'outline'],
 ]
 
 function maskUrl(name, variant) {

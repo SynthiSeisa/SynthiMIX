@@ -160,6 +160,12 @@ def _ytdlp_cmd(url: str, fmt_id: str, out_dir: str, playlist_folder: str | None 
         "-o", out_tmpl,
         "--newline",
         "--encoding", "utf-8",   # force UTF-8 console output (Windows defaults to the ANSI codepage, mangling umlauts)
+        # Kurze Stoerungen (Zeitueberschreitung, kurzzeitig 403, abgebrochene
+        # Verbindung) nicht sofort als Fehler: yt-dlp versucht es selbst noch
+        # einmal — mit steigender Pause statt zehnmal in derselben Sekunde
+        "--retries", "10", "--fragment-retries", "10", "--extractor-retries", "3",
+        "--retry-sleep", "http:exp=1:8", "--retry-sleep", "fragment:exp=1:8",
+        "--retry-sleep", "extractor:2", "--socket-timeout", "30",
     ]
     if core.FFMPEG_DIR:
         cmd += ["--ffmpeg-location", core.FFMPEG_DIR]
@@ -491,6 +497,7 @@ _DL_REASON_TEXT = {
     "geo":   "In diesem Land gesperrt",
     "gone":  "Gelöscht oder privat",
     "rate":  "YouTube bremst gerade – später nochmal",
+    "net":   "Verbindung unterbrochen",
     "bot":   "YouTube verlangt eine Anmeldung – später nochmal",
     "age":   "Altersbeschränkt – nur mit Anmeldung",
     "other": "Fehler beim Laden",
@@ -681,7 +688,8 @@ async def _follow_check(f: dict):
             await asyncio.sleep(2)
             neu = [lt["path"] for lt in _state["library"] if lt.get("path") not in vorher]
         else:
-            await run_download(url, fmt, follow=f, mode=f.get("mode") or "new")
+            # Eigener Name (umbenannt): fuer die SynthiMIX-Playlist und die .m3u8
+            await run_download(url, fmt, follow=f, mode=f.get("mode") or "new", label=f.get("name") or None)
             neu = f.pop("_new_paths", [])
             seen = list(f.get("seen") or [])
             seen += [v for v in f.pop("_seen_add", []) if v not in seen]
@@ -771,6 +779,9 @@ def follow_tracks(url: str) -> dict | None:
     data = store._load_json(_follow_tracks_file(), {})
     return data.get(url) if isinstance(data, dict) else None
 
+# Voruebergehende Fehler: so viele Sekunden warten, dann einmal nochmal
+_RETRY_WAIT = {"rate": 45, "net": 5, "other": 5}
+
 def _remember_gone(vids: list[str]):
     """Video-IDs geloeschter/privater Titel merken (settings.json, die letzten 5000)."""
     g = list(_state.get("gone_ids") or [])
@@ -789,6 +800,10 @@ def _dl_error_reason(msg: str) -> str:
         return "rate"
     if "confirm you" in m and "bot" in m:
         return "bot"
+    if ("timed out" in m or "timeout" in m or "connection" in m or "incompleteread" in m
+            or "remote end closed" in m or "http error 403" in m or "http error 5" in m
+            or "unable to download webpage" in m or "getaddrinfo" in m or "temporary failure" in m):
+        return "net"
     if "confirm your age" in m or "age-restricted" in m or "inappropriate for some users" in m:
         return "age"
     if ("private video" in m or "has been removed" in m or "video unavailable" in m
@@ -799,7 +814,7 @@ def _dl_error_reason(msg: str) -> str:
 async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] | None = None,
                        folder: str | None = None, label: str | None = None,
                        follow: dict | None = None, mode: str = "new",
-                       follow_new: bool = False, retry: bool = False) -> str | None:
+                       follow_new: bool = False, retry: bool = False, attempt: int = 1) -> str | None:
     """Returns the final output path on success, None on failure.
 
     entries/folder/label: fertige Titelliste statt einer Adresse (z. B.
@@ -1287,11 +1302,15 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
             failed, state["failed"] = state["failed"], []
             second: list[dict] = []
             wait_rate = False
+            wait_s = 0
             for item, orig in failed:
                 reason = item.get("reason")
-                if reason == "rate" and runde == 0:
+                # Voruebergehend: nach einer Pause einmal nochmal (YouTube bremst:
+                # laenger warten). Von Hand klappte das meist auf Anhieb.
+                if reason in _RETRY_WAIT and runde == 0:
                     second.append({**orig, "_item": item, "_note": "zweiter Versuch…"})
-                    wait_rate = True
+                    wait_s = max(wait_s, _RETRY_WAIT[reason])
+                    wait_rate = wait_rate or reason == "rate"
                     continue
                 if reason not in ("geo", "gone"):
                     continue
@@ -1316,10 +1335,10 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
                                    "_item": item, "_orig": orig, "_note": "Ersatz wird geladen…"})
             if not second:
                 break
-            if wait_rate:
-                hdr["status_text"] = "YouTube bremst — kurze Pause…"
+            if wait_s:
+                hdr["status_text"] = "YouTube bremst — kurze Pause…" if wait_rate else "Zweiter Versuch gleich…"
                 await core.push_downloads(force=True)
-                await asyncio.sleep(45)
+                await asyncio.sleep(wait_s)
             await _batch(second, 90 + runde)     # ein Prozess, schonend
 
         fehl = [d for d in _state["downloads"] if d.get("session") == session_id
@@ -1537,6 +1556,7 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
             hdr["error_msg"] = err_lines[-1]
         if not ok:
             hdr["error_msg"] = err_lines[-1] if err_lines else "Download fehlgeschlagen"
+            hdr["reason"] = _dl_error_reason(hdr["error_msg"])
 
     except Exception as e:
         hdr["status"]      = "error"
@@ -1545,6 +1565,20 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
 
     finally:
         _dl_procs.pop(session_id, None)
+
+    # Voruebergehender Fehler beim Einzeltitel: nach einer Pause einmal nochmal
+    # (nicht, wenn der Eintrag inzwischen entfernt/abgebrochen wurde)
+    wait_s = _RETRY_WAIT.get(hdr.get("reason") or "")
+    if hdr.get("status") == "error" and attempt == 1 and wait_s and hdr in _state["downloads"]:
+        hdr["status"] = "active"
+        hdr["status_text"] = "YouTube bremst — kurze Pause…" if hdr["reason"] == "rate" else "Zweiter Versuch gleich…"
+        await core.push_downloads(force=True)
+        await asyncio.sleep(wait_s)
+        if hdr not in _state["downloads"]:
+            return None
+        _state["downloads"][:] = [d for d in _state["downloads"] if d.get("session") != session_id]
+        return await run_download(url, fmt_id, entries=entries, folder=folder, label=label, follow=follow,
+                                  mode=mode, follow_new=follow_new, retry=retry, attempt=2)
 
     # Record in download history
     if hdr.get("path") and os.path.exists(hdr["path"]):

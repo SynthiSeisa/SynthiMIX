@@ -69,6 +69,16 @@
   // draw() liest alle Props selbst: der Effekt laeuft bei jeder Aenderung einmal
   $effect(() => { if (canvas) draw() })
 
+  // Breite geaendert (Fenster, Breitbild, Seitenleiste): neu zeichnen. Vorher
+  // streckte der Browser das alte Bild — Schrift und Balken wirkten
+  // breitgezogen, vor allem beim naechsten Titel, der sich nicht bewegt.
+  $effect(() => {
+    if (!canvas) return
+    const ro = new ResizeObserver(() => draw())
+    ro.observe(canvas)
+    return () => ro.disconnect()
+  })
+
   // Mix-Zone in der Waveform: leicht getoent, orange Kanten (zum Farbband)
   function mixZone(ctx, x0, x1, w, top, h, col) {
     const a = Math.round(Math.max(0, x0) * w), b = Math.round(Math.min(1, x1) * w)
@@ -118,13 +128,19 @@
 
   function draw() {
     const ctx = canvas.getContext('2d')
-    const w = canvas.width  = canvas.offsetWidth
-    const H = canvas.height = canvas.offsetHeight
+    // In echten Bildschirm-Pixeln zeichnen (Windows-Skalierung 125/150 %),
+    // sonst wird alles unscharf hochgerechnet. w/H bleiben CSS-Pixel.
+    const dpr = window.devicePixelRatio || 1
+    const w = canvas.offsetWidth, H = canvas.offsetHeight
     if (w === 0 || H === 0) return
+    const W = Math.round(w * dpr), HH = Math.round(H * dpr)
+    if (canvas.width !== W) canvas.width = W
+    if (canvas.height !== HH) canvas.height = HH
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    ctx.clearRect(0, 0, W, HH)
     const top = BAND_H
     const h = H - top
     const mid = top + h / 2
-    ctx.clearRect(0, 0, w, H)
 
     const px = position * w
 
@@ -139,20 +155,29 @@
       outro: v('--c-wf-outro', '#4f8fe8'),
       mix:   v('--c-wf-mix',   '#ff9a33'),
     }
+    // Balken in Geraete-Pixeln: jeder Balken beginnt und endet auf ganzen
+    // Pixeln (gerundet aus der genauen Lage) — vorher wurden Lage und Breite
+    // getrennt abgerundet, bei breiten Bildschirmen entstand ein unruhiges
+    // Muster aus 2- und 3-Pixel-Abstaenden. Ab 3 px Breite 1 px Luecke.
+    const midD = mid * dpr, pxD = px * dpr
     if (data.length > 0) {
-      const bw = w / data.length
-      data.forEach((amp, i) => {
-        const x  = i * bw
-        const bh = Math.max(1, amp * mid * 0.85)
-        ctx.fillStyle = x < px ? cPlayed : cUnplayed
-        ctx.fillRect(Math.floor(x), mid - bh, Math.max(1, Math.floor(bw)), bh * 2)
-      })
+      const bw = W / data.length
+      const gap = bw >= 3 ? 1 : 0
+      for (let i = 0; i < data.length; i++) {
+        const x0 = Math.round(i * bw), x1 = Math.round((i + 1) * bw)
+        // gleicher Massstab wie bisher, aber nicht mehr ins Farbband hinein
+        const bh = Math.min(h / 2 * dpr, Math.max(dpr, data[i] * midD * 0.85))
+        ctx.fillStyle = x0 < pxD ? cPlayed : cUnplayed
+        ctx.fillRect(x0, midD - bh, Math.max(1, x1 - x0 - gap), bh * 2)
+      }
     } else {
       ctx.fillStyle = cPlayed
-      ctx.fillRect(0, mid - 1, px, 2)
+      ctx.fillRect(0, midD - dpr, pxD, 2 * dpr)
       ctx.fillStyle = cUnplayed
-      ctx.fillRect(px, mid - 1, w - px, 2)
+      ctx.fillRect(pxD, midD - dpr, W - pxD, 2 * dpr)
     }
+    // Ab hier in CSS-Pixeln (Farbband, Mix-Zonen, Abspielposition)
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
     // Farbband oben, Mix-Zonen in der Waveform nur leicht getoent
     drawBand(ctx, w, theme)

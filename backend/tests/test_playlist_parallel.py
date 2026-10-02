@@ -18,6 +18,13 @@ FAKE = textwrap.dedent(r'''
     for u in urls:
         vid = re.search(r"v=([\w-]{11})", u).group(1)
         print(f"[youtube] Extracting URL: {u}", flush=True)
+        if vid.startswith("wackel"):
+            mark = os.path.join(os.path.dirname(out.replace("%(title)s", "x")), vid + ".mark")
+            os.makedirs(os.path.dirname(mark), exist_ok=True)
+            if not os.path.exists(mark):
+                open(mark, "w").close()
+                print(f"ERROR: [youtube] {vid}: Unable to download webpage: timed out", flush=True)
+                continue
         if vid.startswith("kaputt"):
             print(f"ERROR: [youtube] {vid}: Video unavailable", flush=True)
             continue
@@ -119,6 +126,18 @@ class PlaylistParallelTest(BackendTest):
         self.assertEqual(err["reason"], "gone")
         self.assertEqual(err["status_text"], "Gelöscht oder privat")
         self.assertEqual(main._state["downloads"][0]["failed_n"], 1)
+
+    def test_voruebergehender_fehler_wird_wiederholt(self):
+        keep = dict(main.download._RETRY_WAIT)
+        main.download._RETRY_WAIT.update(net=0.01, other=0.01, rate=0.01)
+        try:
+            self.fake_audit(["idaaaaaaaaa", "wackel00000"], "Liste")
+            self.run_async(main.run_download("https://www.youtube.com/playlist?list=PLw", "mp3-best"))
+        finally:
+            main.download._RETRY_WAIT.clear(); main.download._RETRY_WAIT.update(keep)
+        hdr = main._state["downloads"][0]
+        self.assertEqual(hdr["failed_n"], 0)
+        self.assertIn("✓ 2 neu", hdr["status_text"])
 
     def test_ersatz_wird_geladen(self):
         # Gesperrt/geloescht: eine andere Version desselben Songs wird genommen

@@ -41,6 +41,61 @@ def _get_playlists() -> list[dict]:
         result.append({"name": p.stem, "path": str(p), "track_count": count})
     return result
 
+def _safe_pl_name(name: str) -> str:
+    """Playlist-Name als Dateiname (wie download._save_as_playlist)."""
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', (name or "").strip()).strip(' .')[:80]
+
+def _rename_playlist(path: str, name: str) -> dict:
+    """SynthiMIX-Playlist umbenennen. Gehoert sie zu einer verfolgten Playlist,
+    merkt sich diese den Namen (sonst legte die naechste Pruefung die Playlist
+    wieder unter dem YouTube-Namen an); die .m3u8 im Download-Ordner zieht mit.
+    Der Download-Ordner selbst bleibt (keine Musikdateien verschieben)."""
+    safe = _safe_pl_name(name)
+    src = Path(path or "")
+    if not safe:
+        return {"ok": False, "error": "Bitte einen Namen eingeben."}
+    try:
+        inside = src.parent.resolve() == Path(core.PLAYLISTS_DIR).resolve()
+    except OSError:
+        inside = False
+    if not inside or not src.is_file() or src.suffix.lower() != ".m3u":
+        return {"ok": False, "error": "Playlist nicht gefunden."}
+    dst = src.with_name(safe + ".m3u")
+    if dst.exists() and os.path.normcase(str(dst.resolve())) != os.path.normcase(str(src.resolve())):
+        return {"ok": False, "error": f"„{safe}“ gibt es schon."}
+    old = src.stem
+    os.rename(src, dst)
+    out_dir = Path(_state.get("download_dir") or (core.BASE_DIR / "Downloads"))
+    for f in _state.get("followed", []):
+        if _safe_pl_name(f.get("name") or f.get("title") or "") != old:
+            continue
+        f["name"] = name.strip()
+        m3u8 = (out_dir / f["folder"] if f.get("folder") else out_dir) / (old + ".m3u8")
+        try:
+            if m3u8.is_file():
+                os.rename(m3u8, m3u8.with_name(safe + ".m3u8"))
+        except OSError as e:
+            print(f"[playlist] .m3u8 nicht umbenannt: {e}", flush=True)
+    return {"ok": True, "path": str(dst), "old": str(src), "name": dst.stem}
+
+def _rename_followed(url: str, name: str) -> dict:
+    """Eigener Name fuer eine verfolgte Playlist (leer = wieder der YouTube-Name).
+    Die zugehoerige SynthiMIX-Playlist wird mit umbenannt."""
+    f = next((x for x in _state.get("followed", []) if x.get("url") == url), None)
+    if f is None:
+        return {"ok": False, "error": "Nicht gefunden."}
+    new = (name or "").strip() or f.get("title") or ""
+    old_file = Path(core.PLAYLISTS_DIR) / (_safe_pl_name(f.get("name") or f.get("title") or "") + ".m3u")
+    if old_file.is_file():
+        res = _rename_playlist(str(old_file), new)
+        if not res.get("ok"):
+            return res
+    if (name or "").strip() and name.strip() != f.get("title"):
+        f["name"] = name.strip()
+    else:
+        f.pop("name", None)
+    return {"ok": True}
+
 def _parse_m3u(path: str) -> list[dict]:
     tracks = []; title = ""; dur = 0
     try:

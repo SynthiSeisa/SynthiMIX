@@ -11,7 +11,7 @@
            lastfmApiKey, acoustidApiKey,
            fpcalcInstalling, fpcalcInstallError,
            spotdlInstalling, spotdlInstallError, spotdlInstallText,
-           watchedFolders, watchedFolderImpact, ytdlpAutoupdate, excludedFolders, toolUpdates, servicesTest, setupOpen, changelog, followed, followedChannels, followTracks, dlParallel, relocateState } from '../stores/ws.js'
+           watchedFolders, watchedFolderImpact, ytdlpAutoupdate, excludedFolders, toolUpdates, servicesTest, setupOpen, changelog, followed, followedChannels, followTracks, playlistRenamed, dlParallel, relocateState } from '../stores/ws.js'
   import { infoHints } from '../lib/infohints.js'
 
   let tab = $state('playback')
@@ -76,6 +76,22 @@
   let chOpen = $state(new Set())
   const soloFollowed = $derived($followed.filter(f => !f.channel))
   function chToggle(url) { const s = new Set(chOpen); s.has(url) ? s.delete(url) : s.add(url); chOpen = s }
+  // Verfolgte Playlist umbenennen (eigener Name statt des YouTube-Namens)
+  let fRename = $state(null)        // { url, name }
+  let fRenameErr = $state(null)     // { url, text }
+  function startFollowRename(f) { fRename = { url: f.url, name: f.name || f.title }; fRenameErr = null }
+  function commitFollowRename() {
+    const r = fRename
+    fRename = null
+    if (r) send({ type: 'follow_rename', url: r.url, name: r.name.trim(), src: 'settings' })
+  }
+  function focusSelect(el) { el.focus(); el.select() }
+  $effect(() => {
+    const r = $playlistRenamed
+    if (!r || r.ok || r.src !== 'settings') return
+    untrack(() => { fRenameErr = { text: r.error || 'Umbenennen ging nicht.' }; setTimeout(() => { fRenameErr = null }, 4000) })
+  })
+
   // Aufgeklappte Playlist: ihre Titel (Stand der letzten Pruefung) mit Zustand
   let ftOpen = $state(new Set())
   function ftToggle(url) {
@@ -820,6 +836,14 @@
           </div>
 
           <div class="group">
+            {#snippet fRenameField(f)}
+              <div class="follow-main">
+                <input class="f-rename" bind:value={fRename.name} use:focusSelect aria-label="Eigener Name der Playlist" placeholder={f.title}
+                       onkeydown={(e) => { if (e.key === 'Enter') commitFollowRename(); else if (e.key === 'Escape') { e.stopPropagation(); fRename = null } }}
+                       onblur={commitFollowRename} />
+                <span class="follow-meta">Enter speichert · leer = YouTube-Name „{f.title}“</span>
+              </div>
+            {/snippet}
             {#snippet ftView(f)}
               {@const d = $followTracks[f.url]}
               <div class="ftracks">
@@ -839,6 +863,7 @@
               </div>
             {/snippet}
             <div class="group-title">Verfolgte Playlists und Kanäle</div>
+            {#if fRenameErr}<div class="notice error" role="alert">{fRenameErr.text}</div>{/if}
             <div class="hint">Werden beim Start und auf Knopfdruck im Hintergrund geprüft; in den Downloads erscheint nur, was wirklich geladen wird. Klick auf eine Playlist zeigt ihre Titel. Ganzen Kanal verfolgen: Kanal-Link (z. B. youtube.com/@name) in die Download-Zeile einfügen.</div>
             {#each $followedChannels as c (c.url)}
               <div class="follow-list ch">
@@ -875,13 +900,19 @@
                   {#if chOpen.has(c.url)}
                     {#each $followed.filter(f => f.channel === c.url) as f (f.url)}
                       <div class="follow-row sub">
+                        {#if fRename?.url === f.url}
+                          {@render fRenameField(f)}
+                        {:else}
                         <button class="follow-main ftoggle" onclick={() => ftToggle(f.url)} aria-expanded={ftOpen.has(f.url)} title="Titel anzeigen">
-                          <span class="follow-name" title={f.url}><i class="ti ti-chevron-right fchev" class:open={ftOpen.has(f.url)} aria-hidden="true"></i> {f.title}</span>
+                          <span class="follow-name" title={f.name ? `YouTube: ${f.title}` : f.url}><i class="ti ti-chevron-right fchev" class:open={ftOpen.has(f.url)} aria-hidden="true"></i> {f.name || f.title}</span>
                           <span class="follow-meta">
                             {#if f.checking}<i class="ti ti-refresh spin" aria-hidden="true"></i>{' wird geprüft…'}{:else}{followAgo(f.last_check)}{/if}{#if !f.checking && f.last_check && f.last_new}{' · '}<b>{f.last_new} neu</b>{/if}{` · ${f.known} bekannt`}
                           </span>
                           {#if !f.checking && f.last_result}<span class="follow-res">{f.last_result}</span>{/if}
                         </button>
+                        {/if}
+                        <button class="btn btn-icon btn-sm" onclick={() => startFollowRename(f)}
+                                title="Eigenen Namen vergeben" aria-label="Eigenen Namen vergeben"><i class="ti ti-pencil"></i></button>
                         <button class="btn btn-icon btn-sm" onclick={() => send({ type: 'follow_check', url: f.url })} disabled={f.checking}
                                 title="Jetzt auf neue Titel prüfen" aria-label="Jetzt prüfen"><i class="ti ti-refresh"></i></button>
                         <button class="btn btn-icon btn-sm" onclick={() => send({ type: 'follow_remove', url: f.url })}
@@ -898,13 +929,19 @@
                 {#each soloFollowed as f (f.url)}
                   <div class="follow-row">
                     <i class="ti ti-bookmark-filled follow-ico" aria-hidden="true"></i>
+                    {#if fRename?.url === f.url}
+                      {@render fRenameField(f)}
+                    {:else}
                     <button class="follow-main ftoggle" onclick={() => ftToggle(f.url)} aria-expanded={ftOpen.has(f.url)} title="Titel anzeigen">
-                      <span class="follow-name" title={f.url}><i class="ti ti-chevron-right fchev" class:open={ftOpen.has(f.url)} aria-hidden="true"></i> {f.title}</span>
+                      <span class="follow-name" title={f.name ? `YouTube: ${f.title}` : f.url}><i class="ti ti-chevron-right fchev" class:open={ftOpen.has(f.url)} aria-hidden="true"></i> {f.name || f.title}</span>
                       <span class="follow-meta">
                         {#if f.checking}<i class="ti ti-refresh spin" aria-hidden="true"></i>{' wird geprüft…'}{:else}{followAgo(f.last_check)}{/if}{#if !f.checking && f.last_check && f.last_new}{' · '}<b>{f.last_new} neu</b>{/if}{` · ${f.known} bekannt`}{FOLLOW_MODE[f.mode] ? ` · ${FOLLOW_MODE[f.mode]}` : ''}
                       </span>
                       {#if !f.checking && f.last_result}<span class="follow-res">{f.last_result}</span>{/if}
                     </button>
+                    {/if}
+                    <button class="btn btn-icon btn-sm" onclick={() => startFollowRename(f)}
+                            title="Eigenen Namen vergeben" aria-label="Eigenen Namen vergeben"><i class="ti ti-pencil"></i></button>
                     <button class="btn btn-icon btn-sm" onclick={() => send({ type: 'follow_check', url: f.url })} disabled={f.checking}
                             title="Jetzt auf neue Titel prüfen" aria-label="Jetzt prüfen"><i class="ti ti-refresh"></i></button>
                     <button class="btn btn-icon btn-sm" onclick={() => send({ type: 'follow_remove', url: f.url })}
@@ -1634,6 +1671,8 @@
   .follow-name { font-size: var(--fs-body); font-weight: 600; color: var(--c-tx1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .follow-meta { font-size: var(--fs-sm); color: var(--c-tx3); }
   .follow-meta b { color: var(--c-accent-tx); }
+  .f-rename { font: inherit; font-weight: 600; color: var(--c-tx1); background: var(--c-bg1); border: 1px solid var(--c-accent);
+              border-radius: var(--r-s, 4px); padding: 2px 6px; outline: none; min-width: 0; }
   .ftoggle { background: none; border: none; padding: 0; margin: 0; text-align: left; cursor: pointer; color: inherit; font: inherit; }
   .ftoggle:hover .follow-name { color: var(--c-accent-tx); }
   .ftoggle .fchev { font-size: 12px; color: var(--c-tx4); vertical-align: -1px; }

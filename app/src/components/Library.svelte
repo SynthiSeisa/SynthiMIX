@@ -1,6 +1,6 @@
 <script>
   import { onMount, untrack, tick } from 'svelte'
-  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected, qualityScan, revealPath, excludedFolders, watchedFolders, downloadDir, startQualityBatch } from '../stores/ws.js'
+  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, playlistRenamed, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected, qualityScan, revealPath, excludedFolders, watchedFolders, downloadDir, startQualityBatch } from '../stores/ws.js'
   import BetterVersionDialog from './BetterVersionDialog.svelte'
   import { keySortValue } from '../lib/keys.js'
   import { startFileDrag, ownDrag, hasFiles, droppedPaths } from '../lib/fileDrag.js'
@@ -1184,6 +1184,36 @@
   let folderCtx    = $state(null)  // { x, y, path }
   let playlistCtx  = $state(null)  // { x, y, path, name }
 
+  // ── Playlist umbenennen (Rechtsklick → Umbenennen) ──────────────────────
+  let plRename = $state(null)       // { path, name, orig }
+  let plRenameErr = $state(null)    // { path, text }
+  function startPlRename(pl) { plRename = { path: pl.path, name: pl.name, orig: pl.name }; plRenameErr = null }
+  function commitPlRename() {
+    const r = plRename
+    plRename = null
+    if (!r || !r.name.trim() || r.name.trim() === r.orig) return
+    send({ type: 'rename_playlist', path: r.path, name: r.name.trim(), src: 'library' })
+  }
+  function focusSelect(el) { el.focus(); el.select() }
+  $effect(() => {
+    const r = $playlistRenamed
+    if (!r) return
+    untrack(() => {
+      if (!r.ok) {
+        if (r.src !== 'library') return
+        plRenameErr = { text: r.error || 'Umbenennen ging nicht.' }
+        setTimeout(() => { plRenameErr = null }, 4000)
+        return
+      }
+      if (r.old && navMode === 'playlist:' + r.old) navMode = 'playlist:' + r.path
+      if (r.old) playlistContent.update(m => {
+        const c = { ...m }
+        if (c[r.old]) { c[r.path] = c[r.old]; delete c[r.old] }
+        return c
+      })
+    })
+  })
+
   function onPlaylistCtx(e, pl) {
     e.preventDefault()
     e.stopPropagation()
@@ -1680,7 +1710,14 @@
                ondrop={(e) => dropOnPlaylist(e, pl.path)}
                title={pl.name}>
             <i class="ti ti-list t-ico-sm" aria-hidden="true"></i>
-            <span class="t-name">{pl.name}</span>
+            {#if plRename?.path === pl.path}
+              <input class="t-rename" bind:value={plRename.name} use:focusSelect aria-label="Neuer Name der Playlist"
+                     onclick={(e) => e.stopPropagation()}
+                     onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Enter') commitPlRename(); else if (e.key === 'Escape') plRename = null }}
+                     onblur={commitPlRename} />
+            {:else}
+              <span class="t-name">{pl.name}</span>
+            {/if}
             {#if $playlistContent[pl.path]}
               <span class="t-count">{$playlistContent[pl.path].length}</span>
             {:else if pl.track_count > 0}
@@ -1694,6 +1731,7 @@
                   onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), deletePlaylist(pl.path))}><i class="ti ti-trash"></i></span>
           </div>
         {/each}
+        {#if plRenameErr}<div class="t-rename-err" role="alert">{plRenameErr.text}</div>{/if}
       {/if}
     {/if}
 
@@ -2421,6 +2459,7 @@
     }}>Auf Duplikate scannen</button>
     <div class="ctx-sep"></div>
     <button onclick={() => { loadPlaylistToQueue(playlistCtx.path); playlistCtx = null }}>In Queue laden</button>
+    <button onclick={() => { const pl = $playlists.find(p => p.path === playlistCtx.path); if (pl) startPlRename(pl); playlistCtx = null }}>Umbenennen</button>
     <button class="ctx-danger" onclick={() => { deletePlaylist(playlistCtx.path); playlistCtx = null }}>Löschen</button>
   </div>
 {/if}
@@ -2469,6 +2508,9 @@
   .t-item.active .t-ico, .t-child.active .t-ico-sm { color: var(--c-accent-tx); }
 
   .t-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .t-rename { flex: 1; min-width: 0; font: inherit; color: var(--c-tx1); background: var(--c-bg1);
+              border: 1px solid var(--c-accent); border-radius: var(--r-s, 4px); padding: 1px 6px; outline: none; }
+  .t-rename-err { padding: 2px 10px 4px 34px; font-size: var(--fs-sm); color: var(--c-red-tx); }
   .t-count {
     flex-shrink: 0; font-size: var(--fs-cap); color: var(--c-tx5);
     font-variant-numeric: tabular-nums; font-weight: 400;
