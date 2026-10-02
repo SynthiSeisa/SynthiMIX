@@ -1,7 +1,7 @@
 // Rechenteil von Beat-Sync, Phrasen und Bass-Tausch (node --test, ohne Abhaengigkeiten)
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { barLen, snapToPhrase, barAlignedStart, swapEligible, bassSwapPlan, phaseOf } from '../src/lib/beatsync.js'
+import { barLen, snapToPhrase, barAlignedStart, swapEligible, bassSwapPlan, phaseOf, createSync } from '../src/lib/beatsync.js'
 
 const g128 = { bpm: 128, off: 0.1, conf: 0.8, phrase: 0.1, barBeats: 4 }
 const bar128 = 4 * 60 / 128                    // 1,875 s
@@ -66,4 +66,29 @@ test('Bass-Tausch: 2 Takte in der Mitte, auf einer Eins', () => {
   assert.equal(bassSwapPlan(10, 1, { bpm: 90, off: 0, barBeats: 4 }, 16).bars, 1)
   // zu kurzer Uebergang: kein Tausch
   assert.equal(bassSwapPlan(10, 1, g128, 1.5), null)
+})
+
+test('Tonhoehe: kleiner Tempo-Unterschied ohne Erhalt (Schlaege exakt), grosser mit', () => {
+  const el = () => ({ playbackRate: 1, currentTime: 10, paused: false, seeking: false, preservesPitch: true })
+  const g = (bpm) => ({ bpm, off: 0, conf: 0.9 })
+  const opts = { tempo: true, phase: true, maxDiff: 0.15 }
+  let a = el(), b = el()
+  assert.equal(createSync(a, b, g(174), g(172), opts).pitchFree, true)        // 1,2 %
+  assert.deepEqual([a.preservesPitch, b.preservesPitch], [false, false])
+  a = el(); b = el()
+  assert.equal(createSync(a, b, g(128), g(144), opts).pitchFree, false)       // 11 %
+  assert.deepEqual([a.preservesPitch, b.preservesPitch], [true, true])
+  a = el(); b = el()
+  assert.equal(createSync(a, b, g(87), g(174), opts).pitchFree, true)         // Halbtempo = gleiches Tempo
+})
+
+test('Anfangsfehler wird einmal gemeldet (daraus lernt der Player den Vorlauf)', () => {
+  const cur = { playbackRate: 1, currentTime: 10.0, paused: false, seeking: false }
+  const next = { playbackRate: 1, currentTime: 0.48, paused: false, seeking: false }
+  const got = []
+  const s = createSync(cur, next, { bpm: 120, off: 0, conf: 0.9 }, { bpm: 120, off: 0, conf: 0.9 },
+                       { tempo: true, phase: true, onStartError: (e) => got.push(e) })
+  for (let i = 0; i < 6; i++) s.tick(true, 0.1)
+  assert.equal(got.length, 1)
+  assert.ok(Math.abs(got[0] - 0.02) < 0.002, got[0])     // naechster 20 ms hinter dem Schlag
 })

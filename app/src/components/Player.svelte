@@ -60,11 +60,22 @@
     const g = path ? get(beatGrids)[path] : null
     return g && g.bpm > 0 ? g : null
   }
-  function startSync(oldEl, newEl, oldPath, newPath) {
+  function startSync(oldEl, newEl, oldPath, newPath, onStartError = null) {
     const cfg = get(appSettings)
     if (!cfg.beatAlignCf && !cfg.tempoMatch) return null
     return createSync(oldEl, newEl, gridOf(oldPath), gridOf(newPath),
-                      { tempo: cfg.tempoMatch !== false, phase: !!cfg.beatAlignCf, maxDiff: maxTempoDiff(), meet: true })
+                      { tempo: cfg.tempoMatch !== false, phase: !!cfg.beatAlignCf, maxDiff: maxTempoDiff(), meet: true,
+                        onStartError })
+  }
+  // Wie lange Springen und Starten des naechsten Titels dauern: daraus wird
+  // berechnet, wo er einsetzt. Gemessen hoerbar startete er mit fest 120 ms
+  // 60-130 ms zu frueh — jetzt aus jedem Uebergang gelernt und gespeichert.
+  let syncLead = 0.12
+  try { const v = parseFloat(localStorage.getItem('synthimix.syncLead')); if (v >= -0.05 && v <= 0.4) syncLead = v } catch {}
+  function learnLead(errSec) {
+    if (!isFinite(errSec) || Math.abs(errSec) > 0.25) return       // ganz daneben: eher ein Rasterfehler
+    syncLead = Math.max(-0.05, Math.min(0.4, syncLead + 0.6 * errSec))
+    try { localStorage.setItem('synthimix.syncLead', syncLead.toFixed(4)) } catch {}
   }
   function maxTempoDiff() { return (get(appSettings).maxTempoDiff ?? 8) / 100 }
   // Uebergang abgebrochen: laufender Titel zurueck aufs Original-Tempo
@@ -1071,18 +1082,24 @@
   })
 
   // ── Seek command from backend ──────────────────────────────────────────────
-  let _knownPos = 0
+  // Gesprungen wird nur bei echten Spul-Befehlen (seek_seq zaehlt sie: Wellenform,
+  // Fernbedienung, Zurueck an den Anfang). Frueher reagierte der Player auf jede
+  // geaenderte Position — ein Doppelklick auf einen anderen Titel setzt sie im
+  // Backend auf 0, und je nach vorheriger Meldung spulte der noch laufende Titel
+  // an den Anfang zurueck, bevor der Uebergang kam.
+  let _knownSeek = null
   $effect(() => {
-    const p = $playerState.position_ms
-    if (p !== _knownPos) {
-      _knownPos = p
-      const el = untrack(cur)
-      if (!el) return
-      // queue_remove causes backend to echo our own position back via push_player().
-      // Any seek (even accurate) causes a brief audio glitch — skip if within 1.5s.
-      if (Math.abs(p - posMs) < 1500) return
-      el.currentTime = p / 1000; posMs = p
-    }
+    const s = $playerState.seek_seq ?? 0
+    const p = $playerState.position_ms ?? 0
+    const first = _knownSeek === null
+    if (!first && s === _knownSeek) return
+    _knownSeek = s
+    if (first && p <= 0) return          // nach dem Verbinden: nur fortsetzen, wenn es etwas fortzusetzen gibt
+    const el = untrack(cur)
+    if (!el) return
+    // Eigene Spul-Befehle kommen als Echo zurueck — ein erneuter Sprung knackt
+    if (Math.abs(p - posMs) < 1500) return
+    el.currentTime = p / 1000; posMs = p
   })
 
   function _nextIdx() {
@@ -1164,7 +1181,7 @@
     inactive.dataset.path = nextTrk.path
     inactive.load()
     const curPath = cur()?.dataset.path
-    const beginSync = () => { if (!cfCancelled && cfActive) cfSync = startSync(cur(), inactive, curPath, nextTrk.path) }
+    const beginSync = () => { if (!cfCancelled && cfActive) cfSync = startSync(cur(), inactive, curPath, nextTrk.path, learnLead) }
 
     inactive.addEventListener('canplay', function onCanPlay() {
       if (cfCancelled) return
@@ -1186,7 +1203,7 @@
       // derselben Stelle im Takt, an der der laufende gerade steht (Eins auf Eins)
       if (get(appSettings).beatAlignCf) {
         skipSec = _snapIntroSec(skipSec, gridOf(nextTrk.path), elDur, introDragged)
-        skipSec = barAlignedStart(cur(), skipSec, gridOf(curPath), gridOf(nextTrk.path), 0.12, maxTempoDiff())
+        skipSec = barAlignedStart(cur(), skipSec, gridOf(curPath), gridOf(nextTrk.path), syncLead, maxTempoDiff())
       }
 
       if (skipSec > 0.05) {
@@ -1369,7 +1386,6 @@
 
     posMs = newEl ? (newEl.currentTime ?? 0) * 1000 : 0
     durMs = newEl ? (newEl.duration    ?? 0) * 1000 : 0
-    _knownPos = 0
 
     // Immediately show next track's waveform — don't wait for WS round-trip.
     const wfNext = get(waveformNext)
@@ -1517,7 +1533,7 @@
     const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
     const ms    = ratio * durMs
     const el    = cur()
-    if (el && durMs > 0) { el.currentTime = ms / 1000; posMs = ms; _knownPos = Math.floor(ms) }
+    if (el && durMs > 0) { el.currentTime = ms / 1000; posMs = ms }
     send({ type: 'seek', position_ms: Math.floor(ms) })
   }
 
@@ -1552,6 +1568,9 @@
       get djPlan() { return djPlan }, get drops() { return [curDrops, nextDrops] }, get rollerOk() { return rollerOk },
       pickDj: (t) => pickDj(t), get fx() { return [fxA?.type, fxA?.frequency.value, fxB?.type, fxB?.frequency.value] }, lufsOf: (t) => lufsOf(t), grid: (p) => gridOf(p),
       get audioTime() { return audioCtx?.currentTime ?? 0 }, get sinkId() { return audioCtx?.sinkId ?? null },
+      // Fuer Messungen in den Oberflaechen-Tests: das Signal je Deck hinter dem Regler
+      get taps() { return audioCtx ? { ctx: audioCtx, A: gainA, B: gainB } : null },
+      get syncLead() { return syncLead },
     }
   }
 

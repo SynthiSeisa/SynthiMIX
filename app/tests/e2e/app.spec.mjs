@@ -245,6 +245,32 @@ test('Pause mitten im Uebergang haelt beide Titel an', async () => {
   expect(st).toEqual({ a: true, b: true })
 })
 
+test('Doppelklick auf einen anderen Titel: der laufende springt nicht an den Anfang', async () => {
+  await startFirst(3)
+  // Spulen ueber das Backend: dessen letzte Position ist danach nicht 0 —
+  // genau dann spulte der Titelwechsel den laufenden Titel frueher zurueck
+  await stores(`m.send({ type: 'seek', position_ms: 20000 })`)
+  await page.waitForFunction(() => { const P = window.__player; const el = P.which === 'A' ? P.elA : P.elB; return el.currentTime > 19 }, null, { timeout: 10000 })
+  await page.waitForTimeout(1000)
+  const r = await page.evaluate(async () => {
+    const P = window.__player
+    const old = P.which === 'A' ? P.elA : P.elB
+    const rows = [...document.querySelectorAll('.queue-list .row')]
+    rows[2].dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    let min = old.currentTime
+    const t0 = performance.now()
+    while (performance.now() - t0 < 2500) {
+      if (!old.paused) min = Math.min(min, old.currentTime)
+      await new Promise(res => setTimeout(res, 20))
+    }
+    const neu = old === P.elA ? P.elB : P.elA
+    return { min, neuPath: neu.dataset.path || '', neuPlaying: !neu.paused }
+  })
+  expect(r.min).toBeGreaterThan(15)                  // nie zurueck an den Anfang
+  expect(r.neuPlaying).toBe(true)                    // Uebergang laeuft
+  expect(r.neuPath).toContain('Charlie')
+})
+
 test('Lange Warteschlange zeichnet nur sichtbare Zeilen', async () => {
   await stores(`const lib = read(m.library); m.queue.set(Array.from({ length: 1500 }, (_, i) => ({ ...lib[i % lib.length], title: 'Titel ' + i })))`)
   const rows = await page.locator('.queue-list .row').count()

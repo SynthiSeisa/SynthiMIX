@@ -155,7 +155,7 @@ def _apply_bpm(lt: dict, bpm: int, g: dict | None):
     lt["bpm_rev"] = _BPM_REV
     if g and int(lt.get("grid_rev") or 1) < beatgrid.GRID_REV:
         g = {k: v for k, v in g.items() if k != "grid_fit"}
-        for k in ("phrase_off", "bar_beats", "phrase_src"):
+        for k in beatgrid._PHRASE_KEYS:
             lt.pop(k, None)
         lt.update({k: g[k] for k in beatgrid._GRID_KEYS if k in g})
         beatgrid._beatgrid_cache.pop(lt.get("path"), None)
@@ -555,7 +555,7 @@ async def _refresh_tag_meta_task():
         if upd is None:
             continue
         if upd.pop("_rephrase", False):
-            for k in ("phrase_off", "bar_beats", "phrase_src"):
+            for k in beatgrid._PHRASE_KEYS:
                 lt.pop(k, None)
             beatgrid._beatgrid_cache.pop(lt.get("path"), None)
         if upd.pop("_regrid", False):

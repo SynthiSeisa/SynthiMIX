@@ -94,3 +94,12 @@ test('Loop-Roll: 1, ½, ¼, ⅛ Schlag im letzten Takt', () => {
   assert.deepEqual(rollSteps(4).map(s => s.len), [1, 0.5, 0.25, 0.125])
   assert.deepEqual(rollSteps(4).map(s => s.at), [0, 2, 3, 3.5])
 })
+
+test('Drops: gemessene Drops aus dem Backend haben Vorrang vor der Wellenform', () => {
+  const { wf, dur } = track([[16, 0.3], [32, 1], [16, 0.3], [32, 1], [16, 0.3]])
+  const gm = { ...g, drops: [10.5, 99.2, dur + 5] }
+  assert.deepEqual(detectDrops(wf, gm, dur), [10.5, 99.2])          // ausserhalb des Titels faellt weg
+  assert.deepEqual(detectDrops([], gm, dur), [10.5, 99.2])           // auch ohne Wellenform
+  assert.deepEqual(detectDrops(wf, { ...gm, drops: [] }, dur), [])   // gemessen: keine Drops
+  assert.deepEqual(detectDrops(wf, { ...gm, conf: 0.2 }, dur), [])   // unsicheres Raster: keine
+})

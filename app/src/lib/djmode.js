@@ -31,7 +31,11 @@ function energy(wf, dur, a, b) {
  * Liefert Zeitpunkte in s, aufsteigend.
  */
 export function detectDrops(wf, g, dur, cues = null) {
-  if (!wf?.length || !g || !(g.bpm > 0) || !(dur > 0) || (g.conf ?? 0) < 0.4) return []
+  if (!g || !(g.bpm > 0) || !(dur > 0) || (g.conf ?? 0) < 0.4) return []
+  // Im Backend aus dem Audio gemessen (Lautheit und Bass je Takt, MIK-Cues) —
+  // genauer als die Schaetzung aus der groben Wellenform unten
+  if (Array.isArray(g.drops)) return g.drops.filter(t => t > 0 && t < dur)
+  if (!wf?.length) return []
   const bar = barLen(g)
   const origin = g.phrase ?? g.off ?? 0
   // Mittel der lauteren Haelfte = "Hauptteil"

@@ -1139,7 +1139,7 @@
                 <i class="ti ti-refresh" class:spin={toolCheckRunning}></i> {toolCheckRunning ? 'Prüfe…' : 'Jetzt prüfen'}
               </button>
             </div>
-            <div class="hint">Täglich (ffmpeg wöchentlich), nie während eines Downloads. SynthiMIX selbst: Info → Nach Updates suchen.</div>
+            <div class="hint">Täglich (ffmpeg wöchentlich), nie während eines Downloads. SynthiMIX selbst: System → Updates.</div>
           </div>
 
         <!-- ── DARSTELLUNG ─────────────────────────────────────────────── -->
@@ -1211,6 +1211,28 @@
 
         <!-- ── SYSTEM ──────────────────────────────────────────────────── -->
         {:else if tab === 'system'}
+
+          <div class="group">
+            <div class="group-title">Updates</div>
+            <div class="row">
+              <span class="lbl">SynthiMIX v{APP_VERSION}</span>
+              <button class="btn btn-sm" onclick={checkUpdate} disabled={updCheck === 'busy'}>
+                <i class="ti ti-refresh" class:spin={updCheck === 'busy'}></i> Nach Updates suchen
+              </button>
+            </div>
+            {#if updCheck && updCheck !== 'busy'}
+              {#if updCheck.status === 'available'}
+                <div class="hint keep">v{updCheck.version} ist da — das Update-Fenster oben zeigt, was neu ist. Herunterladen läuft im Hintergrund, installiert wird auf Knopfdruck oder beim nächsten Beenden.</div>
+              {:else if updCheck.status === 'none'}
+                <div class="hint keep">Du hast die neueste Version.</div>
+              {:else if updCheck.status === 'dev'}
+                <div class="hint keep">Nur in der installierten App.</div>
+              {:else}
+                <div class="hint keep warn">Prüfen ging nicht: {updCheck.message}</div>
+              {/if}
+            {/if}
+            <div class="hint">Geprüft wird auch von selbst: beim Start und alle 6 Stunden.</div>
+          </div>
 
           <div class="group">
             <div class="group-title">Bibliothek</div>
@@ -1382,28 +1404,6 @@
         {:else if tab === 'info'}
 
           {#snippet inline(text)}{#each splitBold(text) as [b, part]}{#if b}<b>{part}</b>{:else}{part}{/if}{/each}{/snippet}
-          <div class="group">
-            <div class="group-title">Updates</div>
-            <div class="row">
-              <span class="lbl">SynthiMIX v{APP_VERSION}</span>
-              <button class="btn btn-sm" onclick={checkUpdate} disabled={updCheck === 'busy'}>
-                <i class="ti ti-refresh" class:spin={updCheck === 'busy'}></i> Nach Updates suchen
-              </button>
-            </div>
-            {#if updCheck && updCheck !== 'busy'}
-              {#if updCheck.status === 'available'}
-                <div class="hint keep">v{updCheck.version} ist da — das Update-Fenster oben zeigt, was neu ist. Herunterladen läuft im Hintergrund, installiert wird auf Knopfdruck oder beim nächsten Beenden.</div>
-              {:else if updCheck.status === 'none'}
-                <div class="hint keep">Du hast die neueste Version.</div>
-              {:else if updCheck.status === 'dev'}
-                <div class="hint keep">Nur in der installierten App.</div>
-              {:else}
-                <div class="hint keep warn">Prüfen ging nicht: {updCheck.message}</div>
-              {/if}
-            {/if}
-            <div class="hint">Geprüft wird auch von selbst: beim Start und alle 6 Stunden.</div>
-          </div>
-
           <div class="group">
             <div class="group-title">Was ist neu</div>
             {#if $changelog === null}

@@ -278,6 +278,10 @@ async def push_player():
         "state": {
             "playing":     _state["playing"],
             "position_ms": _state["position_ms"],
+            # Zaehlt nur echte Spul-Befehle: der Player springt nur dann. Ein
+            # Titelwechsel setzt die Position auch auf 0 — das spulte frueher
+            # manchmal den noch laufenden Titel an den Anfang zurueck.
+            "seek_seq":    _state.get("seek_seq", 0),
             "duration_ms": _state["duration_ms"],
             "current_idx": _state["current_idx"],
             "shuffle":     _state.get("shuffle", False),

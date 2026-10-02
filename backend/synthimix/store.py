@@ -195,6 +195,9 @@ def load_library():
             # Takt und Phrasen (Uebergang auf Phrasenanfang, Bass-Tausch)
             **({"phrase_off": float(t["phrase_off"]), "bar_beats": int(t.get("bar_beats") or 4),
                 "phrase_src": str(t.get("phrase_src") or "")} if t.get("bpm_f") and t.get("phrase_off") is not None else {}),
+            # Drops (Sekunden, frueheste zuerst) — gemessen mit dem Raster
+            **({"drops": [float(d) for d in t["drops"]][:12], "drop_src": str(t.get("drop_src") or ""),
+                "drop_rev": int(t["drop_rev"])} if t.get("bpm_f") and t.get("drop_rev") and isinstance(t.get("drops"), list) else {}),
             # "Passt so" in der Qualitaetsansicht
             **({"quality_ok": True} if t.get("quality_ok") else {}),
             **({"fid": str(t["fid"])} if t.get("fid") else {}),

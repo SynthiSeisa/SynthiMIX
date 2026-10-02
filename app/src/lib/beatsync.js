@@ -15,6 +15,19 @@ const MAX_NUDGE      = 0.04   // Feinkorrektur hoechstens ±4 %
 const MAX_NUDGE_FAST = 0.08   // am Anfang des Uebergangs (neuer Titel leise) ±8 %
 const CORRECT_SEC    = 1.0    // Phasenfehler in etwa dieser Zeit ausgleichen
 const CORRECT_FAST   = 0.6
+// Grosser Anfangsfehler (gemessen hoerbar bis 90 ms, der neue Titel startet nie
+// ganz genau): solange er noch leise ist, kraeftig nachziehen — vorher dauerte
+// das 2-3 s, in denen man zwei Bassdrums hoerte. Die Tonhoehe bleibt dabei.
+const CATCH_UP       = 0.25   // bis ±25 %
+const CATCH_SEC      = 0.25   // Fehler in etwa dieser Zeit ausgleichen
+const CATCH_FROM     = 0.012  // ab 12 ms Versatz
+// Kleiner Tempo-Unterschied: ohne Tonhoehen-Erhalt (wie ein Plattenspieler).
+// Chromiums Zeitdehnung verschiebt das Hoerbare sonst unregelmaessig um bis zu
+// 30 ms gegen die gemeldete Position — die Schlaege wackelten (gemessen 10/2026:
+// mit Erhalt -35…+8 ms, ohne +3…+7 ms stabil). Bis 2 % aendert sich die
+// Tonhoehe um hoechstens 1/3 Halbton; groessere Unterschiede behalten sie.
+const PITCH_FREE     = 0.02
+const CATCH_UP_FREE  = 0.12   // ohne Tonhoehen-Erhalt sanfter nachziehen (kein Tonhoehen-Schlenker)
 
 /** Phase im Takt (0…1) zur Zeit t (Sekunden) im Raster {bpm, off}. */
 export function phaseOf(t, bpm, off) {
@@ -108,13 +121,15 @@ export function createSync(cur, next, gCur, gNext, opts = {}) {
   // ueber die letzten Messungen mitteln, dazu ein langsamer Anteil, der einen
   // kleinen Fehler im Grundtempo ausgleicht (sonst bleibt ein Restversatz)
   const errs = []
-  let integ = 0, lastTick = 0
+  let integ = 0, lastTick = 0, startReported = false
 
-  try { next.preservesPitch = true; cur.preservesPitch = true } catch {}
+  const exact = tempoOn && Math.abs(m.rate - 1) <= PITCH_FREE
+  try { next.preservesPitch = !exact; cur.preservesPitch = !exact } catch {}
   next.playbackRate = base()
 
   return {
     get baseRate() { return base() },
+    pitchFree: exact,
     phaseOn: phaseUsable,
     curTarget,
     get lastErr() { return lastErr },
@@ -134,15 +149,19 @@ export function createSync(cur, next, gCur, gNext, opts = {}) {
       if (errs.length > 5) errs.shift()
       const avg = errs.reduce((x, y) => x + y, 0) / errs.length
       lastErr = avg
+      // Anfangsfehler melden (Sekunden, > 0: der neue Titel kam zu spaet) —
+      // daraus lernt der Player, wie lange Springen und Starten wirklich dauern
+      if (!startReported && errs.length >= 4) { startReported = true; opts.onStartError?.(avg * beatNext) }
       const dt = lastTick ? Math.min(0.2, (now - lastTick) / 1000) : 0
       lastTick = now
       // Nur nahe am Ziel aufsummieren — sonst schaukelt der grosse Anfangsfehler
       // den langsamen Anteil auf und er zieht spaeter in die falsche Richtung
       if (Math.abs(avg) < 0.04) integ = Math.max(-0.2, Math.min(0.2, integ + avg * dt))
       else integ *= 0.9
-      const lim = fast ? MAX_NUDGE_FAST : MAX_NUDGE
+      const big = fast && Math.abs(avg) * beatNext > CATCH_FROM
+      const lim = big ? (exact ? CATCH_UP_FREE : CATCH_UP) : fast ? MAX_NUDGE_FAST : MAX_NUDGE
       const nudge = Math.max(-lim, Math.min(lim,
-        (avg / (fast ? CORRECT_FAST : CORRECT_SEC) + integ * 0.4) * beatNext))
+        (avg / (big ? CATCH_SEC : fast ? CORRECT_FAST : CORRECT_SEC) + integ * 0.4) * beatNext))
       next.playbackRate = base() * (1 + nudge)
     },
     /** Nach dem Uebergang: Feinkorrektur aus, Grundtempo halten. */

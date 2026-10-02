@@ -378,6 +378,7 @@ async def handle_message(ws: WebSocket, msg: dict):
 
     elif t == "seek":
         _state["position_ms"] = msg.get("position_ms", 0)
+        _state["seek_seq"] = _state.get("seek_seq", 0) + 1
         await core.push_player()
 
     elif t == "position_update":

@@ -269,7 +269,109 @@ def _beatgrid_sync(path: str, bpm_hint: float = 0.0) -> dict | None:
             "beat_conf": round(max(0.0, min(1.0, conf)), 3), "grid_rev": GRID_REV,
             **({"grid_fit": True} if fit else {})}
 
-_GRID_KEYS = ("bpm_f", "beat_off", "beat_conf", "grid_rev", "phrase_off", "bar_beats", "phrase_src")
+_GRID_KEYS = ("bpm_f", "beat_off", "beat_conf", "grid_rev", "phrase_off", "bar_beats", "phrase_src",
+              "drops", "drop_src", "drop_rev")
+# Haengen am Raster: mit neuem Raster (oder neuen MIK-Cues) neu bestimmen
+_PHRASE_KEYS = ("phrase_off", "bar_beats", "phrase_src", "drops", "drop_src", "drop_rev")
+
+
+# ── Drop-Erkennung ───────────────────────────────────────────────────────────
+# Aus Synthi's Mashups (sythi/mashup.py, find_drop) uebernommen und auf alle
+# Drops eines Titels erweitert (Double Drop braucht mehrere). Vorher schaetzte
+# die Oberflaeche die Drops aus der groben Wellenform (nur Lautstaerke, feste
+# dB-Schwellen je 8 Takte) — ohne Bass und ohne die MIK-Cues als Vorschlag.
+DROP_SR = 4000                 # reicht fuer Lautheit und Bass (< 150 Hz)
+DROP_REV = 1
+
+
+def _bar_features(x, sr: int, start: float, bar: float, n: int, np):
+    """Je Takt: Lautheit (log) und Bass bis 150 Hz (log), beide z-normiert."""
+    rms = np.full(n, -12.0)
+    low = np.full(n, -12.0)
+    for b in range(n):
+        seg = x[int((start + b * bar) * sr):int((start + (b + 1) * bar) * sr)]
+        if seg.size < 16:
+            continue
+        spec = np.abs(np.fft.rfft(seg)) ** 2 / seg.size
+        k = max(1, int(150 * seg.size / sr))
+        rms[b] = np.log(spec.sum() + 1e-9)
+        low[b] = np.log(spec[:k].sum() + 1e-9)
+
+    def z(v):
+        return (v - np.median(v)) / (np.std(v) + 1e-6)
+    return z(rms), z(low)
+
+
+def _find_drops(x, sr: int, bpm: float, off: float, phrase_off, bar_beats: int = 4,
+                cues: list | None = None) -> tuple[list[float], str]:
+    """Wo setzen die Drops ein? Sekunden auf Taktanfaengen, frueheste zuerst.
+
+    Je Takt Lautheit und Bass (< 150 Hz). Ein Drop steigt nach einem Build-up
+    (davor wenig Bass) deutlich an UND erreicht das Plateau der lautesten Teile
+    — ein Sprung vom Intro in den Mittelteil zaehlt nicht. Gesucht wird auf
+    MIK-Cues (MIK setzt sie auf Phrasen, einer ist fast immer der Drop) und auf
+    8-Takt-Phrasen; zwei Drops liegen mindestens 16 Takte auseinander.
+    x: Mono-Signal mit Abtastrate sr. Liefert (Zeiten, Quelle der ersten)."""
+    import numpy as np
+    dur = x.size / sr
+    if not bpm or dur < 30:
+        return [], "none"
+    bar = 60.0 / bpm * (bar_beats or 4)
+    start = (phrase_off if phrase_off is not None else off) % (8 * bar)
+    n = int((dur - start) / bar)
+    if n < 24:
+        return [], "none"
+    rms, low = _bar_features(x, sr, start, bar, n, np)
+    e = rms + 1.5 * low
+
+    def after(b):
+        return float(e[b:b + 8].mean() if b + 8 <= n else e[b:b + 4].mean())
+
+    def rise(b):
+        if b < 4 or b + 4 > n:
+            return -9.0
+        return float(after(b) - e[b - 4:b].mean() + 0.5 * (low[b:b + 4].mean() - low[b - 4:b].mean()))
+
+    plateau = float(np.percentile([e[b:b + 8].mean() for b in range(max(1, n - 7))], 90))
+
+    def is_drop(b):
+        return rise(b) >= 1.0 and after(b) >= plateau - 0.6
+
+    hits = []
+    for b in sorted({round((c - start) / bar) for c in (cues or [])}):
+        if 0 < b < n and is_drop(b):
+            hits.append((b, "mik"))
+    cand = [b for b in range(int(n * 0.08), int(n * 0.85)) if b % 8 == 0]
+    hits += [(b, "energy") for b in cand if is_drop(b)]
+    hits.sort(key=lambda h: (h[0], h[1] != "mik"))     # gleicher Takt: der MIK-Cue zaehlt
+    out: list[tuple[int, str]] = []
+    for b, src in hits:
+        if out and b - out[-1][0] < 16:
+            continue
+        out.append((b, src))
+    if not out:
+        best = max(cand, key=rise, default=None)
+        if best is not None and rise(best) >= 0.8:
+            out = [(best, "energy")]
+    return [round(start + b * bar, 3) for b, _ in out], (out[0][1] if out else "none")
+
+
+def _drops_sync(path: str, bpm: float, off: float, phrase_off, bar_beats: int,
+                cues_ms: list | None) -> dict:
+    """Drops eines Titels messen (dekodiert mit 4 kHz, ~0,3 s)."""
+    if not media._numpy_ok():
+        return {}
+    import numpy as np
+    try:
+        r = subprocess.run([core.FFMPEG, "-nostdin", "-v", "error", "-i", path, "-ac", "1", "-ar", str(DROP_SR),
+                            "-f", "s16le", "-acodec", "pcm_s16le", "-"],
+                           capture_output=True, timeout=120, creationflags=_NO_WINDOW)
+    except Exception:
+        return {}
+    x = np.frombuffer(r.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+    cues = [ms / 1000.0 for ms in (cues_ms or []) if ms and ms > 0]
+    drops, src = _find_drops(x, DROP_SR, bpm, off, phrase_off, bar_beats, cues)
+    return {"drops": drops, "drop_src": src, "drop_rev": DROP_REV}
 
 def _phrase_from_cues(off: float, beat: float, per: int, cues_ms: list) -> int | None:
     """Phrasenlage (Schlag-Index modulo per) aus den Cue-Punkten von Mixed In
@@ -390,8 +492,8 @@ async def _send_beatgrid(ws, path: str):
         if g:
             _beatgrid_cache[path] = g
             if lt is not None:
-                # neues Raster, neue Lage: Takt und Phrasen neu bestimmen
-                for k in ("phrase_off", "bar_beats", "phrase_src"):
+                # neues Raster, neue Lage: Takt, Phrasen und Drops neu bestimmen
+                for k in _PHRASE_KEYS:
                     lt.pop(k, None)
                 lt.update(g)
                 store.save_library()
@@ -408,6 +510,19 @@ async def _send_beatgrid(ws, path: str):
             _beatgrid_cache[path] = g
             if lt is not None:
                 lt.update(ph)
+                store.save_library()
+    # Drops: einmal je Raster messen und speichern
+    if g and g.get("bpm_f") and int(g.get("drop_rev") or 0) < DROP_REV and os.path.isfile(path) \
+            and float(g.get("beat_conf") or 0) >= 0.3:
+        bb = int(g.get("bar_beats") or (2 if float(g["bpm_f"]) < 100 else 4))
+        dr = await asyncio.get_running_loop().run_in_executor(
+            None, _drops_sync, path, float(g["bpm_f"]), float(g.get("beat_off") or 0),
+            g.get("phrase_off"), bb, (lt or {}).get("mik_cues"))
+        if dr:
+            g = {**g, **dr}
+            _beatgrid_cache[path] = g
+            if lt is not None:
+                lt.update(dr)
                 store.save_library()
     try:
         await ws.send_text(json.dumps({"type": "beatgrid", "path": path, **(g or {"bpm_f": 0})}))

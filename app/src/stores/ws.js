@@ -309,7 +309,9 @@ function connect() {
       case 'harmonic_result': harmonicResult.set({ ...msg, at: Date.now() }); break
       case 'beatgrid':
         beatGrids.update(g => ({ ...g, [msg.path]: { bpm: msg.bpm_f || 0, off: msg.beat_off || 0, conf: msg.beat_conf || 0,
-          phrase: msg.phrase_off ?? null, barBeats: msg.bar_beats || 0, phraseSrc: msg.phrase_src || '' } }))
+          phrase: msg.phrase_off ?? null, barBeats: msg.bar_beats || 0, phraseSrc: msg.phrase_src || '',
+          // Drops aus dem Backend (Lautheit + Bass je Takt, MIK-Cues); null = noch nicht gemessen
+          drops: Array.isArray(msg.drops) ? msg.drops : null } }))
         break
       case 'playlists':       playlists.set(msg.items ?? []); break
       case 'playlist_renamed': playlistRenamed.set({ ...msg, at: Date.now() }); break
