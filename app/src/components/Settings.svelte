@@ -6,7 +6,7 @@
   import { settings, settingsOpen, settingsTab, appSettings, send, toolsInfo, updateProgress,
            loudnormOnDl, loudnormTarget, loudnormTp, autoMixEnabled, playMode,
            playlistFolderEnabled, dlFilenameFormat, downloadDir, remoteStatus,
-           autoScanIntervalMin, scanRecursive, remoteAutostart,
+           autoScanIntervalMin, scanRecursive, remoteAutostart, dataPlace, diagnoseResult,
            spotifyClientId, spotifyClientSecret,
            lastfmApiKey, acoustidApiKey,
            fpcalcInstalling, fpcalcInstallError,
@@ -43,6 +43,15 @@
 
   // ── Dienste: je Dienst eine Karte, aufklappbar ────────────────────────────
   let svcOpen = $state(null)
+  // Diagnose: prueft im Backend ffmpeg, Analyse, Ordner und eine Waveform
+  let diagCopied = $state(false)
+  function runDiagnose() { diagnoseResult.set('busy'); send({ type: 'get_diagnose' }) }
+  async function copyDiagnose() {
+    const r = $diagnoseResult
+    if (!r?.report) return
+    try { await navigator.clipboard.writeText(r.report); diagCopied = true; setTimeout(() => { diagCopied = false }, 2500) } catch {}
+  }
+
   // Nach Updates suchen (nur in der installierten App)
   let updCheck = $state(null)        // null | 'busy' | { status, version?, message? }
   async function checkUpdate() {
@@ -1213,6 +1222,43 @@
         <!-- ── SYSTEM ──────────────────────────────────────────────────── -->
         {:else if tab === 'system'}
 
+          {#if $dataPlace.dir}
+            <div class="group">
+              <div class="group-title">Speicherort</div>
+              <div class="row"><span class="lbl">{$dataPlace.dir}</span></div>
+              {#if $dataPlace.on}
+                <div class="hint keep">Tragbarer Betrieb: Bibliothek, Einstellungen und Playlists liegen neben dem Programm auf dieser Festplatte und reisen mit. Bekommt die Platte an einem anderen PC einen anderen Laufwerksbuchstaben, stellt SynthiMIX die Pfade beim Start von selbst um.</div>
+              {:else}
+                <div class="hint keep">Bibliothek, Einstellungen und Playlists liegen auf diesem PC. Ist SynthiMIX auf einer anderen Festplatte als dem Systemlaufwerk installiert, speichert es alles dort neben dem Programm (Ordner „SynthiMIX-Daten“) — die Platte lässt sich dann an jedem PC anstecken.</div>
+              {/if}
+            </div>
+          {/if}
+
+          <div class="group">
+            <div class="group-title">Diagnose</div>
+            <div class="row">
+              <span class="lbl">Geht etwas nicht (Waveform, Einlesen, Sortieren)?</span>
+              <button class="btn btn-sm" onclick={runDiagnose} disabled={$diagnoseResult === 'busy'}>
+                <i class="ti ti-refresh" class:spin={$diagnoseResult === 'busy'}></i> Prüfen
+              </button>
+            </div>
+            {#if $diagnoseResult && $diagnoseResult !== 'busy'}
+              <div class="diag">
+                {#each $diagnoseResult.checks as c}
+                  <div class="diag-row" class:bad={!c.ok}>
+                    <i class="ti {c.ok ? 'ti-check' : 'ti-alert-triangle'}"></i>
+                    <b>{c.name}</b><span>{c.text}</span>
+                  </div>
+                {/each}
+              </div>
+              <div class="row">
+                <span class="lbl">{$diagnoseResult.ok ? 'Alles in Ordnung.' : 'Es gibt Auffälligkeiten.'}</span>
+                <button class="btn btn-sm" onclick={copyDiagnose}><i class="ti ti-copy"></i> {diagCopied ? 'Kopiert' : 'Bericht kopieren'}</button>
+              </div>
+            {/if}
+            <div class="hint">Prüft, ob ffmpeg und die Analyse auf diesem PC laufen, ob Ordner erreichbar und lesbar sind und ob sich eine Waveform berechnen lässt. Abspielen macht das Fenster selbst — Waveform, Einlesen und Sortieren brauchen diese Werkzeuge.</div>
+          </div>
+
           <div class="group">
             <div class="group-title">Updates</div>
             <div class="row">
@@ -1541,6 +1587,12 @@
   .row input[type="range"] { width: 200px; flex-shrink: 0; }
   .row .field { width: 280px; flex-shrink: 0; }
   .hint { font-size: var(--fs-sm); line-height: 1.5; color: var(--c-tx3); max-width: 60ch; }
+  .diag { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
+  .diag-row { display: grid; grid-template-columns: 18px 150px 1fr; gap: 8px; align-items: start; font-size: var(--fs-sm); color: var(--c-tx2); }
+  .diag-row b { font-weight: 600; color: var(--c-tx); }
+  .diag-row span { overflow-wrap: anywhere; }
+  .diag-row .ti { color: var(--c-ok, #46a758); margin-top: 2px; }
+  .diag-row.bad .ti, .diag-row.bad b { color: var(--c-warn, #e5a000); }
   /* Erklaerung direkt zu einer Zeile: buendig unter dem Label, dicht dran */
   .hint.sub { margin-top: calc(-1 * var(--sp-1)); }
   .hint.warn { color: var(--c-warn-tx); }

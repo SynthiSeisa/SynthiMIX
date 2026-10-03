@@ -3,6 +3,8 @@ import asyncio
 import os
 import re
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from pathlib import Path
 from .core import _state
@@ -126,51 +128,137 @@ def _is_audio_file(name: str) -> bool:
     """Audio-Datei, aber keine liegengebliebene Zwischendatei (core.is_temp_audio)."""
     return Path(name).suffix.lower() in AUDIO_EXTS and not core.is_temp_audio(name)
 
-async def scan_folder(folder: str):
-    await core.broadcast({"type": "scan_status", "text": "Scanne…"})
-    loop = asyncio.get_running_loop()
-    tracks = await loop.run_in_executor(None, _scan_sync, folder)
+# ── Einlesen ─────────────────────────────────────────────────────────────────
+# Frueher: jede Datei nacheinander pruefen (ffprobe), alles erst am Schluss in
+# die Bibliothek — bei 3000 Titeln auf einer externen Platte viele Minuten ohne
+# Fortschritt, und wer das Programm in der Zeit schloss, verlor alles (gemeldet
+# 10/2026: "nur 120 von 3000 eingelesen"). Jetzt: Dateien erst nur auflisten,
+# unveraenderte ueberspringen, den Rest parallel pruefen und in Portionen
+# eintragen, mit Fortschritt und Zwischenspeichern.
+_SCAN_POOL = ThreadPoolExecutor(max_workers=6, thread_name_prefix="scan")
+_SCAN_CHUNK = 48
+_scan_busy = 0                 # laufende Einlese-Vorgaenge (der Waechter wartet solange)
+scan_unreadable: list[str] = []   # was beim letzten Einlesen nicht lesbar war (Diagnose)
+_UPDATE_KEYS = ("title", "artist", "album_artist", "folder", "ext",
+                "duration_sec", "bitrate_kbps", "comment", "mtime")
 
-    lib_by_path = {t["path"]: t for t in _state["library"]}
-    scanned_paths = {t["path"] for t in tracks}
-    added = updated = 0
 
-    for t in tracks:
-        existing = lib_by_path.get(t["path"])
-        if existing is None:
-            _state["library"].append(t)
-            added += 1
-        else:
-            if t.get("mtime", 0) != existing.get("mtime", 0):
-                for key in ("title", "artist", "album_artist", "folder", "ext",
-                            "duration_sec", "bitrate_kbps", "comment", "mtime"):
-                    if key in t:
-                        existing[key] = t[key]
-                updated += 1
-            # Datei wieder da → missing-Flag entfernen
-            existing.pop("missing", None)
+def _list_audio_sync(folder: str, recursive: bool) -> list[tuple[str, int]]:
+    """Audiodateien eines Ordners mit Aenderungszeit — ohne sie zu oeffnen."""
+    out: list[tuple[str, int]] = []
 
-    # Tracks aus diesem Ordner die nicht mehr auf der Platte liegen → als missing markieren
-    folder_path = Path(folder)
-    for lt in _state["library"]:
-        lt_path = Path(lt.get("path", ""))
+    def unreadable(e):
+        print(f"[scan] nicht lesbar: {e}", flush=True)
+        if len(scan_unreadable) < 200:
+            scan_unreadable.append(str(getattr(e, "filename", None) or e))
+    if recursive:
+        dirs = os.walk(folder, onerror=unreadable)
+    else:
         try:
-            lt_path.relative_to(folder_path)
-        except ValueError:
+            dirs = [(folder, [], os.listdir(folder))]
+        except OSError as e:
+            unreadable(e)
+            dirs = []
+    for root, _, files in dirs:
+        if _is_excluded(root):
             continue
-        was_missing = lt.get("missing", False)
-        now_missing = lt["path"] not in scanned_paths
-        if now_missing and not was_missing:
-            lt["missing"] = True
-        elif not now_missing and was_missing:
-            lt.pop("missing", None)
+        for f in files:
+            if _is_audio_file(f):
+                full = str(Path(os.path.join(root, f)))  # normalisiert Slashes auf Windows
+                try:
+                    mt = int(os.path.getmtime(full))
+                except OSError:
+                    mt = 0
+                out.append((full, mt))
+    return out
 
-    store.save_library()
-    await core.push_library()
+
+def _entry_sync(path: str) -> dict:
+    return media._make_library_entry(path, media._probe_sync(path))
+
+
+async def _ingest(paths: list[str], label: str = "Scanne") -> tuple[int, int]:
+    """Dateien pruefen und eintragen: parallel, in Portionen, mit Fortschritt.
+    Schon vorhandene Eintraege werden aufgefrischt. Liefert (neu, aktualisiert)."""
+    loop = asyncio.get_running_loop()
+    added = updated = done = 0
+    last_save = time.monotonic()
+    for i in range(0, len(paths), _SCAN_CHUNK):
+        chunk = paths[i:i + _SCAN_CHUNK]
+        entries = await asyncio.gather(*(loop.run_in_executor(_SCAN_POOL, _entry_sync, p) for p in chunk),
+                                       return_exceptions=True)
+        by_path = {t["path"]: t for t in _state["library"]}      # frisch: inzwischen kann sich etwas getan haben
+        for p, t in zip(chunk, entries):
+            if isinstance(t, BaseException):
+                print(f"[scan] {p}: {t}", flush=True)
+                if len(scan_unreadable) < 200:
+                    scan_unreadable.append(p)
+                continue
+            ex = by_path.get(p)
+            if ex is None:
+                _state["library"].append(t)
+                by_path[p] = t
+                added += 1
+            else:
+                for key in _UPDATE_KEYS:
+                    if key in t:
+                        ex[key] = t[key]
+                ex.pop("missing", None)
+                updated += 1
+        done += len(chunk)
+        if len(paths) > _SCAN_CHUNK:
+            await core.broadcast({"type": "scan_status", "text": f"{label}… {done} / {len(paths)}"})
+        # Zwischenstand sichern und zeigen — ein Abbruch kostet hoechstens eine halbe Minute
+        if done < len(paths) and time.monotonic() - last_save > 20:
+            store.save_library()
+            await core.push_library()
+            last_save = time.monotonic()
+    return added, updated
+
+
+async def scan_folder(folder: str):
+    global _scan_busy
+    _scan_busy += 1
+    try:
+        await core.broadcast({"type": "scan_status", "text": "Scanne…"})
+        loop = asyncio.get_running_loop()
+        scan_unreadable.clear()
+        found = await loop.run_in_executor(None, _list_audio_sync, folder, _state.get("scan_recursive", True))
+        lib_by_path = {t["path"]: t for t in _state["library"]}
+        scanned_paths = {p for p, _ in found}
+        todo = []
+        for p, mt in found:
+            existing = lib_by_path.get(p)
+            if existing is None or existing.get("mtime", 0) != mt:
+                todo.append(p)                       # neu oder geaendert: pruefen
+            else:
+                existing.pop("missing", None)        # unveraendert und wieder da
+        added, updated = await _ingest(todo)
+
+        # Tracks aus diesem Ordner die nicht mehr auf der Platte liegen → als missing markieren
+        folder_path = Path(folder)
+        for lt in _state["library"]:
+            lt_path = Path(lt.get("path", ""))
+            try:
+                lt_path.relative_to(folder_path)
+            except ValueError:
+                continue
+            was_missing = lt.get("missing", False)
+            now_missing = lt["path"] not in scanned_paths
+            if now_missing and not was_missing:
+                lt["missing"] = True
+            elif not now_missing and was_missing:
+                lt.pop("missing", None)
+
+        store.save_library()
+        await core.push_library()
+    finally:
+        _scan_busy -= 1
 
     parts = [f"{len(_state['library'])} Tracks"]
     if added:    parts.append(f"+{added} neu")
     if updated:  parts.append(f"{updated} aktualisiert")
+    if scan_unreadable: parts.append(f"{len(scan_unreadable)} nicht lesbar (Einstellungen → System → Diagnose)")
     await core.broadcast({"type": "scan_status", "text": "Fertig · " + " · ".join(parts)})
     await asyncio.sleep(4)
     await core.broadcast({"type": "scan_status", "text": ""})
@@ -373,10 +461,11 @@ def _find_new_audio_paths(folder: str, existing: set[str], recursive: bool) -> l
 
 async def _watcher_loop():
     """Periodically check watched folders for new audio files."""
+    global _scan_busy
     await asyncio.sleep(15)   # initial delay — let app settle
     while True:
         try:
-            folders   = _scan_folders()
+            folders   = [] if _scan_busy else _scan_folders()
             recursive = _state.get("scan_recursive", True)
             if folders:
                 existing = {t["path"] for t in _state["library"]}
@@ -392,16 +481,17 @@ async def _watcher_loop():
                         if p not in existing:
                             new_paths.append(p)
                             existing.add(p)
-                if new_paths:
-                    new_tracks = []
-                    for p in new_paths:
-                        probe = await loop.run_in_executor(None, media._probe_sync, p)
-                        new_tracks.append(media._make_library_entry(p, probe))
-                    _state["library"].extend(new_tracks)
-                    store.save_library()
-                    await core.push_library()
+                # Laeuft gerade ein Einlesen, traegt das die Titel ein — sonst doppelt
+                if new_paths and not _scan_busy:
+                    _scan_busy += 1
+                    try:
+                        added, _ = await _ingest(new_paths, "Lese neue Titel")
+                        store.save_library()
+                        await core.push_library()
+                    finally:
+                        _scan_busy -= 1
                     await core.broadcast({"type": "scan_status",
-                                     "text": f"+{len(new_tracks)} neue Tracks"})
+                                     "text": f"+{added} neue Tracks"})
                     await asyncio.sleep(4)
                     await core.broadcast({"type": "scan_status", "text": ""})
         except Exception as e:

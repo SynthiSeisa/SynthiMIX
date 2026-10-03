@@ -2,8 +2,29 @@ const { app, BrowserWindow, ipcMain, dialog, shell, globalShortcut, nativeImage,
 const path = require('path')
 const { spawn } = require('child_process')
 const { autoUpdater } = require('electron-updater')
+const fs = require('fs')
+const portable = require('./portable.cjs')
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
+
+// Tragbarer Betrieb (Programm auf einer Festplatte, die von PC zu PC wandert):
+// alle Daten neben dem Programm, siehe portable.cjs. Muss vor allem anderen
+// stehen — auch die Ein-Instanz-Sperre liegt im Datenordner.
+let portableData = null
+if (app.isPackaged) {
+  try {
+    const dir = portable.portableDir(process.execPath, process.env.SystemDrive)
+    if (dir) {
+      fs.mkdirSync(dir, { recursive: true })
+      fs.accessSync(dir, fs.constants.W_OK)
+      if (portable.migrate(app.getPath('userData'), dir, fs)) console.log('[tragbar] Daten mitgenommen nach', dir)
+      app.setPath('userData', dir)
+      portableData = dir
+    }
+  } catch (e) {
+    console.error('[tragbar] nicht moeglich, Daten bleiben auf diesem PC:', e.message)
+  }
+}
 
 let mainWindow = null
 
@@ -38,6 +59,7 @@ function startPythonBackend() {
     const dataDir    = app.getPath('userData')
     cmd  = path.join(backendDir, 'backend.exe')
     args = ['--data-dir', dataDir, '--electron-exe', process.execPath]
+    if (portableData) args.push('--portable')
     cwd  = backendDir
   } else {
     cmd  = 'python'
@@ -223,6 +245,9 @@ function notesToText(n) {
 }
 
 function setupAutoUpdater() {
+  // Tragbar: das Update gehoert auf die Festplatte, nicht in den Standardordner
+  // des PCs, an dem sie gerade haengt (dort ist nichts installiert)
+  if (portableData) autoUpdater.installDirectory = path.dirname(process.execPath)
   autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true
 

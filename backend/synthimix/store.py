@@ -347,6 +347,7 @@ def load_settings():
     # in den Einstellungen war nach jedem Neustart wieder weg.
     _state["repeat"]                  = int(raw.get("repeat", 0)) % 3
     _state["shuffle"]                 = bool(raw.get("shuffle", False))
+    _state["portable_drive"]          = str(raw.get("portable_drive", "") or "")
 
 # Erfolgreiche Dienst-Tests merken — gebunden an den Key (nur ein Hash wird
 # gespeichert): wird der Key geaendert, gilt der alte Test nicht mehr.
@@ -415,6 +416,7 @@ def save_settings():
         "gone_ids":                _state.get("gone_ids", []),
         "repeat":                  _state.get("repeat", 0),
         "shuffle":                 _state.get("shuffle", False),
+        "portable_drive":          _state.get("portable_drive", ""),
     })
 
 def load_history():

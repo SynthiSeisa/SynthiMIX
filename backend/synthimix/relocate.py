@@ -88,6 +88,25 @@ def detect() -> list[dict]:
     return out
 
 
+def portable_start(drive: str | None = None) -> dict | None:
+    """Tragbarer Betrieb: hat die Platte an diesem PC einen anderen
+    Laufwerksbuchstaben als beim letzten Mal, alle Pfade darauf umstellen
+    (M:\\… -> E:\\…). Pfade auf anderen Laufwerken bleiben. drive: Buchstabe
+    der Platte ("E:"), sonst der des Datenordners."""
+    if not core.PORTABLE:
+        return None
+    cur = (drive or os.path.splitdrive(str(core.BASE_DIR))[0]).upper()
+    if len(cur) != 2 or cur[1] != ":":
+        return None
+    old = (_state.get("portable_drive") or "").upper()
+    if old == cur:
+        return None
+    res = apply(old + "\\", cur + "\\") if old else None
+    _state["portable_drive"] = cur
+    store.save_settings()
+    return res
+
+
 def apply(old: str, new: str) -> dict:
     """Pfade old… -> new… umstellen. Liefert {paths, tracks, merged, playlists}."""
     n = 0

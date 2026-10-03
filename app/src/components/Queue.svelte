@@ -359,6 +359,9 @@
     if (!qListEl) return
     qScrollTop = qListEl.scrollTop
     qViewH = qListEl.clientHeight
+    // Jedes Scrollen, das nicht vom Mitlaufen selbst kommt, ist Arbeit in der Liste
+    // (auch Ziehen am Rollbalken — das loest sonst kein Ereignis aus)
+    if (Date.now() > _selfScrollUntil) userActed()
   }
   $effect(() => {
     // Zeilenhoehe einmal messen (haengt von der Dichte ab)
@@ -367,18 +370,25 @@
     if (r && r.offsetHeight > 0) qRowH = r.offsetHeight
   })
 
-  const FOLLOW_IDLE_MS = 12000
+  // Mitlaufen mit dem laufenden Titel — aber nie, waehrend jemand in der Liste
+  // arbeitet: Maus darueber, Titel markiert, ein Menue offen, gerade gescrollt.
+  // Vorher sprang die Liste 12 s nach dem letzten Klick zurueck, auch mitten im
+  // Bearbeiten (gemeldet 10/2026).
+  const FOLLOW_IDLE_MS = 20000
   let _lastUserAct = 0
+  let _selfScrollUntil = 0
+  let qHover = false
   function userActed() { _lastUserAct = Date.now() }
   function scrollToCurrent(force = false) {
     if (!qListEl) return
-    if (!force && (dragFrom !== null || Date.now() - _lastUserAct < FOLLOW_IDLE_MS)) return
+    if (!force && (dragFrom !== null || qHover || qSelected.size > 0 || qCtxMenu || showMenu
+                   || Date.now() - _lastUserAct < FOLLOW_IDLE_MS)) return
     const ci = $playerState.current_idx
     const row = qListEl.querySelector('.row.active')
     if (!row && !(virt && ci >= 0)) return
     // Bei langer Liste ist die aktive Zeile evtl. gar nicht gezeichnet
     const top = row ? row.offsetTop - qListEl.offsetTop : ci * qRowH
-    if (Math.abs(qListEl.scrollTop - top) > 4) qListEl.scrollTo({ top, behavior: 'smooth' })
+    if (Math.abs(qListEl.scrollTop - top) > 4) { _selfScrollUntil = Date.now() + 1200; qListEl.scrollTo({ top, behavior: 'smooth' }) }
   }
 
   $effect(() => {
@@ -641,7 +651,8 @@
   {/if}
 
   <!-- Track list -->
-  <div class="queue-list" bind:this={qListEl} onscroll={onQScroll} onwheel={userActed} ontouchmove={userActed} onpointerdown={userActed} onkeydown={userActed}>
+  <div class="queue-list" bind:this={qListEl} onscroll={onQScroll} onwheel={userActed} ontouchmove={userActed} onpointerdown={userActed} onkeydown={userActed}
+       onpointerenter={() => { qHover = true }} onpointerleave={() => { qHover = false; userActed() }}>
     {#if $queue.length === 0}
       <div class="empty">Queue leer · Tracks aus der Bibliothek hierher ziehen</div>
     {:else}

@@ -42,6 +42,10 @@ export const dlParallel = writable(3)          // gleichzeitige Downloads bei Pl
 export const dlFilenameFormat      = writable('title')
 export const downloadDir           = writable('')
 export const autoScanIntervalMin   = writable(0)
+// Wo die Daten liegen; on: tragbarer Betrieb (neben dem Programm auf der Festplatte)
+export const dataPlace             = writable({ on: false, dir: '' })
+// Ergebnis der Diagnose (Einstellungen → System): null, 'busy' oder { checks, report, ok }
+export const diagnoseResult        = writable(null)
 export const favorites             = writable([])
 export const automixStatus = writable('')
 export const autoMixEnabled = writable(true)
@@ -307,6 +311,7 @@ function connect() {
       case 'waveform_next':   if (_wfWant.waveform_next === undefined || msg.path === _wfWant.waveform_next) waveformNext.set(msg.data ?? []); break
       case 'waveform_third':  if (_wfWant.waveform_third === undefined || msg.path === _wfWant.waveform_third) waveformThird.set({ path: msg.path ?? '', data: msg.data ?? [] }); break
       case 'harmonic_result': harmonicResult.set({ ...msg, at: Date.now() }); break
+      case 'diagnose': diagnoseResult.set({ checks: msg.checks ?? [], report: msg.report ?? '', ok: !!msg.ok }); break
       case 'onset_ref': { const w = _refWait.get(msg.id); if (w) { _refWait.delete(msg.id); w(msg) } break }
       case 'beatgrid':
         beatGrids.update(g => ({ ...g, [msg.path]: { bpm: msg.bpm_f || 0, off: msg.beat_off || 0, conf: msg.beat_conf || 0,
@@ -337,6 +342,7 @@ function connect() {
         if (msg.dl_filename_format        !== undefined) dlFilenameFormat.set(msg.dl_filename_format)
         if (msg.download_dir              !== undefined) downloadDir.set(msg.download_dir)
         if (msg.auto_scan_interval_min    !== undefined) autoScanIntervalMin.set(msg.auto_scan_interval_min)
+        if (msg.data_dir                  !== undefined) dataPlace.set({ on: !!msg.portable, dir: msg.data_dir })
         if (msg.favorites                 !== undefined) favorites.set(msg.favorites)
         if (msg.remote_autostart          !== undefined) remoteAutostart.set(msg.remote_autostart)
         if (msg.ytdlp_autoupdate          !== undefined) ytdlpAutoupdate.set(msg.ytdlp_autoupdate)

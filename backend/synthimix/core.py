@@ -77,6 +77,9 @@ _BACKEND_PORT = int(os.environ.get("SYNTHIMIX_PORT", "8765"))
 _data_dir_arg = next((sys.argv[i+1] for i, a in enumerate(sys.argv) if a == '--data-dir' and i+1 < len(sys.argv)), None)
 # Electron reicht seinen eigenen Pfad durch — er dient yt-dlp als JS-Laufzeit
 _electron_exe = next((sys.argv[i+1] for i, a in enumerate(sys.argv) if a == '--electron-exe' and i+1 < len(sys.argv)), None)
+# Tragbarer Betrieb: Programm, Daten und Musik auf einer Platte, die von PC zu
+# PC wandert (Electron setzt das, wenn das Programm nicht auf dem Systemlaufwerk liegt)
+PORTABLE = '--portable' in sys.argv
 if _data_dir_arg:
     BASE_DIR = Path(_data_dir_arg)
     BASE_DIR.mkdir(parents=True, exist_ok=True)

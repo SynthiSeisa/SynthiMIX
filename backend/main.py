@@ -17,7 +17,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 from synthimix.core import _state, clients
-from synthimix import automix, beatgrid, channels, core, download, keys, library, media, quality, relocate, remote, search, store, tags, tools
+from synthimix import automix, beatgrid, channels, core, diagnose, download, keys, library, media, quality, relocate, remote, search, store, tags, tools
 
 # ── app ──────────────────────────────────────────────────────────────────────
 @asynccontextmanager
@@ -30,6 +30,12 @@ async def lifespan(application: FastAPI):
     store.load_notes()
     remote.load_wishes()
     remote._resume_wishes()
+    # Tragbarer Betrieb: Laufwerksbuchstabe an diesem PC anders? Pfade umstellen,
+    # bevor irgendetwas die Dateien sucht
+    try:
+        relocate.portable_start()
+    except Exception as e:
+        print(f"[tragbar] {e}", flush=True)
     core.spawn(library._watcher_loop())
     core.spawn(library._auto_scan_loop())
     core.spawn(tools._ytdlp_autoupdate_loop())
@@ -158,6 +164,8 @@ async def handle_message(ws: WebSocket, msg: dict):
             "dl_filename_format":      _state.get("dl_filename_format", "title"),
             "download_dir":            _state.get("download_dir", str(core.BASE_DIR / "Downloads")),
             "auto_scan_interval_min":  _state.get("auto_scan_interval_min", 0),
+            "portable":                core.PORTABLE,
+            "data_dir":                str(core.BASE_DIR),
             "favorites":               _state.get("favorites", []),
             "remote_autostart":        _state.get("remote_autostart", False),
             "ytdlp_autoupdate":        _state.get("ytdlp_autoupdate", True),
@@ -521,6 +529,19 @@ async def handle_message(ws: WebSocket, msg: dict):
         path = msg.get("path", "")
         if path:
             core.spawn(beatgrid._send_beatgrid(ws, path))
+
+    elif t == "get_diagnose":
+        # Prueft ffmpeg, Analyse, Ordner, Waveform — ein paar Sekunden, nicht in der Reihe warten
+        async def _diag():
+            try:
+                res = await asyncio.get_running_loop().run_in_executor(None, diagnose.run_sync)
+            except Exception as e:
+                res = {"checks": [{"name": "Diagnose", "ok": False, "text": str(e)}], "report": f"Diagnose: {e}", "ok": False}
+            try:
+                await ws.send_text(json.dumps({"type": "diagnose", **res}))
+            except Exception:
+                pass
+        core.spawn(_diag())
 
     elif t == "get_onset_ref":
         # Referenz fuer die Messung der hoerbaren Stelle (Player, lib/audiblepos.js)
