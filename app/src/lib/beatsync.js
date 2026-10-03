@@ -28,6 +28,22 @@ const CATCH_FROM     = 0.012  // ab 12 ms Versatz
 // Tonhoehe um hoechstens 1/3 Halbton; groessere Unterschiede behalten sie.
 const PITCH_FREE     = 0.02
 const CATCH_UP_FREE  = 0.12   // ohne Tonhoehen-Erhalt sanfter nachziehen (kein Tonhoehen-Schlenker)
+// Neuer Titel noch stumm (Schnitt-Uebergaenge vor der Eins): kraeftig
+// nachziehen, die Tonhoehe hoert niemand — ein Sprungfehler von 640 ms
+// (lib/audiblepos.js) ist so in gut einer Sekunde ausgeglichen
+const CATCH_SILENT   = 0.6
+
+// Wo ein Deck hoerbar steht: currentTime plus gemessener Sprungfehler
+// (lib/audiblepos.js). Ohne Messung einfach currentTime.
+// known(el): ist die Stelle schon gemessen? Vorher nur sanft nachregeln — der
+// Fehler ist dann nur die gemeldete Zeit, und Tempo-Spruenge stoeren die Messung.
+let _pos = (el) => el.currentTime
+let _known = () => true
+export function setPosSource(fn, known = null) {
+  _pos = fn || ((el) => el.currentTime)
+  _known = known || (() => true)
+}
+export function posOf(el) { return _pos(el) }
 
 /** Phase im Takt (0…1) zur Zeit t (Sekunden) im Raster {bpm, off}. */
 export function phaseOf(t, bpm, off) {
@@ -80,7 +96,7 @@ export function alignedStart(cur, startSec, gCur, gNext, leadSec = 0.12, maxDiff
   const m = tempoMatch(gCur.bpm * (cur.playbackRate || 1), gNext.bpm, maxDiff)
   if (!m) return startSec
   const nb = gNext.bpm * m.mult, fast = Math.max(gCur.bpm, nb)
-  const pc = phaseOf(cur.currentTime + leadSec * (cur.playbackRate || 1), gCur.bpm * Math.round(fast / gCur.bpm), gCur.off)
+  const pc = phaseOf(posOf(cur) + leadSec * (cur.playbackRate || 1), gCur.bpm * Math.round(fast / gCur.bpm), gCur.off)
   return alignStart(Math.max(0, startSec), pc, { bpm: nb * Math.round(fast / nb), off: gNext.off }, 1)
 }
 
@@ -90,6 +106,10 @@ export function alignedStart(cur, startSec, gCur, gNext, leadSec = 0.12, maxDiff
  * opts.tempo: Tempo angleichen, opts.phase: Schlaege uebereinanderlegen,
  * opts.maxDiff: groesster Tempo-Unterschied (0.08 = 8 %), opts.meet: beide
  * Titel gehen je zur Haelfte aufeinander zu (Standard), sonst nur der neue.
+ * opts.anchor: { cur, next } — steht der laufende Titel bei cur (Sekunden),
+ * soll der naechste bei next stehen (Drop auf Drop, Einstieg auf der Grenze).
+ * Die Taktlage allein ist mehrdeutig: liegt ein MP3-Sprung mehr als einen
+ * halben Takt daneben, rastete der neue sonst einen Takt versetzt ein.
  */
 export function createSync(cur, next, gCur, gNext, opts = {}) {
   // Unklare Raster (freies Tempo, Live-Schlagzeug): lieber gar nicht eingreifen
@@ -116,12 +136,23 @@ export function createSync(cur, next, gCur, gNext, opts = {}) {
   const bpmCurCmp = gCur.bpm * Math.round(fast / gCur.bpm)
   const bpmNext = nb * Math.round(fast / nb)
   const beatNext = 60 / bpmNext
+  // Takte uebereinander (Eins auf Eins), wenn beide Raster Phrasen kennen und
+  // die Takte nach dem Angleichen gleich lang sind — sonst nur die Schlaege.
+  // Ein MP3-Sprung kann mehr als einen halben Schlag danebenliegen: nur auf
+  // Schlaege geregelt, rastete der neue dann einen Schlag versetzt ein.
+  const barC = gCur.phrase != null ? barLen(gCur) : 0, barN = gNext.phrase != null ? barLen(gNext) : 0
+  const barMode = barC > 0 && barN > 0 && Math.abs((barN / m.rate) / (barC / curRate) - 1) < 0.03
+  // Titelzeit des naechsten je Sekunde Titelzeit des laufenden (bleibt gleich,
+  // auch wenn beide ihr Tempo aendern)
+  const trackRatio = m.rate / curRate
+  const anchor = opts.anchor && isFinite(opts.anchor.cur) && isFinite(opts.anchor.next) ? opts.anchor : null
   let lastErr = null
   // Die Zeit eines <audio> springt in Schritten von ein paar Millisekunden:
   // ueber die letzten Messungen mitteln, dazu ein langsamer Anteil, der einen
   // kleinen Fehler im Grundtempo ausgleicht (sonst bleibt ein Restversatz)
   const errs = []
   let integ = 0, lastTick = 0, startReported = false
+  const startErrs = []
 
   const exact = tempoOn && Math.abs(m.rate - 1) <= PITCH_FREE
   try { next.preservesPitch = !exact; cur.preservesPitch = !exact } catch {}
@@ -132,36 +163,53 @@ export function createSync(cur, next, gCur, gNext, opts = {}) {
     pitchFree: exact,
     phaseOn: phaseUsable,
     curTarget,
-    get lastErr() { return lastErr },
+    get lastErr() { return lastErr },          // Sekunden
+    barMode,
     /** Waehrend des Uebergangs regelmaessig aufrufen. fast: neuer Titel noch
-     *  leise, t: Fortschritt des Uebergangs 0…1 (fuer das Treffen in der Mitte). */
-    tick(fast = true, t = 1) {
+     *  leise, t: Fortschritt des Uebergangs 0…1 (fuer das Treffen in der Mitte),
+     *  silent: neuer Titel ganz stumm (darf kraeftig nachziehen). */
+    tick(fast = true, t = 1, silent = false) {
       if (meet && !cur.paused) cur.playbackRate = curRate + (curTarget - curRate) * Math.min(1, t / MEET_RAMP)
       if (!phaseUsable || next.paused || cur.paused || next.seeking || cur.seeking) {
         if (tempoOn && !next.paused) next.playbackRate = base()
         return
       }
+      // Anfangsfehler melden (Sekunden, > 0: der neue Titel kam zu spaet) —
+      // daraus lernt der Player, wie lange Springen und Starten wirklich dauern.
+      // Auf der gemeldeten Zeit des neuen: sein Sprungfehler ist Zufall.
+      if (!startReported) {
+        const e = barMode
+          ? wrapPhase(phaseOf(posOf(cur), 60 / barC, gCur.phrase) - phaseOf(next.currentTime, 60 / barN, gNext.phrase)) * barN
+          : wrapPhase(phaseOf(posOf(cur), bpmCurCmp, gCur.off) - phaseOf(next.currentTime, bpmNext, gNext.off)) * beatNext
+        startErrs.push(e)
+        if (startErrs.length >= 4) { startReported = true; opts.onStartError?.(startErrs.reduce((x, y) => x + y, 0) / startErrs.length) }
+      }
       const now = performance.now()
-      const pc = phaseOf(cur.currentTime, bpmCurCmp, gCur.off)
-      const pn = phaseOf(next.currentTime, bpmNext, gNext.off)
-      const err = wrapPhase(pc - pn)            // > 0: naechster Titel hinkt hinterher
+      // Fehler in Sekunden Titelzeit, > 0: naechster Titel hinkt hinterher
+      let err = barMode
+        ? wrapPhase(phaseOf(posOf(cur), 60 / barC, gCur.phrase) - phaseOf(posOf(next), 60 / barN, gNext.phrase)) * barN
+        : wrapPhase(phaseOf(posOf(cur), bpmCurCmp, gCur.off) - phaseOf(posOf(next), bpmNext, gNext.off)) * beatNext
+      // Welcher Takt (Schlag)? Der, der dem absoluten Ziel am naechsten liegt
+      if (anchor) {
+        const abs = anchor.next + (posOf(cur) - anchor.cur) * trackRatio - posOf(next)
+        const unit = barMode ? barN : beatNext
+        err += Math.round((abs - err) / unit) * unit
+      }
       errs.push(err)
       if (errs.length > 5) errs.shift()
       const avg = errs.reduce((x, y) => x + y, 0) / errs.length
       lastErr = avg
-      // Anfangsfehler melden (Sekunden, > 0: der neue Titel kam zu spaet) —
-      // daraus lernt der Player, wie lange Springen und Starten wirklich dauern
-      if (!startReported && errs.length >= 4) { startReported = true; opts.onStartError?.(avg * beatNext) }
       const dt = lastTick ? Math.min(0.2, (now - lastTick) / 1000) : 0
       lastTick = now
       // Nur nahe am Ziel aufsummieren — sonst schaukelt der grosse Anfangsfehler
       // den langsamen Anteil auf und er zieht spaeter in die falsche Richtung
-      if (Math.abs(avg) < 0.04) integ = Math.max(-0.2, Math.min(0.2, integ + avg * dt))
+      if (Math.abs(avg) < 0.04 * beatNext) integ = Math.max(-0.2 * beatNext, Math.min(0.2 * beatNext, integ + avg * dt))
       else integ *= 0.9
-      const big = fast && Math.abs(avg) * beatNext > CATCH_FROM
-      const lim = big ? (exact ? CATCH_UP_FREE : CATCH_UP) : fast ? MAX_NUDGE_FAST : MAX_NUDGE
+      const sure = _known(next) && _known(cur)
+      const big = sure && (fast || silent) && Math.abs(avg) > CATCH_FROM
+      const lim = silent && big ? CATCH_SILENT : big ? (exact ? CATCH_UP_FREE : CATCH_UP) : fast || silent ? MAX_NUDGE_FAST : MAX_NUDGE
       const nudge = Math.max(-lim, Math.min(lim,
-        (avg / (big ? CATCH_SEC : fast ? CORRECT_FAST : CORRECT_SEC) + integ * 0.4) * beatNext))
+        avg / (big ? CATCH_SEC : fast ? CORRECT_FAST : CORRECT_SEC) + integ * 0.4))
       next.playbackRate = base() * (1 + nudge)
     },
     /** Nach dem Uebergang: Feinkorrektur aus, Grundtempo halten. */
@@ -255,7 +303,7 @@ export function barAlignedStart(cur, startSec, gCur, gNext, leadSec = 0.12, maxD
   // Echte Taktlaenge nach dem Angleichen muss gleich sein (sonst nur Schlaege)
   if (Math.abs((barN / m.rate) / (barC / rate) - 1) > 0.03)
     return alignedStart(cur, startSec, gCur, gNext, leadSec, maxDiff)
-  const pc = phaseOf(cur.currentTime + leadSec * rate, 60 / barC, gCur.phrase)
+  const pc = phaseOf(posOf(cur) + leadSec * rate, 60 / barC, gCur.phrase)
   const pn = phaseOf(Math.max(0, startSec), 60 / barN, gNext.phrase)
   let s = Math.max(0, startSec) + wrapPhase(pc - pn) * barN
   if (s < 0) s += barN

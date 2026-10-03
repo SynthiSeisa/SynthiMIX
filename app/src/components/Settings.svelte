@@ -742,7 +742,8 @@
                   {/each}
                 </div>
               </div>
-              {#each [['doubledrop', 'Double Drop'], ['filter', 'Filter-Übergang'], ['echo', 'Echo-Out'], ['roll', 'Loop-Roll']] as [k, l]}
+              {#each [['doubledrop', 'Double Drop'], ['eqmix', 'Langer EQ-Mix (32 Takte)'], ['filter', 'Filter-Übergang'], ['echo', 'Echo-Out'],
+                      ['hall', 'Hall-Ausklang'], ['roll', 'Loop-Roll'], ['backspin', 'Backspin']] as [k, l]}
                 <div class="row indent">
                   <span class="lbl">{l}</span>
                   <button class="tog {($appSettings.djTypes ?? {})[k] !== false ? 'on' : ''}" aria-label={l}
@@ -750,7 +751,7 @@
                 </div>
               {/each}
             {/if}
-            <div class="hint">Nur wenn Tempo und Takt beider Titel passen. Gewählt wird passend zur Situation: Echo-Out, wenn die Tonarten nicht zusammenpassen; Double Drop, wenn in beiden Titeln ein Drop erkannt ist (die Drops fallen genau zusammen, der Bass wird auf dem Drop getauscht); sonst Filter oder Loop-Roll. Beim nächsten Titel im Player steht, was kommt — ein Klick darauf wählt eine andere Art.</div>
+            <div class="hint">Nur wenn Tempo und Takt beider Titel passen. Gewählt wird passend zur Situation: Echo-Out, Hall-Ausklang, Backspin oder Loop-Roll, wenn die Tonarten nicht zusammenpassen (dann klingen sie nie gleichzeitig) — Backspin und Loop-Roll kommen nur dann und bei großem Tempo-Unterschied; Double Drop ab und zu, wenn in beiden Titeln ein Drop erkannt ist (die Drops fallen genau zusammen, der Bass wird auf dem Drop getauscht); sonst vor allem der lange EQ-Mix oder Filter. Bei großem Tempo-Unterschied (ab 3 %) immer ein kurzer Schnitt — nie Double Drop oder lange Überblendung. Beim nächsten Titel im Player steht, was kommt — ein Klick darauf wählt eine andere Art.</div>
             {#if !$appSettings.beatAlignCf}<div class="hint keep warn">Braucht „Schläge übereinanderlegen“ (Auf den Takt).</div>{/if}
           </div>
 

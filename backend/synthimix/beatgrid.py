@@ -1,5 +1,6 @@
 """Taktraster, Takt und Phrasen fuer den Beat-Sync beim Uebergang."""
 import asyncio
+import base64
 import json
 import math
 import os
@@ -281,7 +282,9 @@ _PHRASE_KEYS = ("phrase_off", "bar_beats", "phrase_src", "drops", "drop_src", "d
 # die Oberflaeche die Drops aus der groben Wellenform (nur Lautstaerke, feste
 # dB-Schwellen je 8 Takte) — ohne Bass und ohne die MIK-Cues als Vorschlag.
 DROP_SR = 4000                 # reicht fuer Lautheit und Bass (< 150 Hz)
-DROP_REV = 1
+# 2: Drop auf den Takt des groessten Sprungs schieben (MIK-Cue lag bei manchen
+# Titeln 4 Takte vor dem Einsatz — Double Drop fiel dann 4 Takte zu frueh)
+DROP_REV = 2
 
 
 def _bar_features(x, sr: int, start: float, bar: float, n: int, np):
@@ -344,6 +347,21 @@ def _find_drops(x, sr: int, bpm: float, off: float, phrase_off, bar_beats: int =
     cand = [b for b in range(int(n * 0.08), int(n * 0.85)) if b % 8 == 0]
     hits += [(b, "energy") for b in cand if is_drop(b)]
     hits.sort(key=lambda h: (h[0], h[1] != "mik"))     # gleicher Takt: der MIK-Cue zaehlt
+
+    # Genau hinsehen: der Anstieg oben wird ueber 8 Takte gemittelt — liegt der
+    # Cue/die Phrase ein paar Takte vor dem eigentlichen Einsatz (leiser Vorlauf,
+    # Auftakt), stimmt er trotzdem. Auf den Takt mit dem groessten Sprung
+    # schieben (bis 8 Takte spaeter, 2 frueher), aber nur bei klarem Vorsprung.
+    def step(k):
+        if k < 2 or k + 4 > n:
+            return -9.0
+        return float(e[k:k + 4].mean() - e[k - 2:k].mean())
+
+    def refine(b):
+        best = max(range(max(2, b - 2), min(n - 4, b + 8) + 1), key=step, default=b)
+        return best if best != b and step(best) >= step(b) + 0.5 else b
+
+    hits = sorted({(refine(b), src) for b, src in hits}, key=lambda h: (h[0], h[1] != "mik"))
     out: list[tuple[int, str]] = []
     for b, src in hits:
         if out and b - out[-1][0] < 16:
@@ -352,7 +370,7 @@ def _find_drops(x, sr: int, bpm: float, off: float, phrase_off, bar_beats: int =
     if not out:
         best = max(cand, key=rise, default=None)
         if best is not None and rise(best) >= 0.8:
-            out = [(best, "energy")]
+            out = [(refine(best), "energy")]
     return [round(start + b * bar, 3) for b, _ in out], (out[0][1] if out else "none")
 
 
@@ -470,6 +488,54 @@ def _grid_from_mik(g: dict, cues_ms: list) -> dict:
     beat = 60.0 / bpm_mik
     return {**g, "bpm_f": round(bpm_mik, 3), "beat_off": round(float(g.get("beat_off") or 0) % beat, 4),
             "beat_conf": max(float(g.get("beat_conf") or 0), 0.6), "grid_src": "mik"}
+
+# ── Hoerbare Stelle pruefen (lib/audiblepos.js) ─────────────────────────────
+# Chromium springt in MP3s ungenau (gemessen 10/2026: bis ±380 ms), meldet aber
+# die gewuenschte Zeit. Der Player misst deshalb nach jedem Sprung, was er
+# wirklich spielt, und vergleicht mit dieser Referenz: Huellkurven je 1 ms
+# (Hoehen 2-10 kHz, Bass unter 200 Hz). Von Anfang an dekodiert (-ss nach -i):
+# ein Sprung von ffmpeg landet in MP3s genauso ungenau.
+_REF_SR = 22050
+
+
+def _onset_ref_sync(path: str, start: float, dur: float) -> dict | None:
+    if not media._numpy_ok() or not os.path.isfile(path):
+        return None
+    import numpy as np
+    start = max(0.0, float(start)); dur = max(0.5, min(12.0, float(dur)))
+    try:
+        r = subprocess.run([core.FFMPEG, "-nostdin", "-v", "error", "-i", path, "-ss", f"{start:.4f}", "-t", f"{dur:.4f}",
+                            "-ac", "1", "-ar", str(_REF_SR), "-f", "f32le", "-"],
+                           capture_output=True, timeout=60, creationflags=_NO_WINDOW)
+    except Exception:
+        return None
+    x = np.frombuffer(r.stdout, dtype=np.float32)
+    if x.size < _REF_SR // 2:
+        return None
+    X = np.fft.rfft(x)
+    f = np.fft.rfftfreq(x.size, 1 / _REF_SR)
+    idx = np.arange(x.size) * 1000 // _REF_SR
+    cnt = np.maximum(1, np.bincount(idx))
+
+    def env(mask):
+        y = np.fft.irfft(X * mask, x.size)
+        return (np.bincount(idx, weights=y * y) / cnt).astype(np.float32)
+
+    hi, lo = env((f >= 2000) & (f <= 10000)), env(f < 200)
+    return {"start": round(start, 4), "hi": base64.b64encode(hi.tobytes()).decode("ascii"),
+            "lo": base64.b64encode(lo.tobytes()).decode("ascii")}
+
+
+async def _send_onset_ref(ws, rid, path: str, start: float, dur: float):
+    try:
+        res = await asyncio.get_running_loop().run_in_executor(None, _onset_ref_sync, path, start, dur)
+    except Exception:
+        res = None
+    try:
+        await ws.send_text(json.dumps({"type": "onset_ref", "id": rid, "path": path, "ok": bool(res), **(res or {})}))
+    except Exception:
+        pass
+
 
 async def _send_beatgrid(ws, path: str):
     """Raster aus der Bibliothek/dem Cache oder frisch messen und schicken."""

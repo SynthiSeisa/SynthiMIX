@@ -11,8 +11,11 @@
 
 import { barLen, tempoMatch } from './beatsync.js'
 
-export const DJ_TYPES = ['doubledrop', 'filter', 'echo', 'roll']
-export const DJ_LABEL = { blend: 'Normal', doubledrop: 'Double Drop', filter: 'Filter', echo: 'Echo-Out', roll: 'Loop-Roll' }
+export const DJ_TYPES = ['doubledrop', 'eqmix', 'filter', 'echo', 'hall', 'roll', 'backspin']
+export const DJ_LABEL = { blend: 'Normal', doubledrop: 'Double Drop', eqmix: 'Langer EQ-Mix', filter: 'Filter', echo: 'Echo-Out',
+                          hall: 'Hall-Ausklang', roll: 'Loop-Roll', backspin: 'Backspin' }
+/** Brauchen den Loop-Roll-Baustein (AudioWorklet) */
+export const NEEDS_ROLLER = ['roll', 'backspin']
 
 /** Energie (Mittel der Quadrate) eines Zeitbereichs der Waveform. */
 function energy(wf, dur, a, b) {
@@ -103,22 +106,45 @@ export function hash01(s) {
   return ((h >>> 0) % 100000) / 100000
 }
 
+// Wie oft eine Art gewaehlt wird, wenn mehrere gehen: lange Mischungen
+// haeufig, Effekt-Schnitte als Wuerze (ein DJ macht nicht jeden Uebergang mit Backspin)
+const WEIGHT = { eqmix: 3, filter: 2, roll: 2, echo: 1, hall: 1, backspin: 1 }
+
+function pick(pool, seed) {
+  const sum = pool.reduce((s, t) => s + (WEIGHT[t] ?? 1), 0)
+  let x = hash01(seed) * sum
+  for (const t of pool) { x -= WEIGHT[t] ?? 1; if (x < 0) return t }
+  return pool[pool.length - 1]
+}
+
+/** Ab diesem Tempo-Unterschied (3 %) nie Double Drop und nie lange uebereinander */
+export const BIG_TEMPO = 0.03
+/** Double Drop nur ab und zu, auch wenn er ginge — sonst kommt bei DnB kaum etwas anderes dran */
+const DD_SHARE = 0.35
+
 /**
- * Welcher Uebergang? cfg: { amount (0…1), types: {doubledrop, filter, echo, roll} }
- * ctx: { seed, eligible, keyClash, ddPossible, lastType }
- * Passend zur Situation: Echo-Out, wenn die Tonarten nicht passen; Double
- * Drop, wenn er geht; sonst Filter oder Loop-Roll im Wechsel.
+ * Welcher Uebergang? cfg: { amount (0…1), types: {art: false = aus} }
+ * ctx: { seed, eligible, keyClash, ddPossible, lastType, bigTempo, cutOk }
+ * Passend zur Situation: grosser Tempo-Unterschied → immer ein kurzer Schnitt
+ * (Echo, Hall, Backspin, Loop-Roll; cutOk: es gibt ein Raster zum Schneiden),
+ * auch ohne Tempo-Angleich; Tonarten passen nicht → ebenfalls ein Schnitt,
+ * damit sie nie zusammen klingen; Double Drop ab und zu, wenn er geht; sonst
+ * gewichtet, nie zweimal dieselbe Art hintereinander. Backspin und Loop-Roll
+ * nur, wenn Tempo oder Tonart nicht passen — wo zwei Titel sauber
+ * ineinander laufen, sind sie fehl am Platz.
  */
 export function chooseTransition(cfg, ctx) {
-  if (!ctx.eligible) return 'blend'
   const on = (t) => cfg.types?.[t] !== false
+  const notLast = (l) => (l.length > 1 ? l.filter(t => t !== ctx.lastType) : l)
+  const cut = ['echo', 'hall', 'backspin', 'roll'].filter(on)
+  if (ctx.bigTempo) return ctx.cutOk && cut.length ? pick(notLast(cut), ctx.seed + '#cut') : 'blend'
+  if (!ctx.eligible) return 'blend'
   if (hash01(ctx.seed + '#amount') >= (cfg.amount ?? 0.4)) return 'blend'
-  if (ctx.keyClash && on('echo')) return 'echo'
-  if (ctx.ddPossible && on('doubledrop')) return 'doubledrop'
-  const rest = ['filter', 'roll', 'echo'].filter(t => on(t))
+  if (ctx.keyClash && cut.length) return pick(notLast(cut), ctx.seed + '#cut')
+  if (ctx.ddPossible && on('doubledrop') && ctx.lastType !== 'doubledrop' && hash01(ctx.seed + '#dd') < DD_SHARE) return 'doubledrop'
+  const rest = ['eqmix', 'filter', 'echo', 'hall'].filter(on)
   if (!rest.length) return 'blend'
-  const pool = rest.length > 1 ? rest.filter(t => t !== ctx.lastType) : rest
-  return pool[Math.floor(hash01(ctx.seed + '#type') * pool.length)]
+  return pick(notLast(rest), ctx.seed + '#type')
 }
 
 /**
@@ -127,5 +153,7 @@ export function chooseTransition(cfg, ctx) {
  */
 export function rollSteps(beatsPerBar = 4) {
   const b = beatsPerBar
-  return [{ at: 0, len: 1 }, { at: b / 2, len: 0.5 }, { at: b * 0.75, len: 0.25 }, { at: b * 0.875, len: 0.125 }]
+  // Zwei Takte: erst ein Takt lang der 1-Schlag-Loop, dann immer kuerzer bis
+  // zum Sechzehntel-Schlag (ein Takt war zu kurz — der Roll kam abrupt)
+  return [{ at: 0, len: 1 }, { at: b, len: 0.5 }, { at: b * 1.5, len: 0.25 }, { at: b * 1.75, len: 0.125 }, { at: b * 1.875, len: 0.0625 }]
 }

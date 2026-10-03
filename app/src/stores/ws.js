@@ -307,6 +307,7 @@ function connect() {
       case 'waveform_next':   if (_wfWant.waveform_next === undefined || msg.path === _wfWant.waveform_next) waveformNext.set(msg.data ?? []); break
       case 'waveform_third':  if (_wfWant.waveform_third === undefined || msg.path === _wfWant.waveform_third) waveformThird.set({ path: msg.path ?? '', data: msg.data ?? [] }); break
       case 'harmonic_result': harmonicResult.set({ ...msg, at: Date.now() }); break
+      case 'onset_ref': { const w = _refWait.get(msg.id); if (w) { _refWait.delete(msg.id); w(msg) } break }
       case 'beatgrid':
         beatGrids.update(g => ({ ...g, [msg.path]: { bpm: msg.bpm_f || 0, off: msg.beat_off || 0, conf: msg.beat_conf || 0,
           phrase: msg.phrase_off ?? null, barBeats: msg.bar_beats || 0, phraseSrc: msg.phrase_src || '',
@@ -464,6 +465,19 @@ function connect() {
       case 'spotdl_install_error':    spotdlInstalling.set(false); spotdlInstallText.set(null); spotdlInstallError.set(msg.text ?? 'Fehler'); break
     }
   }
+}
+
+// Huellkurven einer Stelle, exakt dekodiert (Messung der hoerbaren Stelle, lib/audiblepos.js)
+const _refWait = new Map()
+let _refId = 0
+const _f32 = (b64) => { const s = atob(b64 || ''), u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return new Float32Array(u.buffer) }
+export function requestOnsetRef(path, start, dur) {
+  return new Promise((resolve, reject) => {
+    const id = ++_refId
+    const to = setTimeout(() => { _refWait.delete(id); reject(new Error('timeout')) }, 20000)
+    _refWait.set(id, (msg) => { clearTimeout(to); msg.ok ? resolve({ start: msg.start, hi: _f32(msg.hi), lo: _f32(msg.lo) }) : reject(new Error('ref')) })
+    send({ type: 'get_onset_ref', id, path, start, dur })
+  })
 }
 
 export function send(obj) {

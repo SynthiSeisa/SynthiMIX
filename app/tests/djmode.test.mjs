@@ -71,13 +71,31 @@ test('Double Drop: zu grosser Tempo-Unterschied oder zu spaet = keiner', () => {
 test('Auswahl: passend zur Situation, stabil je Titelpaar', () => {
   const cfg = { amount: 1, types: {} }
   assert.equal(chooseTransition(cfg, { seed: 'x', eligible: false }), 'blend')
-  assert.equal(chooseTransition(cfg, { seed: 'x', eligible: true, keyClash: true }), 'echo')
-  assert.equal(chooseTransition(cfg, { seed: 'x', eligible: true, ddPossible: true }), 'doubledrop')
+  assert.ok(['echo', 'hall', 'backspin', 'roll'].includes(chooseTransition(cfg, { seed: 'x', eligible: true, keyClash: true })))
+  // Backspin und Loop-Roll nur, wenn Tempo oder Tonart nicht passen
+  const seen = new Set()
+  for (let i = 0; i < 500; i++) {
+    assert.ok(!['roll', 'backspin'].includes(chooseTransition(cfg, { seed: 'n' + i, eligible: true })))
+    seen.add(chooseTransition(cfg, { seed: 'n' + i, eligible: true, keyClash: true }))
+    seen.add(chooseTransition(cfg, { seed: 'n' + i, eligible: false, bigTempo: true, cutOk: true }))
+  }
+  assert.ok(seen.has('roll') && seen.has('backspin'))
+  // Double Drop nur ab und zu (etwa ein Drittel), nie zweimal hintereinander
+  let dd = 0
+  for (let i = 0; i < 1000; i++) if (chooseTransition(cfg, { seed: 'd' + i, eligible: true, ddPossible: true }) === 'doubledrop') dd++
+  assert.ok(dd > 250 && dd < 450, `Double Drop ${dd} von 1000`)
+  for (let i = 0; i < 200; i++) assert.notEqual(chooseTransition(cfg, { seed: 'd' + i, eligible: true, ddPossible: true, lastType: 'doubledrop' }), 'doubledrop')
+  // Grosser Tempo-Unterschied: immer ein Schnitt, auch ohne Tempo-Angleich und bei kleinem Anteil
+  for (let i = 0; i < 200; i++) {
+    for (const eligible of [true, false])
+      assert.ok(['echo', 'hall', 'backspin', 'roll'].includes(chooseTransition({ amount: 0 }, { seed: 'b' + i, eligible, bigTempo: true, cutOk: true, ddPossible: true })))
+    assert.equal(chooseTransition(cfg, { seed: 'b' + i, eligible: true, bigTempo: true, cutOk: false, ddPossible: true }), 'blend')
+  }
   const t = chooseTransition(cfg, { seed: 'a|b', eligible: true })
-  assert.ok(['filter', 'roll', 'echo'].includes(t))
+  assert.ok(['eqmix', 'filter', 'roll', 'echo', 'hall', 'backspin'].includes(t))
   assert.equal(chooseTransition(cfg, { seed: 'a|b', eligible: true }), t)
   // abgeschaltete Arten werden nie gewaehlt
-  const only = { amount: 1, types: { doubledrop: false, echo: false, roll: false } }
+  const only = { amount: 1, types: { doubledrop: false, echo: false, roll: false, hall: false, backspin: false, eqmix: false } }
   assert.equal(chooseTransition(only, { seed: 'q', eligible: true, keyClash: true, ddPossible: true }), 'filter')
   // Haeufigkeit 0 = immer normal
   assert.equal(chooseTransition({ amount: 0 }, { seed: 'q', eligible: true, ddPossible: true }), 'blend')
@@ -91,8 +109,8 @@ test('Haeufigkeit: etwa der eingestellte Anteil', () => {
 })
 
 test('Loop-Roll: 1, ½, ¼, ⅛ Schlag im letzten Takt', () => {
-  assert.deepEqual(rollSteps(4).map(s => s.len), [1, 0.5, 0.25, 0.125])
-  assert.deepEqual(rollSteps(4).map(s => s.at), [0, 2, 3, 3.5])
+  assert.deepEqual(rollSteps(4).map(s => s.len), [1, 0.5, 0.25, 0.125, 0.0625])
+  assert.deepEqual(rollSteps(4).map(s => s.at), [0, 4, 6, 7, 7.5])                // zwei Takte
 })
 
 test('Drops: gemessene Drops aus dem Backend haben Vorrang vor der Wellenform', () => {

@@ -124,8 +124,9 @@ test('Uebergang: Einstieg auf der Phrase und weicher Bass-Tausch im Takt', async
     const s = []
     const t0 = performance.now()
     while (performance.now() - t0 < 13000) {
+      // hoerbare Stelle (currentTime + gemessener Sprungfehler, lib/audiblepos.js)
       s.push({ cf: P.cfActive, swap: P.bassSwapOn, eqOld: oldEl === P.elA ? P.eqA : P.eqB,
-               eqNew: oldEl === P.elA ? P.eqB : P.eqA, tOld: oldEl.currentTime, tNew: newEl.paused ? null : newEl.currentTime })
+               eqNew: oldEl === P.elA ? P.eqB : P.eqA, tOld: P.posOf(oldEl), tNew: newEl.paused ? null : P.posOf(newEl) })
       await sleep(50)
     }
     return { trig, s }
@@ -170,7 +171,7 @@ test('Groesserer Tempo-Unterschied (128 -> 144 BPM, Grenze 15 %): beide treffen 
     const t0 = performance.now()
     while (performance.now() - t0 < 13000) {
       s.push({ cf: P.cfActive, swap: P.bassSwapOn, rOld: oldEl.playbackRate, rNew: newEl.playbackRate,
-               tOld: oldEl.currentTime, tNew: newEl.paused ? null : newEl.currentTime })
+               tOld: P.posOf(oldEl), tNew: newEl.paused ? null : P.posOf(newEl) })
       await sleep(50)
     }
     return s

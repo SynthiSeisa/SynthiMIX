@@ -3,11 +3,13 @@
   import { untrack, onMount } from 'svelte'
   import { keyCompat } from '../lib/keys.js'
   import KeyChip from './KeyChip.svelte'
-  import { library, playerState, nowPlaying, queue, waveform, waveformNext, settings, playMode, send, autoMixEnabled, appSettings, introSkipPaths, skipNextCrossfade, livePositionMs, beatGrids, waveformThird, mixNowRequest, requestWaveform } from '../stores/ws.js'
-  import { createSync, glideRate, barAlignedStart, snapToPhrase, swapEligible, bassSwapPlan, meetRate, barLen, tempoMatch } from '../lib/beatsync.js'
+  import { library, playerState, nowPlaying, queue, waveform, waveformNext, settings, playMode, send, autoMixEnabled, appSettings, introSkipPaths, skipNextCrossfade, livePositionMs, beatGrids, waveformThird, mixNowRequest, requestWaveform, requestOnsetRef } from '../stores/ws.js'
+  import { createSync, glideRate, barAlignedStart, snapToPhrase, swapEligible, bassSwapPlan, meetRate, barLen, tempoMatch, posOf, setPosSource } from '../lib/beatsync.js'
+  import { createAudible } from '../lib/audiblepos.js'
   import Waveform from './Waveform.svelte'
-  import { detectDrops, doubleDropPlan, chooseTransition, rollSteps, DJ_LABEL } from '../lib/djmode.js'
-  import { loadRoller, makeRoller } from '../lib/roller.js'
+  import { detectDrops, doubleDropPlan, chooseTransition, rollSteps, DJ_LABEL, NEEDS_ROLLER, BIG_TEMPO } from '../lib/djmode.js'
+  import { loadRoller, makeRoller, makeHallIR } from '../lib/roller.js'
+  import { mixState, CUT_TYPES, LEAD_BARS, TAIL_BARS, EQMIX_BARS, ROLL_BARS, SPIN_TOP, spinBeats, CUT_FADE_OUT, CUT_FADE_IN, KILL_DB } from '../lib/djfx.js'
 
   let elA = $state(null)
   let elB = $state(null)
@@ -28,6 +30,7 @@
 
   // ── Beat-Sync und Anzeige des Uebergangs ──────────────────────────────────
   let cfSync       = null            // Regelkreis waehrend des Uebergangs (lib/beatsync.js)
+  let audible      = null            // hoerbare Stelle je Deck (lib/audiblepos.js)
   let _stopGlide   = () => {}        // Tempo nach dem Uebergang langsam zurueck auf 100 %
   let blendP       = $state(0)       // Fortschritt des automatischen Uebergangs, 0…1
   let blendNextPos = $state(0)       // Position im naechsten Titel waehrend des Uebergangs
@@ -60,12 +63,12 @@
     const g = path ? get(beatGrids)[path] : null
     return g && g.bpm > 0 ? g : null
   }
-  function startSync(oldEl, newEl, oldPath, newPath, onStartError = null) {
+  function startSync(oldEl, newEl, oldPath, newPath, onStartError = null, anchor = null) {
     const cfg = get(appSettings)
     if (!cfg.beatAlignCf && !cfg.tempoMatch) return null
     return createSync(oldEl, newEl, gridOf(oldPath), gridOf(newPath),
                       { tempo: cfg.tempoMatch !== false, phase: !!cfg.beatAlignCf, maxDiff: maxTempoDiff(), meet: true,
-                        onStartError })
+                        onStartError, anchor })
   }
   // Wie lange Springen und Starten des naechsten Titels dauern: daraus wird
   // berechnet, wo er einsetzt. Gemessen hoerbar startete er mit fest 120 ms
@@ -103,6 +106,7 @@
   let _cfDoneAt     = 0            // Ende des letzten Uebergangs (performance.now)
 
   let audioCtx = null
+  let masterOut = null             // Summe vor dem Ausgang (fuer Messungen in den Tests)
   let gainA = null, gainB = null
   // Angleichen beim Uebergang: der neue Titel steigt so laut ein, wie der
   // alte gerade klingt, und gleitet bis zum Ende des Uebergangs auf seinen
@@ -118,7 +122,51 @@
   // Kette: Quelle → Bass-EQ → Filter → Roll → Normalisierung → Angleich → Limiter,
   // Echo zweigt hinter der Normalisierung ab (klingt nach, wenn das Deck stumm ist).
   let fxA = null, fxB = null, rollA = null, rollB = null, sendA = null, sendB = null
-  let echoDelay = null, echoFb = null
+  let echoDelay = null, echoFb = null, echoHp = null
+  // Mischpult je Deck: Mitten, Hoehen, Kanal-Fader, Hall-Weg
+  let midA = null, midB = null, hiA = null, hiB = null, faderA = null, faderB = null, hallA = null, hallB = null
+  function midOf(el)   { return el === elA ? midA : el === elB ? midB : null }
+  function hiOf(el)    { return el === elA ? hiA : el === elB ? hiB : null }
+  function faderOf(el) { return el === elA ? faderA : el === elB ? faderB : null }
+  function hallOf(el)  { return el === elA ? hallA : el === elB ? hallB : null }
+  // Regler fahren (geglaettet). Ein Regler mit geplantem harten Moment (Schnitt,
+  // Drop, Bass-Tausch) bleibt bis kurz danach gesperrt — sonst wuerde das
+  // Glaetten den geplanten Moment wieder loeschen.
+  const _locks = new Map()
+  function aim(param, v, tc = 0.03) {
+    if (!param || !audioCtx || v == null || !isFinite(v)) return
+    const now = audioCtx.currentTime
+    if ((_locks.get(param) ?? 0) > now) return
+    if (Math.abs(param.value - v) < 1e-4) return
+    try { param.cancelAndHoldAtTime(now) } catch { param.cancelScheduledValues(now) }
+    param.setTargetAtTime(v, now, tc)
+  }
+  /** Harter Moment auf der Audio-Uhr: ab `at` in etwa `fade` s auf v.
+   *  Als Annaeherung ab `at` (setTarget), nicht als Rampe: eine Rampe beginnt
+   *  beim letzten geplanten Wert — lag der Sekunden zurueck, sprang der Regler
+   *  schon beim Einplanen (bis 0,35 s vor dem Moment) fast ganz um. Der Schnitt
+   *  kam so einen Schlag zu frueh und hart (gemessen 10/2026). */
+  function hit(param, v, at, fade = 0.02) {
+    if (!param || !audioCtx) return
+    at = Math.max(at, audioCtx.currentTime)
+    try { param.cancelAndHoldAtTime(at) } catch { param.cancelScheduledValues(at) }
+    param.setTargetAtTime(v, at, Math.max(0.001, fade / 3))
+    _locks.set(param, Math.max(_locks.get(param) ?? 0, at + 2 * fade + 0.06))
+  }
+  function _setNow(param, v) {
+    if (!param || !audioCtx) return
+    _locks.delete(param)
+    param.cancelScheduledValues(audioCtx.currentTime)
+    param.setValueAtTime(v, audioCtx.currentTime)
+  }
+  /** Deck auf Grundstellung: EQ neutral, Filter offen, Fader auf fader, keine Effekte */
+  function _resetDeck(el, fader = 1) {
+    if (!el || !audioCtx) return
+    _setNow(faderOf(el)?.gain, fader)
+    _setNow(midOf(el)?.gain, 0); _setNow(hiOf(el)?.gain, 0)
+    _setNow(hallOf(el)?.gain, 0)
+    _resetFx(el)
+  }
   let rollerOk = $state(false)
   function fxOf(el)   { return el === elA ? fxA : el === elB ? fxB : null }
   function rollOf(el) { return el === elA ? rollA : el === elB ? rollB : null }
@@ -149,7 +197,7 @@
     eq.gain.setValueAtTime(eq.gain.value, now)
     eq.gain.linearRampToValueAtTime(0, now + sec)
   }
-  function resetAllBass() { resetBass(elA); resetBass(elB); bassSwapOn = false; _resetMatch(); _resetFx(elA); _resetFx(elB) }
+  function resetAllBass() { resetBass(elA); resetBass(elB); bassSwapOn = false; _resetMatch(); _resetDeck(elA); _resetDeck(elB) }
   /** Bass-Tausch fuer einen Uebergang einplanen; false = normaler Blend. */
   function planBassSwap(oldEl, newEl, gOld, gNew, fadeSec) {
     const cfg = get(appSettings)
@@ -157,7 +205,7 @@
     if (!swapEligible(oldEl, gOld, gNew, cfg)) return false
     // Treffen in der Mitte: der alte Titel gleitet in den ersten 40 % auf sein Ziel-Tempo
     const r1 = cfg.tempoMatch !== false ? meetRate(oldEl, gOld, gNew, maxTempoDiff()) : null
-    const plan = bassSwapPlan(oldEl.currentTime, oldEl.playbackRate || 1, gOld, fadeSec,
+    const plan = bassSwapPlan(posOf(oldEl), oldEl.playbackRate || 1, gOld, fadeSec,
                               r1 ? { r1, sec: 0.4 * fadeSec } : null)
     if (!plan) return false
     const eo = eqOf(oldEl), en = eqOf(newEl), now = audioCtx.currentTime
@@ -222,35 +270,59 @@
       limiter.threshold.value = -1.5; limiter.knee.value = 0; limiter.ratio.value = 20
       limiter.attack.value = 0.002;   limiter.release.value = 0.15
       limiter.connect(audioCtx.destination)
-      matchA = audioCtx.createGain(); matchA.connect(limiter)
-      matchB = audioCtx.createGain(); matchB.connect(limiter)
+      masterOut = limiter
+      // Kanal-Fader je Deck (Uebergaenge), dahinter der Limiter
+      faderA = audioCtx.createGain(); faderA.connect(limiter)
+      faderB = audioCtx.createGain(); faderB.connect(limiter)
+      matchA = audioCtx.createGain(); matchA.connect(faderA)
+      matchB = audioCtx.createGain(); matchB.connect(faderB)
       gainA = audioCtx.createGain(); gainA.connect(matchA)
       gainB = audioCtx.createGain(); gainB.connect(matchB)
       const shelf = () => { const f = audioCtx.createBiquadFilter(); f.type = 'lowshelf'; f.frequency.value = 200; f.gain.value = 0; return f }
       const neutral = () => { const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 22000; f.Q.value = 0.7; return f }
+      const peak = () => { const f = audioCtx.createBiquadFilter(); f.type = 'peaking'; f.frequency.value = 1000; f.Q.value = 0.7; f.gain.value = 0; return f }
+      const high = () => { const f = audioCtx.createBiquadFilter(); f.type = 'highshelf'; f.frequency.value = 4000; f.gain.value = 0; return f }
       fxA = neutral(); fxA.connect(gainA)
       fxB = neutral(); fxB.connect(gainB)
-      eqA = shelf(); eqA.connect(fxA)
-      eqB = shelf(); eqB.connect(fxB)
+      // 3-Band-EQ: Bass (Low-Shelf 200 Hz) → Mitten (1 kHz) → Hoehen (High-Shelf 4 kHz)
+      hiA = high(); hiA.connect(fxA); midA = peak(); midA.connect(hiA)
+      hiB = high(); hiB.connect(fxB); midB = peak(); midB.connect(hiB)
+      eqA = shelf(); eqA.connect(midA)
+      eqB = shelf(); eqB.connect(midB)
       // Echo: eine Verzoegerung mit Rueckkopplung fuer beide Decks
       echoDelay = audioCtx.createDelay(4); echoFb = audioCtx.createGain(); echoFb.gain.value = 0.5
-      const echoHp = audioCtx.createBiquadFilter(); echoHp.type = 'highpass'; echoHp.frequency.value = 250
-      echoDelay.connect(echoFb); echoFb.connect(echoDelay); echoDelay.connect(echoHp); echoHp.connect(limiter)
+      echoHp = audioCtx.createBiquadFilter(); echoHp.type = 'highpass'; echoHp.frequency.value = 250
+      const echoLp = audioCtx.createBiquadFilter(); echoLp.type = 'lowpass'; echoLp.frequency.value = 8000
+      echoDelay.connect(echoFb); echoFb.connect(echoDelay); echoDelay.connect(echoHp); echoHp.connect(echoLp); echoLp.connect(limiter)
+      // Hall-Ausklang: berechneter Nachhall (3,2 s), ohne Bass, leicht abgedunkelt
+      const hallConv = audioCtx.createConvolver(); hallConv.buffer = makeHallIR(audioCtx, 3.2)
+      const hallHp = audioCtx.createBiquadFilter(); hallHp.type = 'highpass'; hallHp.frequency.value = 300
+      const hallLp = audioCtx.createBiquadFilter(); hallLp.type = 'lowpass'; hallLp.frequency.value = 7000
+      const hallOut = audioCtx.createGain(); hallOut.gain.value = 0.55
+      hallConv.connect(hallHp); hallHp.connect(hallLp); hallLp.connect(hallOut); hallOut.connect(limiter)
+      hallA = audioCtx.createGain(); hallA.gain.value = 0; hallA.connect(hallConv)
+      hallB = audioCtx.createGain(); hallB.gain.value = 0; hallB.connect(hallConv)
       sendA = audioCtx.createGain(); sendA.gain.value = 0; gainA.connect(sendA); sendA.connect(echoDelay)
       sendB = audioCtx.createGain(); sendB.gain.value = 0; gainB.connect(sendB); sendB.connect(echoDelay)
-      // Loop-Roll: Worklet laedt nebenher und wird dann zwischen Filter und Pegel gehaengt
+      gainA.connect(hallA); gainB.connect(hallB)
+      // Loop-Roll: Worklet laedt nebenher und wird dann zwischen EQ und Filter gehaengt
       const ctx = audioCtx
       loadRoller(ctx).then(ok => {
         if (!ok || ctx !== audioCtx) return
         try {
           rollA = makeRoller(ctx); rollB = makeRoller(ctx)
-          fxA.disconnect(); fxA.connect(rollA); rollA.connect(gainA)
-          fxB.disconnect(); fxB.connect(rollB); rollB.connect(gainB)
+          // vor dem Filter: der Hochpass-Aufbau soll auch den Roll/Spin erfassen
+          hiA.disconnect(); hiA.connect(rollA); rollA.connect(fxA)
+          hiB.disconnect(); hiB.connect(rollB); rollB.connect(fxB)
           rollerOk = true
         } catch (e) { console.warn('Loop-Roll:', e) }
       })
-      audioCtx.createMediaElementSource(elA).connect(eqA)
-      audioCtx.createMediaElementSource(elB).connect(eqB)
+      const srcA = audioCtx.createMediaElementSource(elA), srcB = audioCtx.createMediaElementSource(elB)
+      srcA.connect(eqA); srcB.connect(eqB)
+      // Hoerbare Stelle je Deck messen (MP3-Spruenge landen daneben, lib/audiblepos.js)
+      createAudible(ctx, [{ el: elA, src: srcA }, { el: elB, src: srcB }], requestOnsetRef)
+        .then(a => { if (ctx === audioCtx) { audible = a; setPosSource(a.posOf, a.known) } })
+        .catch(e => console.warn('Hoerbare Stelle:', e))
       untrack(() => applySink())
     } catch (e) { console.warn('AudioContext:', e) }
   })
@@ -731,8 +803,6 @@
   })
 
   // ── DJ-Modus: Plan fuer den Uebergang zum naechsten Titel ─────────────────
-  const DJ_LEAD = 2                                  // Takte Vorlauf bei Echo/Roll
-  const DJ_TAIL = { echo: 2, roll: 0.5 }             // Takte nach der Grenze
   let djOverride = $state({})                        // "lauf|naechst" -> Art (von Hand)
   let _djLastType = $state('blend')
   let djMenu = $state(null)                          // {x, y} des offenen Menues
@@ -764,7 +834,12 @@
     const eligible = !!(cfg.beatAlignCf && gC && gN && gC.conf >= 0.4 && gN.conf >= 0.4 && tempoMatch(gC.bpm, gN.bpm, maxD))
     const bucket = Math.floor(posMs / 4000)          // nicht bei jedem Bild neu rechnen
     const nDur = nt.duration_sec || 0
-    const dd = eligible && nDur > 0
+    // Grosser Tempo-Unterschied: nie Double Drop, nie lange uebereinander —
+    // stattdessen ein Schnitt (geht auch ohne Tempo-Angleich, braucht nur Raster)
+    const mAny = gC && gN ? tempoMatch(gC.bpm, gN.bpm, 1) : null
+    const bigTempo = !!mAny && Math.abs(mAny.rate - 1) > BIG_TEMPO
+    const cutOk = !!(cfg.beatAlignCf && gC && gN && gC.conf >= 0.4 && _baseOutroStart >= 0 && nDur > 0)
+    const dd = eligible && !bigTempo && nDur > 0
       ? doubleDropPlan({ drops: curDrops, g: gC, dur: durMs / 1000 }, { drops: nextDrops, g: gN, dur: nDur }, maxD, bucket * 4 - 2)      // Start darf nur schon vorbei sein, nicht kurz bevorstehen
       : null
     const dragged = outroOverride?.path === np.path || introOverride?.path === nt.path
@@ -774,22 +849,43 @@
     if (ov) type = ov
     else if (!cfg.djMode) type = 'blend'
     else type = chooseTransition({ amount: cfg.djAmount ?? 0.4, types: cfg.djTypes ?? {} },
-      { seed: key, eligible, keyClash: uebergang.level === 'clash', ddPossible: ddOk, lastType: untrack(() => _djLastType) })
-    if (type !== 'blend' && !eligible) type = 'blend'
+      { seed: key, eligible, keyClash: uebergang.level === 'clash', ddPossible: ddOk, lastType: untrack(() => _djLastType), bigTempo, cutOk })
+    if (type !== 'blend' && !eligible && !(CUT_TYPES.includes(type) && bigTempo && cutOk)) type = 'blend'
     if (type === 'doubledrop' && !ddOk) type = 'blend'
-    if (type === 'roll' && !rollerOk) type = 'echo'
-    const plan = { type, auto: !ov, eligible, ddOk, dd, key }
+    if ((type === 'roll' || type === 'backspin') && !rollerOk) type = 'echo'
+    const plan = { type, auto: !ov, eligible, ddOk, dd, key, bigTempo, cutOk }
     const barC = gC ? barLen(gC) : 0, barN = gN ? barLen(gN) : 0
     const dC = durMs / 1000
     if (type === 'doubledrop') {
       plan.zoneOut = [dd.trig / dC, Math.min(1, (dd.trig + dd.len * barC) / dC)]
       plan.zoneIn = [dd.intro / nDur, Math.min(0.99, (dd.intro + dd.len * barN) / nDur)]
-    } else if ((type === 'echo' || type === 'roll') && _baseOutroStart >= 0 && nDur > 0) {
-      const B = _baseOutroStart * dC, tail = DJ_TAIL[type]
-      const I = Math.max(_baseIntroStart * nDur, DJ_LEAD * barN)
+    } else if (CUT_TYPES.includes(type) && _baseOutroStart >= 0 && nDur > 0) {
+      const B = _baseOutroStart * dC, tail = TAIL_BARS[type]
+      // Vorlauf des neuen in seiner Zeit: angeglichen so viele Takte wie beim
+      // alten. Bei grossem Tempo-Unterschied wird nicht angeglichen (der neue
+      // kommt nach dem Schnitt in seinem eigenen Tempo, wie beim Auflegen):
+      // der Vorlauf dauert dann so lange wie die Takte des alten
+      const matched = eligible && !bigTempo
+      plan.matched = matched
+      const leadN = matched ? LEAD_BARS * barN : LEAD_BARS * barC
+      let I = Math.max(_baseIntroStart * nDur, leadN)
+      // Roll und Backspin fuehren in den Drop des naechsten Titels (wie beim
+      // Auflegen) — im leisen Intro entstand nach dem Effekt ein Loch. Nicht,
+      // wenn der Einstieg von Hand gezogen wurde.
+      const d0 = nextDrops[0]
+      if ((type === 'roll' || type === 'backspin') && d0 >= leadN && d0 < nDur * 0.5 && introOverride?.path !== nt.path) I = d0
+      if (!matched && gN?.phrase != null && barN > 0) I = gN.phrase + Math.ceil((I - gN.phrase) / barN - 1e-6) * barN
       plan.B = B; plan.I = I
-      plan.zoneOut = [Math.max(0, (B - DJ_LEAD * barC) / dC), Math.min(1, (B + tail * barC) / dC)]
-      plan.zoneIn = [(I - DJ_LEAD * barN) / nDur, Math.min(0.99, (I + tail * barN) / nDur)]
+      plan.zoneOut = [Math.max(0, (B - LEAD_BARS * barC) / dC), Math.min(1, (B + tail * barC) / dC)]
+      plan.zoneIn = [(I - leadN) / nDur, Math.min(0.99, (I + tail * barN) / nDur)]
+    } else if (type === 'eqmix' && _baseOutroStart >= 0 && barC > 0) {
+      // 32 Takte; endet spaetestens einen Takt vor Schluss, beginnt auf einer Phrase
+      const L = EQMIX_BARS * barC
+      let s0 = Math.min(_baseOutroStart * dC, dC - L - barC)
+      if (gC?.phrase != null) s0 = gC.phrase + Math.floor((s0 - gC.phrase) / (8 * barC) + 1e-6) * 8 * barC
+      // passt er nicht (zu frueh im Titel, naechster zu kurz): Filter statt Normal
+      if (s0 < dC * 0.3 || nDur < L + 8 * barN) plan.type = cfg.djTypes?.filter !== false ? 'filter' : 'blend'
+      else plan.zoneOut = [s0 / dC, Math.min(1, (s0 + L) / dC)]
     }
     return plan
   })
@@ -1108,7 +1204,9 @@
 
   // ── Auto-crossfade ─────────────────────────────────────────────────────────
   function _checkCrossfade(pos) {
-    if (cfActive || cfEff <= 0 || durMs <= 0) return
+    // Auch nicht, solange eine von Hand gestartete Ueberblendung noch laeuft —
+    // deren Ende pausierte sonst das Deck, in das gerade uebergeblendet wird
+    if (cfActive || cfRafActive || cfEff <= 0 || durMs <= 0) return
     // Nicht waehrend der Pause-Blende: der alte Titel laeuft dort noch ein
     // paar hundert Millisekunden — frueher startete genau dann ein neuer
     // Uebergang, und der naechste Titel spielte nach dem Pausieren weiter.
@@ -1132,8 +1230,12 @@
     if (dj === 'doubledrop' && plan.dd) {
       if (pos > plan.dd.trig * 1000 + 1500) dj = 'blend'
       else triggerMs = plan.dd.trig * 1000
-    } else if ((dj === 'echo' || dj === 'roll') && barC > 0) {
-      const t0 = (djB - DJ_LEAD * barC) * 1000
+    } else if (CUT_TYPES.includes(dj) && barC > 0) {
+      const t0 = (djB - LEAD_BARS * barC) * 1000
+      if (t0 < pos - 1500) dj = 'blend'
+      else triggerMs = t0
+    } else if (dj === 'eqmix' && plan.zoneOut) {
+      const t0 = plan.zoneOut[0] * durMs
       if (t0 < pos - 1500) dj = 'blend'
       else triggerMs = t0
     } else if (dj !== 'filter') dj = 'blend'
@@ -1171,17 +1273,30 @@
 
     const _nd = nextTrk.duration_sec || 0
     const introFrac = dj === 'doubledrop' && _nd > 0 ? plan.dd.intro / _nd
-      : (dj === 'echo' || dj === 'roll') && plan.zoneIn ? plan.zoneIn[0]
+      : CUT_TYPES.includes(dj) && plan.zoneIn ? plan.zoneIn[0]
       : _getNextIntroStart()
     // DJ-Einstiege liegen schon auf dem Takt des Drops/der Phrase: nicht verschieben
-    const introDragged = !!(introOverride && introOverride.path === nextTrk.path) || (dj !== 'blend' && dj !== 'filter')
+    const introDragged = !!(introOverride && introOverride.path === nextTrk.path) || dj === 'doubledrop' || CUT_TYPES.includes(dj)
+    // Neues Deck: Element auf Lautstaerke, hoerbar macht es erst der Kanal-Fader
+    _resetDeck(inactive, 0)
 
     inactive.playbackRate = 1
     inactive.src = nextUrl
     inactive.dataset.path = nextTrk.path
     inactive.load()
     const curPath = cur()?.dataset.path
-    const beginSync = () => { if (!cfCancelled && cfActive) cfSync = startSync(cur(), inactive, curPath, nextTrk.path, learnLead) }
+    // Schnitt bei grossem Tempo-Unterschied: kein Angleichen, der neue laeuft in seinem Tempo
+    const freeCut = CUT_TYPES.includes(dj) && plan?.matched === false
+    // Absolutes Ziel fuer den Regler: Drop auf Drop, Einstieg auf der Grenze,
+    // sonst die Lage beim Start (die Taktlage allein ist mehrdeutig)
+    const beginSync = () => {
+      if (cfCancelled || !cfActive || freeCut) return
+      const c = cur()
+      const anchor = dj === 'doubledrop' && plan?.dd ? { cur: plan.dd.drop1, next: plan.dd.drop2 }
+        : CUT_TYPES.includes(dj) && plan?.I != null ? { cur: djB, next: plan.I }
+        : c ? { cur: posOf(c), next: inactive.currentTime } : null
+      cfSync = startSync(c, inactive, curPath, nextTrk.path, learnLead, anchor)
+    }
 
     inactive.addEventListener('canplay', function onCanPlay() {
       if (cfCancelled) return
@@ -1193,7 +1308,7 @@
           gn.gain.setValueAtTime(_cfMatchGain, audioCtx.currentTime)
         }
       }
-      inactive.volume = 0
+      inactive.volume = volume / 100
       // Use inactive.duration (reliable at canplay) instead of metadata duration_sec
       // which is often 0 for newly added tracks.
       const elDur = inactive.duration
@@ -1203,7 +1318,7 @@
       // derselben Stelle im Takt, an der der laufende gerade steht (Eins auf Eins)
       if (get(appSettings).beatAlignCf) {
         skipSec = _snapIntroSec(skipSec, gridOf(nextTrk.path), elDur, introDragged)
-        skipSec = barAlignedStart(cur(), skipSec, gridOf(curPath), gridOf(nextTrk.path), syncLead, maxTempoDiff())
+        if (!freeCut) skipSec = barAlignedStart(cur(), skipSec, gridOf(curPath), gridOf(nextTrk.path), syncLead, maxTempoDiff())
       }
 
       if (skipSec > 0.05) {
@@ -1226,121 +1341,137 @@
 
     const remaining = durMs - pos
     const rateC = cur()?.playbackRate || 1
+    const isCut = CUT_TYPES.includes(dj)
     let cfMs = Math.min(cfEff * 1000, remaining)
     if (dj === 'doubledrop') cfMs = Math.min(remaining, plan.dd.len * barC * 1000 / rateC)
-    else if (dj === 'echo' || dj === 'roll') cfMs = Math.min(remaining, (DJ_LEAD + DJ_TAIL[dj]) * barC * 1000 / rateC)
-    // Geplante Ereignisse auf der Zeitachse des laufenden Titels: werden erst
-    // kurz vorher auf die Audio-Uhr gelegt (das Tempo gleitet waehrend des
-    // Uebergangs, eine Zeit von jetzt aus waere am Drop schon daneben)
+    else if (isCut) cfMs = Math.min(remaining, (LEAD_BARS + TAIL_BARS[dj]) * barC * 1000 / rateC)
+    else if (dj === 'eqmix') cfMs = Math.min(remaining, EQMIX_BARS * barC * 1000 / rateC)
+    // Grosser Tempo-Unterschied und kein Schnitt moeglich (DJ-Modus aus …): nur kurz ueberblenden
+    else if (dj === 'blend' && plan?.bigTempo && barC > 0) cfMs = Math.min(cfMs, 4 * barC * 1000 / rateC)
+    // Harte Momente auf der Zeitachse des laufenden Titels: werden erst kurz
+    // vorher auf die Audio-Uhr gelegt (das Tempo gleitet waehrend des Uebergangs)
     const djEvents = []
     let djEnd = Infinity, djCut = false
+    const oldEl = cur(), newEl = inactive
+    const ctStart = oldEl ? posOf(oldEl) : pos / 1000
+    const beat = barC / 4
+    const v0 = volume / 100
+    if (oldEl) { stopRamp(oldEl); oldEl.volume = v0 }
+    stopRamp(newEl)
     if (dj === 'doubledrop') {
-      // Neuer Titel ohne Bass bis zum Drop, dort hart tauschen
-      const eo = eqOf(cur()), en = eqOf(inactive), now = audioCtx?.currentTime ?? 0
-      if (eo && en) {
-        eo.gain.cancelScheduledValues(now); en.gain.cancelScheduledValues(now)
-        eo.gain.setValueAtTime(0, now); en.gain.setValueAtTime(BASS_KILL_DB, now)
-        bassSwapOn = true
-        djEvents.push({ at: plan.dd.drop1, fn: (tA) => {
-          eo.gain.setValueAtTime(0, tA); eo.gain.linearRampToValueAtTime(BASS_KILL_DB, tA + 0.03)
-          en.gain.setValueAtTime(BASS_KILL_DB, tA); en.gain.linearRampToValueAtTime(0, tA + 0.03)
+      // Neuer Titel ohne Bass bis zum Drop; dort Bass tauschen, Filter auf, Fader voll
+      const eo = eqOf(oldEl), en = eqOf(newEl), fx = fxOf(newEl)
+      _setNow(eo?.gain, 0); _setNow(en?.gain, KILL_DB)
+      if (fx) { fx.type = 'highpass'; _setNow(fx.frequency, 400) }
+      bassSwapOn = true
+      djEvents.push({ at: plan.dd.drop1, fn: (tA) => {
+        hit(eo?.gain, KILL_DB, tA, 0.02); hit(en?.gain, 0, tA, 0.02)
+        if (fx) hit(fx.frequency, 20, tA, 0.01)
+        hit(faderOf(newEl)?.gain, 1, tA, 0.02); hit(hiOf(newEl)?.gain, 0, tA, 0.02); hit(midOf(newEl)?.gain, 0, tA, 0.02)
+        hit(faderOf(oldEl)?.gain, 0.9, tA, 0.03); hit(midOf(oldEl)?.gain, 0, tA, 0.03)
+      } })
+      djEnd = plan.dd.drop1 + plan.dd.post * barC
+    } else if (isCut) {
+      // Bis zur Eins nur der alte, ab der Eins nur der neue (Kanal-Fader)
+      _resetMatch()
+      const B = djB
+      if (dj === 'echo' || dj === 'roll') {
+        djEvents.push({ at: B - barC, fn: (tA, rate) => {
+          echoDelay.delayTime.setValueAtTime(Math.min(3.9, beat / rate), tA)
+          echoFb.gain.setValueAtTime(dj === 'echo' ? 0.62 : 0.45, tA)
         } })
       }
-      djEnd = plan.dd.drop1 + plan.dd.post * barC
-    } else if (dj === 'echo' || dj === 'roll') {
-      resetAllBass()
-      const mi = matchOf(inactive), mo = matchOf(cur()), now = audioCtx?.currentTime ?? 0
-      if (mi) { mi.gain.cancelScheduledValues(now); mi.gain.setValueAtTime(0, now) }
-      const beat = barC / 4
-      const oldEl = cur()
-      djEvents.push({ at: djB - (dj === 'roll' ? barC : beat), fn: (tA, rate) => {
-        const beatR = beat / rate, tB = tA + (dj === 'roll' ? 4 : 1) * beatR
-        if (dj === 'echo') {
-          const sd = sendOf(oldEl)
-          echoDelay.delayTime.setValueAtTime(Math.min(3.9, beatR), tA)
-          echoFb.gain.setValueAtTime(0.5, tA)
-          if (sd) { sd.gain.setValueAtTime(1, tA); sd.gain.setValueAtTime(0, tB) }
-        } else {
-          const sr = audioCtx.sampleRate, fr = (x) => Math.round(x * sr)
-          rollOf(oldEl)?.port.postMessage({ start: fr(tA), end: fr(tB),
+      if (dj === 'roll') {
+        djEvents.push({ at: B - ROLL_BARS * barC, fn: (tA, rate) => {
+          const sr = audioCtx.sampleRate, fr = (x) => Math.round(x * sr), beatR = beat / rate
+          rollOf(oldEl)?.port.postMessage({ start: fr(tA), end: fr(tA + ROLL_BARS * 4 * beatR),
             steps: rollSteps(4).map(st => ({ at: fr(tA + st.at * beatR), len: Math.max(64, fr(st.len * beatR)) })) })
-        }
-        // Auf der Grenze: alter Titel aus, neuer Titel voll da
-        if (mo) mo.gain.setTargetAtTime(0, tB, 0.004)
-        if (mi) mi.gain.setTargetAtTime(1, tB - 0.002, 0.003)
+        } })
+      }
+      if (dj === 'backspin') {
+        const sb = spinBeats(gCur?.bpm * (gCur?.barBeats === 2 ? 2 : 1) || 0)
+        djEvents.push({ at: B - sb * beat, fn: (tA, rate) => {
+          const sr = audioCtx.sampleRate
+          rollOf(oldEl)?.port.postMessage({ kind: 'spin', start: Math.round(tA * sr), end: Math.round((tA + sb * beat / rate) * sr), top: SPIN_TOP })
+        } })
+      }
+      djEvents.push({ at: B, fn: (tA) => {
+        hit(faderOf(oldEl)?.gain, 0, tA, CUT_FADE_OUT)
+        hit(faderOf(newEl)?.gain, 1, tA - 0.002, CUT_FADE_IN[dj] ?? 0.04)
         djCut = true
       } })
-      djEnd = djB + DJ_TAIL[dj] * barC
+      djEnd = B + TAIL_BARS[dj] * barC
+    } else if (dj === 'eqmix') {
+      // Bass-Tausch genau auf Takt 17 (nach 16 Takten), auf der Eins
+      const eo = eqOf(oldEl), en = eqOf(newEl)
+      _setNow(eo?.gain, 0); _setNow(en?.gain, KILL_DB)
+      bassSwapOn = true
+      djEvents.push({ at: ctStart + 16 * barC, fn: (tA) => { hit(eo?.gain, KILL_DB, tA, 0.02); hit(en?.gain, 0, tA, 0.02) } })
     } else {
-      planBassSwap(cur(), inactive, gridOf(curPath), gridOf(nextTrk.path), cfMs / 1000)
-    }
-    if (dj === 'filter') {
-      const fi = fxOf(inactive), now = audioCtx?.currentTime ?? 0
-      if (fi) { fi.type = 'lowpass'; fi.frequency.cancelScheduledValues(now); fi.frequency.setValueAtTime(200, now) }
+      planBassSwap(oldEl, newEl, gridOf(curPath), gridOf(nextTrk.path), cfMs / 1000)
     }
     let elapsed = 0
-    const cfCurveSnap = get(appSettings).cfCurve ?? 'cosine'
 
-    stopRamp(cur()); stopRamp(inactive)
     const _nDur = nextTrk.duration_sec || 0
-    const matchDb = dj === 'doubledrop' || dj === 'echo' || dj === 'roll' ? 0
+    const matchDb = dj === 'doubledrop' || isCut ? 0
       : get(appSettings).cfLoudMatch === false || durMs <= 0 || !(_nDur > 0) ? 0
       : _blendMatchDb(get(waveform), get(waveformNext), pos / durMs, cfMs / durMs, introFrac, cfMs / 1000 / _nDur)
     if (thirdTrack?.path && get(waveformThird).path !== thirdTrack.path)
       requestWaveform('waveform_third', thirdTrack.path)
     cfStartAt = performance.now(); cfLenMs = cfMs; blendNextPos = introFrac
     requestAnimationFrame(_blendLoop)
+    const TICK = 25
     cfTimer = setInterval(() => {
-      elapsed += 50
+      elapsed += TICK
       const t      = Math.min(1, elapsed / cfMs)
       const active = cur()
       const inact  = alt()
-      const v      = volume / 100
-      let [fv, tv] = _fade(t, v, v, cfCurveSnap)
-      // Faellige Ereignisse (Drop, Echo, Roll) auf die Audio-Uhr legen
+      // Faellige harte Momente (Drop, Schnitt, Echo, Roll, Spin) auf die Audio-Uhr legen
       if (active && audioCtx) for (const e of djEvents) {
         if (e.done) continue
         const rate = active.playbackRate || 1
-        const dt = (e.at - active.currentTime) / rate
+        const dt = (e.at - posOf(active)) / rate
         if (dt < 0.35) { e.done = true; e.fn(audioCtx.currentTime + Math.max(0.005, dt), rate) }
       }
-      let done = t >= 1
-      if (dj === 'doubledrop' && active) {
-        const dd = plan.dd, ct = active.currentTime
-        if (ct < dd.drop1) {
-          // neuer Titel kommt leise dazu (Anlauf), alter bleibt voll
-          const u = Math.max(0, (ct - dd.trig) / (dd.drop1 - dd.trig))
-          fv = v; tv = v * 0.85 * Math.sqrt(Math.min(1, u / 0.5))
-        } else {
-          // Drop: beide zusammen, je ~2 dB leiser (zwei volle Titel addieren
-          // sich), nur der Bass des neuen — dann blendet der alte aus und der
-          // neue kommt wieder auf voll
-          const w = Math.min(1, (ct - dd.drop1) / (dd.post * barC))
-          const DD = 0.79                               // ≈ −2 dB
-          fv = w < 0.5 ? v * DD : v * DD * Math.max(0, 1 - (w - 0.5) / 0.5)
-          tv = v * (w < 0.5 ? DD : DD + (1 - DD) * (w - 0.5) / 0.5)
+      // Reglerstellungen der Art (Fader, EQ, Filter, Effekt-Wege)
+      const ct = active ? posOf(active) : 0
+      const rel = dj === 'doubledrop' ? (ct - plan.dd.drop1) / barC : isCut ? (ct - djB) / barC : 0
+      if (audioCtx && active && inact) {
+        const m = mixState(dj, { t, rel, pre: plan?.dd?.pre, post: plan?.dd?.post })
+        aim(faderOf(active)?.gain, m.fo); aim(faderOf(inact)?.gain, m.fn)
+        aim(midOf(active)?.gain, m.midO ?? 0); aim(hiOf(active)?.gain, m.hiO ?? 0)
+        aim(midOf(inact)?.gain, m.midN ?? 0); aim(hiOf(inact)?.gain, m.hiN ?? 0)
+        for (const [el, hp, lp] of [[active, m.hpO, m.lpO], [inact, m.hpN, m.lpN]]) {
+          const f = fxOf(el)
+          if (!f || (_locks.get(f.frequency) ?? 0) > audioCtx.currentTime) continue
+          if (hp != null) { if (f.type !== 'highpass') { f.type = 'highpass'; _setNow(f.frequency, Math.max(20, hp)) } aim(f.frequency, hp, 0.04) }
+          else if (lp != null) { if (f.type !== 'lowpass') { f.type = 'lowpass'; _setNow(f.frequency, Math.min(20000, lp)) } aim(f.frequency, lp, 0.04) }
+          else if (f.type !== 'lowpass' || f.frequency.value < 21000) { f.type = 'lowpass'; aim(f.frequency, 22000, 0.04) }
         }
-        done = ct >= djEnd || elapsed >= cfMs * 1.15
-      } else if (dj === 'echo' || dj === 'roll') {
-        fv = v; tv = v                                   // geschaltet wird ueber den Angleich-Knoten
-        done = (active && active.currentTime >= djEnd) || elapsed >= cfMs * 1.2
-      } else if (dj === 'filter' && audioCtx) {
-        const now = audioCtx.currentTime, fo = fxOf(active), fi = fxOf(inact)
-        if (fo) { fo.type = 'highpass'; fo.frequency.setTargetAtTime(20 * Math.pow(1200 / 20, Math.max(0, (t - 0.2) / 0.8)), now, 0.05) }
-        if (fi) { fi.type = 'lowpass'; fi.frequency.setTargetAtTime(200 * Math.pow(20000 / 200, Math.min(1, t / 0.7)), now, 0.05) }
+        aim(sendOf(active)?.gain, m.echo ?? 0, 0.02)
+        aim(hallOf(active)?.gain, m.hall ?? 0, 0.03)
+        if (m.echoHp != null) aim(echoHp?.frequency, m.echoHp, 0.1)
       }
-      if (active) active.volume = fv
-      if (inact)  inact.volume  = tv
+      let done = t >= 1
+      if (dj === 'doubledrop') done = ct >= djEnd || elapsed >= cfMs * 1.15
+      else if (isCut) done = (active && ct >= djEnd) || elapsed >= cfMs * 1.2
       // Angleichen: erste 40 % halten, dann auf 0 dB zurueck
       if (matchDb && inact) _setMatch(inact, t < 0.4 ? matchDb : matchDb * (1 - (t - 0.4) / 0.6))
       // Springen nur, solange der neue Titel noch leise ist
-      cfSync?.tick(dj === 'doubledrop' ? t < 0.08 : (dj === 'echo' || dj === 'roll') ? !djCut : t < 0.3, t)
+      // Double Drop: bis kurz vor dem Drop ist der neue leise und ohne Bass
+      cfSync?.tick(dj === 'doubledrop' ? rel < -0.5 : isCut ? !djCut : dj === 'eqmix' ? t < 0.25 : t < 0.3, t, isCut && !djCut)
+      // Schnitt ohne Tempo-Angleich (grosser Unterschied): der neue laeuft stumm
+      // mit und wird so gezogen, dass er auf der Eins genau an seinem Einstieg steht
+      if (isCut && !cfSync && active && inact && !inact.paused && plan?.I != null) {
+        const left = (djB - ct) / (active.playbackRate || 1)
+        inact.playbackRate = !djCut && left > 0.4 ? Math.max(0.5, Math.min(1.6, (plan.I - posOf(inact)) / left)) : 1
+      }
       if (inact && inact.duration > 0) blendNextPos = inact.currentTime / inact.duration
       if (done) {
         clearInterval(cfTimer); cfTimer = null
         _finishCrossfade(nextIdx, nextUrl, nextTrk.path)
       }
-    }, 50)
+    }, TICK)
   }
 
   function _silenceAndStop(el) {
@@ -1358,7 +1489,7 @@
       if (gn) { gn.gain.cancelScheduledValues(audioCtx?.currentTime ?? 0); gn.gain.value = 1 }
       const eq = eqOf(el)
       if (eq) { eq.gain.cancelScheduledValues(audioCtx?.currentTime ?? 0); eq.gain.value = 0 }
-      _resetFx(el)
+      _resetDeck(el)
     }, 80)
   }
 
@@ -1373,8 +1504,8 @@
     if (newEl) { endSync(newEl); resetBass(newEl, 0.08) }
     bassSwapOn = false
     _resetMatch()
-    if (newEl) _resetFx(newEl)
-    if (oldEl) { const sd = sendOf(oldEl); if (sd && audioCtx) { sd.gain.cancelScheduledValues(audioCtx.currentTime); sd.gain.setValueAtTime(0, audioCtx.currentTime) } }
+    if (newEl) _resetDeck(newEl)
+    if (oldEl) { _setNow(sendOf(oldEl)?.gain, 0); _setNow(hallOf(oldEl)?.gain, 0) }
     blendP = 0; blendNextPos = 0
     _cfDoneAt = performance.now()
     outroOverride = nextOutroOverride?.path === nextPath ? nextOutroOverride : null
@@ -1567,9 +1698,9 @@
       get match() { return [matchA?.gain.value, matchB?.gain.value] },
       get djPlan() { return djPlan }, get drops() { return [curDrops, nextDrops] }, get rollerOk() { return rollerOk },
       pickDj: (t) => pickDj(t), get fx() { return [fxA?.type, fxA?.frequency.value, fxB?.type, fxB?.frequency.value] }, lufsOf: (t) => lufsOf(t), grid: (p) => gridOf(p),
-      get audioTime() { return audioCtx?.currentTime ?? 0 }, get sinkId() { return audioCtx?.sinkId ?? null },
+      get audioTime() { return audioCtx?.currentTime ?? 0 }, get audible() { return audible?.state() ?? [] }, posOf, get sinkId() { return audioCtx?.sinkId ?? null },
       // Fuer Messungen in den Oberflaechen-Tests: das Signal je Deck hinter dem Regler
-      get taps() { return audioCtx ? { ctx: audioCtx, A: gainA, B: gainB } : null },
+      get taps() { return audioCtx ? { ctx: audioCtx, A: faderA, B: faderB, master: masterOut } : null },
       get syncLead() { return syncLead },
     }
   }
@@ -1588,8 +1719,8 @@
 {#if djMenu && djPlan}
   <div class="dj-menu" role="menu" style="left:{djMenu.x}px;top:{djMenu.y}px" onclick={(e) => e.stopPropagation()}>
     <button role="menuitem" class:sel={djPlan.auto} onclick={() => pickDj('auto')}>Automatisch</button>
-    {#each ['blend', 'filter', 'echo', 'roll', 'doubledrop'] as t}
-      {@const off = t !== 'blend' && (!djPlan.eligible || (t === 'doubledrop' && !djPlan.ddOk) || (t === 'roll' && !rollerOk))}
+    {#each ['blend', 'eqmix', 'filter', 'echo', 'hall', 'roll', 'backspin', 'doubledrop'] as t}
+      {@const off = t !== 'blend' && ((!djPlan.eligible && !(CUT_TYPES.includes(t) && djPlan.bigTempo && djPlan.cutOk)) || (t === 'doubledrop' && !djPlan.ddOk) || (NEEDS_ROLLER.includes(t) && !rollerOk))}
       <button role="menuitem" class:sel={!djPlan.auto && djPlan.type === t} disabled={off}
               title={off ? (t === 'doubledrop' && djPlan.eligible ? 'Keine passenden Drops erkannt' : 'Tempo oder Takt passen nicht') : ''}
               onclick={() => pickDj(t)}>{DJ_LABEL[t]}</button>

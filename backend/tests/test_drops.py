@@ -60,6 +60,14 @@ class FindDropsTest(unittest.TestCase):
         self.assertEqual(src, "mik")
         self.assertAlmostEqual(drops[0], DROP1, delta=0.01)      # auf den Takt, nicht 45 ms daneben
 
+    def test_cue_vier_takte_vor_dem_einsatz(self):
+        """MIK-Cue auf der Phrase, der Drop setzt aber erst 4 Takte spaeter voll ein
+        (leiser Vorlauf): der Drop liegt auf dem Einsatz, nicht auf dem Cue."""
+        x = np.concatenate([_track([(24, "intro")]), 1.6 * _track([(4, "intro")]), _track([(16, "drop"), (20, "intro")])])
+        drops, _ = beatgrid._find_drops(x, SR, BPM, 0.0, 0.0, cues=[0.0, 24 * BAR + 0.04])
+        self.assertEqual(len(drops), 1)
+        self.assertAlmostEqual(drops[0], 28 * BAR, delta=0.01)
+
     def test_kein_drop_ohne_aufbau(self):
         drops, src = beatgrid._find_drops(_track([(64, "intro")]), SR, BPM, 0.0, 0.0)
         self.assertEqual((drops, src), ([], "none"))

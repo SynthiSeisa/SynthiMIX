@@ -91,6 +91,25 @@ class BeatgridTest(BackendTest):
         self.check(lt, 126.0, 0.31)
         self.assertAlmostEqual(sent[-1]["bpm_f"], lt["bpm_f"])
 
+    def test_referenz_fuer_hoerbare_stelle(self):
+        """Huellkurven je 1 ms ab einer Stelle: die Schlaege liegen genau dort,
+        wo sie im Titel sind (von Anfang an dekodiert, nicht gesprungen)."""
+        import base64
+        import numpy as np
+        p = self.make_kicks("ref.mp3", 120.0, 0.25, seconds=30)
+        r = main.beatgrid._onset_ref_sync(p, 10.0, 3.0)
+        self.assertIsNotNone(r)
+        self.assertEqual(r["start"], 10.0)
+        lo = np.frombuffer(base64.b64decode(r["lo"]), dtype=np.float32)
+        self.assertAlmostEqual(lo.size, 3000, delta=5)
+        # Anstieg je Schlag: erwartet bei 10.25, 10.75, … (alle 500 ms)
+        rise = np.diff(lo, prepend=lo[0])
+        for k in range(5):
+            at = 250 + 500 * k
+            got = at - 30 + int(np.argmax(rise[at - 30:at + 30]))
+            self.assertLessEqual(abs(got - at), 4, f"Schlag {k}: {got} ms statt {at} ms")
+        self.assertIsNone(main.beatgrid._onset_ref_sync(str(self.tmp / "fehlt.mp3"), 0, 3))
+
     def test_zu_kurz(self):
         p = self.make_kicks("kurz.mp3", 128.0, 0.0, seconds=5)
         self.assertIsNone(main._beatgrid_sync(p, 128))

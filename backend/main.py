@@ -522,6 +522,12 @@ async def handle_message(ws: WebSocket, msg: dict):
         if path:
             core.spawn(beatgrid._send_beatgrid(ws, path))
 
+    elif t == "get_onset_ref":
+        # Referenz fuer die Messung der hoerbaren Stelle (Player, lib/audiblepos.js)
+        path = msg.get("path", "")
+        if path:
+            core.spawn(beatgrid._send_onset_ref(ws, msg.get("id"), path, float(msg.get("start") or 0), float(msg.get("dur") or 5)))
+
 
     elif t == "scan_library":
         folder = msg.get("folder", "")

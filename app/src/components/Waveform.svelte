@@ -94,8 +94,9 @@
     const segs = []
     const inMix  = introEnd > 0 && introEnd > introStart ? [introStart, introEnd] : null
     const outMix = outroStart >= 0 && outroEnd > outroStart ? [outroStart, outroEnd] : null
-    // Intro und Outro schliessen ohne Luecke an die Mix-Zonen an (die liegt darueber)
-    if (introMark > 0.005)
+    // Intro und Outro schliessen ohne Luecke an die Mix-Zonen an (die liegt darueber).
+    // Alles vor dem Einstieg gilt als Intro, auch wenn der Anfang nicht leise ist
+    if (introMark > 0.005 || (inMix && inMix[0] > 0.005))
       segs.push({ r: [0, inMix ? Math.max(introMark, inMix[0]) : introMark], col: theme.intro, name: 'INTRO', align: 'left' })
     if (outroMark > 0 && outroMark < 0.995)
       segs.push({ r: [outMix ? Math.min(outroMark, outMix[1]) : outroMark, 1], col: theme.outro, name: 'OUTRO', align: 'right' })
