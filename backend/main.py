@@ -36,6 +36,8 @@ async def lifespan(application: FastAPI):
         relocate.portable_start()
     except Exception as e:
         print(f"[tragbar] {e}", flush=True)
+    # Playlists liegen im Download-Ordner (Unterordner "playlists"); alte ziehen um
+    library.sync_playlists_dir()
     core.spawn(library._watcher_loop())
     core.spawn(library._auto_scan_loop())
     core.spawn(tools._ytdlp_autoupdate_loop())
@@ -73,7 +75,10 @@ def _download_tree_sync(dl_dir: Path) -> dict:
                 items = list(it)
         except OSError:
             return [], []
-        dirs = sorted((e for e in items if e.is_dir() and not e.name.startswith('.')), key=lambda e: e.name.lower())
+        # der Unterordner mit den Playlist-Dateien ist kein Musikordner
+        pl_dir = os.path.normcase(str(core.PLAYLISTS_DIR))
+        dirs = sorted((e for e in items if e.is_dir() and not e.name.startswith('.')
+                       and os.path.normcase(e.path) != pl_dir), key=lambda e: e.name.lower())
         files = []
         for e in items:
             if e.is_file() and os.path.splitext(e.name)[1].lower() in _DL_AUDIO_EXT and not core.is_temp_audio(e.name):
@@ -1368,6 +1373,9 @@ async def handle_message(ws: WebSocket, msg: dict):
         if folder and os.path.isdir(folder):
             _state["download_dir"] = folder
             store.save_settings()
+            # die Playlists wohnen im Download-Ordner und ziehen mit
+            library.sync_playlists_dir()
+            await core.broadcast({"type": "playlists", "items": library._get_playlists()})
 
     elif t == "set_playlist_folder":
         _state["playlist_folder_enabled"] = bool(msg.get("enabled", True))

@@ -2,6 +2,7 @@
 import asyncio
 import os
 import re
+import shutil
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -30,6 +31,43 @@ async def _fileid_scan_task():
         print(f"[library] Datei-Kennung fuer {n} Titel ergaenzt", flush=True)
 
 # ── playlist helpers ─────────────────────────────────────────────────────────
+PLAYLISTS_SUBDIR = "playlists"
+
+
+def sync_playlists_dir() -> int:
+    """Eigene Playlists (.m3u) liegen im Download-Ordner unter "playlists" —
+    bei der Musik, nicht im Datenordner des Programms. Was am bisherigen Ort
+    liegt (Datenordner oder der vorige Download-Ordner), zieht mit um.
+    Ist der Download-Ordner nicht erreichbar (Platte ab), bleibt es beim alten
+    Ort; beim naechsten Mal wird nachgezogen. Liefert die Zahl der umgezogenen."""
+    dl = Path(_state.get("download_dir") or (core.BASE_DIR / "Downloads"))
+    new, old = dl / PLAYLISTS_SUBDIR, Path(core.PLAYLISTS_DIR)
+    try:
+        if old.resolve() == new.resolve():
+            return 0
+        new.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"[playlists] {new}: {e}", flush=True)
+        return 0
+    moved = 0
+    if old.exists():
+        for f in sorted(old.glob("*.m3u")):
+            target = new / f.name
+            n = 2
+            while target.exists():                   # gleicher Name schon da: nichts ueberschreiben
+                target = new / f"{f.stem} ({n}).m3u"
+                n += 1
+            try:
+                shutil.move(str(f), str(target))
+                moved += 1
+            except OSError as e:
+                print(f"[playlists] {f.name}: {e}", flush=True)
+    core.PLAYLISTS_DIR = new
+    if moved:
+        print(f"[playlists] {moved} Playlist(s) nach {new} umgezogen", flush=True)
+    return moved
+
+
 def _get_playlists() -> list[dict]:
     if not core.PLAYLISTS_DIR.exists():
         return []

@@ -80,3 +80,43 @@ class PlaylistRenameTest(BackendTest):
         self.assertTrue(main.library._rename_followed(f["url"], "")["ok"])
         self.assertNotIn("name", f)
         self.assertTrue((main.PLAYLISTS_DIR / "Liquid Abend.m3u").exists())
+
+
+class PlaylistOrtTest(BackendTest):
+    """Playlists liegen im Download-Ordner unter "playlists" und ziehen mit um."""
+
+    def test_alte_playlists_ziehen_in_den_download_ordner(self):
+        from synthimix import core, library
+        alt = self.tmp / "playlists"
+        alt.mkdir(parents=True, exist_ok=True)
+        (alt / "Party.m3u").write_text("#EXTM3U\n", encoding="utf-8")
+        (alt / "Chill.m3u").write_text("#EXTM3U\n", encoding="utf-8")
+        dl = self.tmp / "Downloads"
+        dl.mkdir(exist_ok=True)
+        self.assertEqual(library.sync_playlists_dir(), 2)
+        self.assertEqual(core.PLAYLISTS_DIR, dl / "playlists")
+        self.assertEqual({p["name"] for p in library._get_playlists()}, {"Party", "Chill"})
+        self.assertFalse((alt / "Party.m3u").exists())
+        self.assertEqual(library.sync_playlists_dir(), 0)            # schon dort
+
+    def test_ziehen_mit_wenn_der_download_ordner_wechselt_ohne_zu_ueberschreiben(self):
+        from synthimix import core, library
+        (self.tmp / "Downloads").mkdir(exist_ok=True)
+        library.sync_playlists_dir()
+        (core.PLAYLISTS_DIR / "Set.m3u").write_text("alt", encoding="utf-8")
+        neu = self.tmp / "Musik"
+        (neu / "playlists").mkdir(parents=True)
+        (neu / "playlists" / "Set.m3u").write_text("schon da", encoding="utf-8")
+        main._state["download_dir"] = str(neu)
+        self.assertEqual(library.sync_playlists_dir(), 1)
+        self.assertEqual((neu / "playlists" / "Set.m3u").read_text("utf-8"), "schon da")
+        self.assertEqual((neu / "playlists" / "Set (2).m3u").read_text("utf-8"), "alt")
+
+    def test_download_ordner_nicht_erreichbar_bleibt_beim_alten_ort(self):
+        from synthimix import core, library
+        vorher = core.PLAYLISTS_DIR
+        blocker = self.tmp / "datei"
+        blocker.write_text("x", encoding="utf-8")
+        main._state["download_dir"] = str(blocker)                   # kein Ordner: anlegen scheitert
+        self.assertEqual(library.sync_playlists_dir(), 0)
+        self.assertEqual(core.PLAYLISTS_DIR, vorher)
