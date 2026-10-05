@@ -17,11 +17,15 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 from synthimix.core import _state, clients
-from synthimix import automix, beatgrid, channels, core, diagnose, download, keys, library, media, quality, relocate, remote, search, store, tags, tools
+from synthimix import automix, backup, beatgrid, channels, core, diagnose, download, keys, library, media, net, quality, relocate, remote, search, store, tags, tools
 
 # ── app ──────────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(application: FastAPI):
+    # Gesicherte Abrufe: eigene Zertifikatsliste + Nachladen ueber Windows (synthimix/net.py)
+    net.install()
+    # Liegt eine Sicherung zum Wiederherstellen bereit? Vor dem Laden einspielen
+    backup.restore_pending()
     store.load_queue()
     store.load_library()
     store.load_settings()
@@ -38,6 +42,7 @@ async def lifespan(application: FastAPI):
         print(f"[tragbar] {e}", flush=True)
     # Playlists liegen im Download-Ordner (Unterordner "playlists"); alte ziehen um
     library.sync_playlists_dir()
+    backup.finish_playlists()
     core.spawn(library._watcher_loop())
     core.spawn(library._auto_scan_loop())
     core.spawn(tools._ytdlp_autoupdate_loop())
@@ -137,6 +142,10 @@ async def handle_message(ws: WebSocket, msg: dict):
     t = msg.get("type")
 
     if t == "get_state":
+        # Nach einer Wiederherstellung: die Einstellungen der Oberflaeche zurueckgeben
+        ui = backup.ui_pending()
+        if ui is not None:
+            await ws.send_text(json.dumps({"type": "ui_restore", "data": ui}))
         # Laufwerksbuchstabe geaendert? Nebenher pruefen und ggf. vorschlagen
         core.spawn(_send_relocate(ws, manual=False))
         await ws.send_text(json.dumps({"type": "queue", "items": _state["queue"],
@@ -534,6 +543,23 @@ async def handle_message(ws: WebSocket, msg: dict):
         path = msg.get("path", "")
         if path:
             core.spawn(beatgrid._send_beatgrid(ws, path))
+
+    elif t == "ui_restore_done":
+        backup.ui_done()
+
+    elif t == "backup_create":
+        # Alles in eine Datei (synthimix/backup.py); ui: Einstellungen der Oberflaeche
+        res = await asyncio.get_running_loop().run_in_executor(None, backup.create, msg.get("dir", ""), msg.get("ui"))
+        await ws.send_text(json.dumps({"type": "backup_done", **res}))
+
+    elif t == "backup_inspect":
+        res = await asyncio.get_running_loop().run_in_executor(None, backup.inspect, msg.get("path", ""))
+        await ws.send_text(json.dumps({"type": "backup_info", **res}))
+
+    elif t == "backup_restore":
+        # Legt die Sicherung bereit — eingespielt wird beim Neustart, den das Fenster ausloest
+        res = await asyncio.get_running_loop().run_in_executor(None, backup.stage, msg.get("path", ""))
+        await ws.send_text(json.dumps({"type": "backup_staged", **res}))
 
     elif t == "get_diagnose":
         # Prueft ffmpeg, Analyse, Ordner, Waveform — ein paar Sekunden, nicht in der Reihe warten

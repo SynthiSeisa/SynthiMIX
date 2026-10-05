@@ -6,7 +6,7 @@
   import { settings, settingsOpen, settingsTab, appSettings, send, toolsInfo, updateProgress,
            loudnormOnDl, loudnormTarget, loudnormTp, autoMixEnabled, playMode,
            playlistFolderEnabled, dlFilenameFormat, downloadDir, remoteStatus,
-           autoScanIntervalMin, scanRecursive, remoteAutostart, dataPlace, diagnoseResult,
+           autoScanIntervalMin, scanRecursive, remoteAutostart, dataPlace, diagnoseResult, backupState, dumpUi,
            spotifyClientId, spotifyClientSecret,
            lastfmApiKey, acoustidApiKey,
            fpcalcInstalling, fpcalcInstallError,
@@ -43,6 +43,35 @@
 
   // ── Dienste: je Dienst eine Karte, aufklappbar ────────────────────────────
   let svcOpen = $state(null)
+  // Tragbarer Betrieb: liegen auf diesem PC eigene Daten, die man auf die Platte holen kann?
+  let portInfo = $state(null)
+  let takeAsk = $state(false)
+  $effect(() => {
+    if (tab !== 'system') return
+    window.electron?.portableInfo?.()?.then(i => { portInfo = i }).catch(() => {})
+  })
+  function takeOverPc() { takeAsk = false; window.electron?.portableTakeover?.() }
+
+  // Sicherung: alles in eine Datei / aus einer Datei zurueck
+  const canBackup = typeof window !== 'undefined' && !!window.electron?.pickFolder
+  async function makeBackup() {
+    const dir = await window.electron?.pickFolder?.()
+    if (!dir) return
+    backupState.set({ step: 'busy' })
+    send({ type: 'backup_create', dir, ui: dumpUi() })
+  }
+  async function pickRestore() {
+    const p = await window.electron?.pickFile?.({ title: 'Sicherung wählen', filters: [{ name: 'SynthiMIX-Sicherung', extensions: ['zip'] }] })
+    if (!p) return
+    backupState.set({ step: 'busy' })
+    send({ type: 'backup_inspect', path: p })
+  }
+  function doRestore() {
+    const p = $backupState?.info?.path
+    if (p) { backupState.set({ step: 'busy' }); send({ type: 'backup_restore', path: p }) }
+  }
+  const fmtBackupDate = (iso) => { const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString('de-DE', { dateStyle: 'medium', timeStyle: 'short' }) }
+
   // Diagnose: prueft im Backend ffmpeg, Analyse, Ordner und eine Waveform
   let diagCopied = $state(false)
   function runDiagnose() { diagnoseResult.set('busy'); send({ type: 'get_diagnose' }) }
@@ -1228,9 +1257,55 @@
               <div class="row"><span class="lbl">{$dataPlace.dir}</span></div>
               {#if $dataPlace.on}
                 <div class="hint keep">Tragbarer Betrieb: Bibliothek, Einstellungen und Playlists liegen neben dem Programm auf dieser Festplatte und reisen mit. Bekommt die Platte an einem anderen PC einen anderen Laufwerksbuchstaben, stellt SynthiMIX die Pfade beim Start von selbst um.</div>
+                {#if portInfo?.pcHasData}
+                  <div class="row">
+                    <span class="lbl">Auf diesem PC liegen eigene Daten{portInfo.pcTracks != null ? ` (${portInfo.pcTracks} Titel` + (portInfo.driveTracks != null ? `, auf der Festplatte ${portInfo.driveTracks}` : '') + ')' : ''}</span>
+                    {#if !takeAsk}
+                      <button class="btn btn-sm" onclick={() => takeAsk = true}><i class="ti ti-download"></i> Daten dieses PCs übernehmen</button>
+                    {:else}
+                      <span class="row-acts">
+                        <button class="btn btn-sm btn-primary" onclick={takeOverPc}>Ja, übernehmen und neu starten</button>
+                        <button class="btn btn-sm" onclick={() => takeAsk = false}>Abbrechen</button>
+                      </span>
+                    {/if}
+                  </div>
+                  <div class="hint">Holt Bibliothek, Einstellungen und Warteschlange dieses PCs auf die Festplatte — gedacht für den Fall, dass SynthiMIX zuerst an einem anderen PC gestartet wurde. Was jetzt auf der Festplatte liegt, bleibt im Datenordner unter „Sicherung …“ erhalten. SynthiMIX startet dafür neu.</div>
+                {/if}
               {:else}
                 <div class="hint keep">Bibliothek, Einstellungen und Playlists liegen auf diesem PC. Ist SynthiMIX auf einer anderen Festplatte als dem Systemlaufwerk installiert, speichert es alles dort neben dem Programm (Ordner „SynthiMIX-Daten“) — die Platte lässt sich dann an jedem PC anstecken.</div>
               {/if}
+            </div>
+          {/if}
+
+          {#if canBackup}
+            <div class="group">
+              <div class="group-title">Sicherung</div>
+              <div class="row">
+                <span class="lbl">Alles in eine Datei sichern</span>
+                <span class="row-acts">
+                  <button class="btn btn-sm" onclick={makeBackup} disabled={$backupState?.step === 'busy'}><i class="ti ti-download"></i> Sicherung erstellen …</button>
+                  <button class="btn btn-sm" onclick={pickRestore} disabled={$backupState?.step === 'busy'}><i class="ti ti-refresh"></i> Wiederherstellen …</button>
+                </span>
+              </div>
+              {#if $backupState?.step === 'busy'}
+                <div class="hint keep">Einen Moment …</div>
+              {:else if $backupState?.step === 'done'}
+                <div class="hint keep">Gesichert: {$backupState.tracks} Titel, {$backupState.playlists} Playlists → {$backupState.path}</div>
+              {:else if $backupState?.step === 'ask'}
+                <div class="hint keep">Sicherung vom {fmtBackupDate($backupState.info.created)}: {$backupState.info.tracks} Titel, {$backupState.info.playlists} Playlists. Wiederherstellen ersetzt Bibliothek, Einstellungen, Warteschlange und Verlauf; die jetzigen Daten bleiben im Datenordner unter „Sicherung …“. SynthiMIX startet dafür neu.</div>
+                <div class="row">
+                  <span class="lbl"></span>
+                  <span class="row-acts">
+                    <button class="btn btn-sm btn-primary" onclick={doRestore}>Ja, wiederherstellen und neu starten</button>
+                    <button class="btn btn-sm" onclick={() => backupState.set(null)}>Abbrechen</button>
+                  </span>
+                </div>
+              {:else if $backupState?.step === 'restarting'}
+                <div class="hint keep">SynthiMIX startet neu …</div>
+              {:else if $backupState?.step === 'error'}
+                <div class="hint keep">Nicht möglich: {$backupState.error}</div>
+              {/if}
+              <div class="hint">Enthält die Bibliothek mit allen Analysen, Warteschlange, Verlauf, Playlists, verfolgte Playlists, alle Einstellungen und die Schlüssel der Dienste — nicht die Musikdateien. Für eine Neuinstallation oder einen anderen PC. Die Datei enthält deine Schlüssel im Klartext: nicht weitergeben.</div>
             </div>
           {/if}
 
@@ -1589,7 +1664,8 @@
   .hint { font-size: var(--fs-sm); line-height: 1.5; color: var(--c-tx3); max-width: 60ch; }
   .diag { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
   .diag-row { display: grid; grid-template-columns: 18px 150px 1fr; gap: 8px; align-items: start; font-size: var(--fs-sm); color: var(--c-tx2); }
-  .diag-row b { font-weight: 600; color: var(--c-tx); }
+  .diag-row b { font-weight: 600; color: var(--c-tx1); }
+  .row-acts { display: inline-flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
   .diag-row span { overflow-wrap: anywhere; }
   .diag-row .ti { color: var(--c-ok, #46a758); margin-top: 2px; }
   .diag-row.bad .ti, .diag-row.bad b { color: var(--c-warn, #e5a000); }

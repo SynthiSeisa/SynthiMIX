@@ -46,6 +46,15 @@ export const autoScanIntervalMin   = writable(0)
 export const dataPlace             = writable({ on: false, dir: '' })
 // Ergebnis der Diagnose (Einstellungen → System): null, 'busy' oder { checks, report, ok }
 export const diagnoseResult        = writable(null)
+// Sicherung/Wiederherstellung (Einstellungen → System): null oder
+// { step: 'busy' | 'done' | 'ask' | 'restarting' | 'error', … }
+export const backupState           = writable(null)
+/** Einstellungen der Oberflaeche (localStorage) fuer die Sicherung */
+export function dumpUi() {
+  const out = {}
+  try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); out[k] = localStorage.getItem(k) } } catch {}
+  return out
+}
 export const favorites             = writable([])
 export const automixStatus = writable('')
 export const autoMixEnabled = writable(true)
@@ -311,6 +320,20 @@ function connect() {
       case 'waveform_next':   if (_wfWant.waveform_next === undefined || msg.path === _wfWant.waveform_next) waveformNext.set(msg.data ?? []); break
       case 'waveform_third':  if (_wfWant.waveform_third === undefined || msg.path === _wfWant.waveform_third) waveformThird.set({ path: msg.path ?? '', data: msg.data ?? [] }); break
       case 'harmonic_result': harmonicResult.set({ ...msg, at: Date.now() }); break
+      case 'backup_done':   backupState.set(msg.ok ? { step: 'done', path: msg.path, tracks: msg.tracks, playlists: msg.playlists } : { step: 'error', error: msg.error }); break
+      case 'backup_info':   backupState.set(msg.ok ? { step: 'ask', info: msg } : { step: 'error', error: msg.error }); break
+      case 'backup_staged':
+        if (msg.ok) { backupState.set({ step: 'restarting' }); window.electron?.relaunch?.() }
+        else backupState.set({ step: 'error', error: msg.error })
+        break
+      case 'ui_restore': {
+        // Nach dem Wiederherstellen einer Sicherung: Einstellungen der Oberflaeche
+        // zuruecksetzen und neu laden (einmal — das Backend loescht sie danach)
+        try { for (const [k, v] of Object.entries(msg.data ?? {})) if (typeof v === 'string') localStorage.setItem(k, v) } catch {}
+        send({ type: 'ui_restore_done' })
+        setTimeout(() => location.reload(), 150)
+        break
+      }
       case 'diagnose': diagnoseResult.set({ checks: msg.checks ?? [], report: msg.report ?? '', ok: !!msg.ok }); break
       case 'onset_ref': { const w = _refWait.get(msg.id); if (w) { _refWait.delete(msg.id); w(msg) } break }
       case 'beatgrid':

@@ -6,6 +6,14 @@ contextBridge.exposeInMainWorld('electron', {
   close:            () => ipcRenderer.send('win-close'),
   toggleFullscreen: () => ipcRenderer.send('win-fullscreen'),
   pickFolder: () => ipcRenderer.invoke('pick-folder'),
+  pickFile:   (opts) => ipcRenderer.invoke('pick-file', opts ?? null),
+  // Dienst (Backend): Zustand fuer Meldungen, neu starten; Programm neu starten
+  backendStatus:  () => ipcRenderer.invoke('backend-status'),
+  backendRestart: () => ipcRenderer.invoke('backend-restart'),
+  relaunch:       () => ipcRenderer.invoke('relaunch'),
+  // Tragbarer Betrieb: Daten dieses PCs auf die Platte uebernehmen
+  portableInfo:     () => ipcRenderer.invoke('portable-info'),
+  portableTakeover: () => ipcRenderer.invoke('portable-takeover'),
   openPath:   (p) => ipcRenderer.invoke('open-path', p),
   listDir:    (p) => ipcRenderer.invoke('list-dir', p ?? null),
   onMediaKey:        (cb) => ipcRenderer.on('media-key',        (_, key)     => cb(key)),

@@ -3,6 +3,7 @@
   import { onMount } from 'svelte'
   import { connected, playerState, queue, send, settingsOpen, setupOpen, appSettings, library, watchedFolders } from './stores/ws.js'
   import SetupWizard from './components/SetupWizard.svelte'
+  import BackendNotice from './components/BackendNotice.svelte'
   import WishToast from './components/WishToast.svelte'
   import QualityBatchDialog from './components/QualityBatchDialog.svelte'
   import RelocateDialog from './components/RelocateDialog.svelte'
@@ -212,6 +213,7 @@
   <DupeChoiceDialog />
   {#if $setupOpen}<SetupWizard onclose={() => setupOpen.set(false)} />{/if}
   <WishToast />
+  <BackendNotice />
   <QualityBatchDialog />
   <RelocateDialog />
 </div>

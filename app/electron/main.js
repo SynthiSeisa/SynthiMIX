@@ -11,15 +11,33 @@ const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 // alle Daten neben dem Programm, siehe portable.cjs. Muss vor allem anderen
 // stehen — auch die Ein-Instanz-Sperre liegt im Datenordner.
 let portableData = null
+let pcDataDir = null          // Datenordner dieses PCs (%APPDATA%), im tragbaren Betrieb ungenutzt
 if (app.isPackaged) {
   try {
     const dir = portable.portableDir(process.execPath, process.env.SystemDrive)
     if (dir) {
+      const pcData = app.getPath('userData')
+      pcDataDir = pcData
       fs.mkdirSync(dir, { recursive: true })
       fs.accessSync(dir, fs.constants.W_OK)
-      if (portable.migrate(app.getPath('userData'), dir, fs)) console.log('[tragbar] Daten mitgenommen nach', dir)
+      // Auf Wunsch (Einstellungen → System): die Daten dieses PCs uebernehmen,
+      // was auf der Platte lag, bleibt in "Sicherung <Datum>"
+      const mark = path.join(dir, portable.TAKE_MARK)
+      if (fs.existsSync(mark)) {
+        try {
+          const stamp = new Date().toISOString().slice(0, 19).replace('T', ' ').replace(/:/g, '-')
+          if (portable.takeOver(pcData, dir, fs, stamp)) console.log('[tragbar] Daten dieses PCs uebernommen')
+        } finally { fs.rmSync(mark, { force: true }) }
+      }
+      if (portable.migrate(pcData, dir, fs)) console.log('[tragbar] Daten mitgenommen nach', dir)
       app.setPath('userData', dir)
       portableData = dir
+      // die grossen Werkzeuge nachholen, wenn das Fenster steht
+      app.whenReady().then(() => setTimeout(() => {
+        portable.migrateTools(pcData, dir, fs.promises)
+          .then(done => { if (done) console.log('[tragbar] Werkzeuge nachgeholt') })
+          .catch(e => console.error('[tragbar] Werkzeuge:', e.message))
+      }, 15000))
     }
   } catch (e) {
     console.error('[tragbar] nicht moeglich, Daten bleiben auf diesem PC:', e.message)
@@ -51,6 +69,15 @@ if (!gotLock) {
   })
 }
 
+// Fuer die Meldung im Fenster, wenn der Dienst nicht laeuft: die letzten
+// Zeilen seiner Ausgabe und ob das Neustarten aufgegeben wurde
+let backendLog = []
+let backendGaveUp = false
+function backendNote(text) {
+  for (const line of String(text).split(/\r?\n/)) if (line.trim()) backendLog.push(line.trim().slice(0, 300))
+  if (backendLog.length > 40) backendLog = backendLog.slice(-40)
+}
+
 function startPythonBackend() {
   let cmd, args, cwd
   if (app.isPackaged) {
@@ -66,11 +93,19 @@ function startPythonBackend() {
     args = [path.join(__dirname, '../../backend/main.py'), '--electron-exe', process.execPath]
     cwd  = path.join(__dirname, '../../backend')
   }
-  pythonProcess = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
-  pythonProcess.stdout.on('data', d => console.log('[python]', d.toString().trim()))
-  pythonProcess.stderr.on('data', d => console.error('[python]', d.toString().trim()))
+  try {
+    pythonProcess = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
+  } catch (e) {
+    backendNote(`Dienst laesst sich nicht starten: ${e.message}`)
+    backendGaveUp = true
+    return
+  }
+  pythonProcess.on('error', e => { backendNote(`Dienst laesst sich nicht starten: ${e.message}`); pythonProcess = null; backendGaveUp = true })
+  pythonProcess.stdout.on('data', d => { const t = d.toString().trim(); console.log('[python]', t); backendNote(t) })
+  pythonProcess.stderr.on('data', d => { const t = d.toString().trim(); console.error('[python]', t); backendNote(t) })
   pythonProcess.on('exit', code => {
     console.log('[python] exited', code)
+    backendNote(`Dienst beendet (Code ${code})`)
     pythonProcess = null
     if (quitting) return
     // Stirbt das Backend mitten im Auflegen, lief die Musik zwar weiter, aber
@@ -81,6 +116,7 @@ function startPythonBackend() {
     backendRestarts = backendRestarts.filter(t => now - t < 60000)
     if (backendRestarts.length >= 5) {
       console.error('[python] startet immer wieder neu, gebe auf')
+      backendGaveUp = true
       return
     }
     backendRestarts.push(now)
@@ -352,6 +388,54 @@ ipcMain.handle('open-path', (e, target) => {
 })
 
 // Folder picker
+// Zustand des Dienstes (Backend) fuer die Meldung im Fenster
+ipcMain.handle('backend-status', () => {
+  const dataDir = app.getPath('userData')
+  const log = backendLog.slice(-12)
+  return {
+    running: !!pythonProcess, gaveUp: backendGaveUp, portable: !!portableData, dataDir,
+    dataGone: !fs.existsSync(dataDir),
+    portBusy: backendLog.some(l => /10048|address already in use|only one usage of each socket/i.test(l)),
+    log,
+  }
+})
+ipcMain.handle('backend-restart', () => {
+  backendRestarts = []; backendGaveUp = false; backendLog = []
+  if (!pythonProcess && !process.env.YTDL_DEV) startPythonBackend()
+  return true
+})
+// Neu starten (nach Wiederherstellen einer Sicherung, Uebernehmen der PC-Daten)
+function relaunchApp() {
+  quitting = true
+  if (pythonProcess) { try { pythonProcess.kill() } catch (e) {} }
+  app.relaunch()
+  app.exit(0)
+}
+ipcMain.handle('relaunch', () => { setTimeout(relaunchApp, 300); return true })
+ipcMain.handle('pick-file', async (e, opts) => {
+  const res = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'], title: opts?.title || 'Datei wählen',
+    filters: Array.isArray(opts?.filters) ? opts.filters : [],
+  })
+  return res.canceled ? null : res.filePaths[0]
+})
+// Tragbarer Betrieb: liegen auf diesem PC eigene Daten, die man uebernehmen koennte?
+ipcMain.handle('portable-info', () => {
+  if (!portableData || !pcDataDir) return { portable: false }
+  const pcHasData = fs.existsSync(path.join(pcDataDir, 'settings.json'))
+  return {
+    portable: true, dataDir: portableData, pcDir: pcDataDir, pcHasData,
+    pcTracks: pcHasData ? portable.countTracks(pcDataDir, fs) : null,
+    driveTracks: portable.countTracks(portableData, fs),
+  }
+})
+ipcMain.handle('portable-takeover', () => {
+  if (!portableData || !pcDataDir || !fs.existsSync(path.join(pcDataDir, 'settings.json'))) return false
+  fs.writeFileSync(path.join(portableData, portable.TAKE_MARK), new Date().toISOString())
+  setTimeout(relaunchApp, 300)
+  return true
+})
+
 ipcMain.handle('pick-folder', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openDirectory'],

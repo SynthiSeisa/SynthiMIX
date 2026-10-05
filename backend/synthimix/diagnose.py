@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 from .core import _NO_WINDOW, _state
-from . import core, keys, library, media
+from . import core, keys, library, media, net
 
 
 def _run_tool(exe: str) -> dict:
@@ -62,6 +62,33 @@ def run_sync() -> dict:
         add("Analyse (numpy)", True, np.__version__)
     except Exception as e:
         add("Analyse (numpy)", False, f"laedt nicht: {e}")
+
+    n = net.check()
+    add("Internet (Zertifikate)", n["ok"], n["text"])
+    # Geht die Uhr des PCs falsch, scheitert jede gesicherte Verbindung
+    try:
+        from email.utils import parsedate_to_datetime
+        from datetime import datetime, timezone
+        if n.get("date"):
+            off = abs((datetime.now(timezone.utc) - parsedate_to_datetime(n["date"])).total_seconds())
+            add("Uhrzeit des PCs", off < 300, "stimmt" if off < 300 else f"weicht {int(off // 60)} Minuten ab — Datum und Uhrzeit in Windows pruefen")
+    except Exception:
+        pass
+
+    # Download-Ordner: erreichbar, beschreibbar, im tragbaren Betrieb auf der Platte?
+    dl = _state.get("download_dir") or str(core.BASE_DIR / "Downloads")
+    if not os.path.isdir(dl):
+        add("Download-Ordner", False, f"{dl}: gibt es an diesem PC nicht — unter Einstellungen → Download neu waehlen")
+    else:
+        try:
+            t = os.path.join(dl, ".schreibtest")
+            with open(t, "w", encoding="utf-8") as f:
+                f.write("x")
+            os.remove(t)
+            same = os.path.splitdrive(dl)[0].upper() == os.path.splitdrive(str(core.BASE_DIR))[0].upper()
+            add("Download-Ordner", True, dl + ("" if same or not core.PORTABLE else " — liegt nicht auf der tragbaren Platte, reist also nicht mit"))
+        except OSError as e:
+            add("Download-Ordner", False, f"{dl}: nicht beschreibbar ({e})")
 
     # Datenordner beschreibbar?
     try:

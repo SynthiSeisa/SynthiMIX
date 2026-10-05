@@ -121,6 +121,26 @@ class PortableTest(BackendTest):
         self.assertIsNone(relocate.portable_start("E:"))
 
 
+class PortablePlaylistTest(BackendTest):
+
+    def test_playlists_im_download_ordner_bekommen_die_neuen_pfade(self):
+        """Die Platte heisst an diesem PC anders: die Playlists liegen im
+        Download-Ordner auf der Platte und muessen dort umgeschrieben werden."""
+        alt, neu = self.tmp / "PlatteAlt", self.tmp / "PlatteNeu"
+        (neu / "Musik" / "playlists").mkdir(parents=True)
+        (neu / "Musik" / "a.mp3").write_bytes(b"x")
+        pl = neu / "Musik" / "playlists" / "Set.m3u"
+        pl.write_text("\n".join(["#EXTM3U", "#EXTINF:200,A", str(alt / "Musik" / "a.mp3"), ""]), encoding="utf-8")
+        main._state["library"] = [{"path": str(alt / "Musik" / "a.mp3"), "title": "a"}]
+        main._state["download_dir"] = str(alt / "Musik")
+        main._state["watched_folders"] = [str(alt / "Musik")]
+        res = relocate.apply(str(alt) + os.sep, str(neu) + os.sep)
+        self.assertEqual(core.PLAYLISTS_DIR, neu / "Musik" / "playlists")
+        self.assertEqual(res["playlists"], 1)
+        self.assertIn(str(neu / "Musik" / "a.mp3"), pl.read_text(encoding="utf-8"))
+        self.assertNotIn(str(alt), pl.read_text(encoding="utf-8"))
+
+
 class DiagnoseTest(BackendTest):
 
     def test_bericht_nennt_was_nicht_geht(self):

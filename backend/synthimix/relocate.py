@@ -142,7 +142,15 @@ def apply(old: str, new: str) -> dict:
         media._wf_disk, _ = _rewrite(media._wf_disk, old, new)
     store._quality_cache, _ = _rewrite(store._quality_cache, old.lower(), new.lower())
     store._quality_cache_dirty = True
-    # Eigene Playlists (Datenordner)
+    # Eigene Playlists: sie liegen im Download-Ordner (Unterordner "playlists"),
+    # und der hat gerade seinen neuen Pfad bekommen — erst dorthin umschalten.
+    # Vorher wurden beim Wechsel des Laufwerksbuchstabens die Playlists am
+    # alten (leeren) Ort umgeschrieben und die echten behielten die alten Pfade.
+    try:
+        from . import library
+        library.sync_playlists_dir()
+    except Exception as e:
+        print(f"[umzug] Playlist-Ordner: {e}", flush=True)
     pls = 0
     if core.PLAYLISTS_DIR.exists():
         for f in core.PLAYLISTS_DIR.glob("*.m3u"):
