@@ -1,6 +1,6 @@
 <script>
   import { onMount, untrack, tick } from 'svelte'
-  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, playlistRenamed, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected, qualityScan, revealPath, excludedFolders, watchedFolders, downloadDir, startQualityBatch } from '../stores/ws.js'
+  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, playlistRenamed, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected, qualityScan, revealPath, excludedFolders, watchedFolders, downloadDir, startQualityBatch, startVideoScan } from '../stores/ws.js'
   import BetterVersionDialog from './BetterVersionDialog.svelte'
   import { keySortValue } from '../lib/keys.js'
   import { startFileDrag, ownDrag, hasFiles, droppedPaths } from '../lib/fileDrag.js'
@@ -2415,6 +2415,10 @@
     <button onclick={() => analyzeFolder(false)}>Analysieren — nur dieser Ordner</button>
     <button onclick={() => analyzeFolder(true)}>Analysieren — mit Unterordnern</button>
     <button onclick={scanFolderDupes}>Auf Duplikate scannen</button>
+    <button onclick={() => { startVideoScan(folderCtx.path, false); folderCtx = null }}
+            title="Sucht in diesem Ordner Titel, die nach Musikvideo heißen („Official Video“), und schlägt je Titel die Song-Fassung vor — erst prüfen, dann ersetzen">Musikvideos ersetzen — nur dieser Ordner</button>
+    <button onclick={() => { startVideoScan(folderCtx.path, true); folderCtx = null }}
+            title="Wie oben, mit allen Unterordnern">Musikvideos ersetzen — mit Unterordnern</button>
     <button onclick={() => { const p = tracksInFolder(folderCtx.path, true).map(t => t.path); folderCtx = null; if (p.length) fpPaths = p }}
             title="Alle Titel in diesem Ordner und darunter am Klang erkennen (AcoustID) — Vorschläge zum Prüfen, nichts wird ungefragt geändert">Per Fingerprint erkennen…</button>
     <button onclick={() => { window.electron?.openPath(folderCtx.path); folderCtx = null }}>Im Explorer öffnen</button>

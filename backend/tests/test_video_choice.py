@@ -39,6 +39,37 @@ class VideoChoiceTest(BackendTest):
         ]
         self.assertEqual(main._pick_song_version(VIDEO, andere)["url"], SONG["url"])
 
+    def test_gekuerztes_video_bekommt_den_laengeren_song(self):
+        """Musikvideos sind oft gekuerzt (161 s gegen 246 s) — der Song zaehlt trotzdem."""
+        video = {"title": "Culture Shock - Get To Me (Official Music Video)", "uploader": "UKF Drum & Bass", "duration": 161}
+        song = {"url": "s", "title": "Get To Me", "artist": "Culture Shock", "duration": 246}
+        self.assertEqual(main._pick_song_version(video, [song])["url"], "s")
+        # aber nicht eine ganz andere Laenge (Album-Fassung mit 8 Minuten)
+        self.assertIsNone(main._pick_song_version(video, [{**song, "duration": 480}]))
+
+    def test_umlaute_und_akzente_zaehlen_nicht(self):
+        video = {"title": "Lee Mvtthews x TREi ft. Nü - Lights Out (Official Video)", "uploader": "UKF Drum & Bass", "duration": 254}
+        song = {"url": "s", "title": "Lights Out (feat. NU)", "artist": "Lee Mvtthews, NU & Trei", "duration": 251}
+        self.assertEqual(main._pick_song_version(video, [song])["url"], "s")
+
+    def test_zweite_suche_ohne_gaeste(self):
+        """Mit "ft. X" im Suchbegriff kamen nur andere Titel des Gasts."""
+        video = {"title": "Example x Kanine - Never Let You Down ft. Penny Ivy (Official Video)", "uploader": "Example", "duration": 211}
+        song = {"url": "s", "title": "Never Let You Down (feat. Penny Ivy)", "artist": "Example & Kanine", "duration": 210}
+        asked = []
+
+        async def suche(q, n=5):
+            asked.append(q)
+            return [song] if "Penny" not in q else [{"url": "x", "title": "Different", "artist": "Penny Ivy", "duration": 162}]
+        echt = main._ytm_song_search
+        main._ytm_song_search = suche
+        try:
+            got = self.run_async(main._find_song_version(video))
+        finally:
+            main._ytm_song_search = echt
+        self.assertEqual(got["url"], "s")
+        self.assertEqual(asked, ["Example x Kanine - Never Let You Down ft. Penny Ivy", "Example x Kanine - Never Let You Down"])
+
     def test_remix_video_bekommt_nicht_das_original(self):
         video = {"title": "Meiko - Leave The Lights On (Krot Remix) (Official Video)", "uploader": "x", "duration": 420}
         original = {"url": "o", "title": "Leave The Lights On", "artist": "Meiko", "duration": 230}

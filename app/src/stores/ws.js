@@ -116,13 +116,19 @@ export const qualityBatchOpen    = writable(false)
 // Laufwerk gewechselt: Vorschlaege [{from, to, count, found}] und Stand
 export const relocateSuggest     = writable([])
 export const relocateState       = writable(null)   // null | {busy} | {done, tracks, merged, playlists} | {none}
-export function startQualityBatch(paths) {
+// mode 'video': Mitschnitte von Musikvideos durch die Song-Fassung ersetzen,
+// der Name wird dabei bereinigt (ohne "(Official Video)")
+export function startQualityBatch(paths, mode = '') {
   const cur = get(qualityBatch)
   if (cur.phase === 'search' || cur.phase === 'replace') { qualityBatchOpen.set(true); return }
-  qualityBatch.set({ phase: 'search', done: 0, total: paths.length, items: {}, paths })
+  qualityBatch.set({ phase: 'search', done: 0, total: paths.length, items: {}, paths, mode })
   qualityReplace.update(m => { const n = { ...m }; for (const p of paths) delete n[p]; return n })
-  send({ type: 'quality_batch', paths })
+  send({ type: 'quality_batch', paths, mode })
   qualityBatchOpen.set(true)
+}
+/** Ordner nach Musikvideos durchsuchen (Rechtsklick auf einen Ordner); das Ergebnis oeffnet die Liste zum Pruefen. */
+export function startVideoScan(folder, recursive) {
+  send({ type: 'video_scan', folder, recursive: !!recursive })
 }
 export const servicesTest        = writable(null)   // {lastfm, acoustid, fpcalc, spotify: {ok, text}}
 export const titleState          = writable({})
@@ -476,6 +482,13 @@ function connect() {
       case 'video_check_done':        videoCheckPending.update(n => Math.max(0, n - 1)); break
       case 'video_choice':            videoChoices.update(l => [...l, msg]); break
       case 'dupe_choice':             dupeChoices.update(l => [...l, msg]); break
+      case 'video_scan_result':
+        if (msg.paths?.length) startQualityBatch(msg.paths, 'video')
+        else {
+          scanStatus.set(`Keine Musikvideos in diesem Ordner${msg.recursive ? ' und seinen Unterordnern' : ''} gefunden`)
+          setTimeout(() => scanStatus.set(''), 5000)
+        }
+        break
       case 'quality_batch_progress':  qualityBatch.update(s => ({ ...s, phase: msg.phase, done: msg.done, total: msg.total, current: msg.current ?? '' })); break
       case 'quality_batch_item':      qualityBatch.update(s => ({ ...s, items: { ...(s.items ?? {}), [msg.path]: msg } })); break
       case 'quality_batch_done':      qualityBatch.update(s => ({ ...s, phase: 'review', cancelled: msg.cancelled })); qualityBatchOpen.set(true); break

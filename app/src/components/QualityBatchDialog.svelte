@@ -12,6 +12,8 @@
   // jederzeit schliessen: Suche und Ersetzen laufen im Hintergrund weiter.
   const CUE_TOL = 2
   const st = $derived($qualityBatch)
+  // Musikvideos ersetzen: Song-Fassung statt Mitschnitt, Name ohne "(Official Video)"
+  const video = $derived(st.mode === 'video')
   const paths = $derived(st.paths ?? [])
   const items = $derived(paths.map(p => st.items?.[p]).filter(Boolean))
   const found = $derived(items.filter(it => it.candidate))
@@ -41,7 +43,7 @@
   }
   function replaceAll() {
     qualityBatch.update(s => ({ ...s, phase: 'replace', done: 0, total: chosen.length }))
-    send({ type: 'quality_batch_replace', items: chosen.map(it => ({ path: it.path, url: it.candidate.url })) })
+    send({ type: 'quality_batch_replace', items: chosen.map(it => ({ path: it.path, url: it.candidate.url, rename: video })) })
   }
   function setAll(on) {
     const p = { ...pick }
@@ -86,10 +88,10 @@
 
 {#if open}
 <div class="dlg-overlay" onclick={hide} role="presentation">
-  <div class="dlg panel" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Bessere Versionen suchen">
+  <div class="dlg panel" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={video ? 'Musikvideos ersetzen' : 'Bessere Versionen suchen'}>
 
     <div class="hdr">
-      <span class="dlg-title">Bessere Versionen für {paths.length} Titel</span>
+      <span class="dlg-title">{video ? `${paths.length} Musikvideos — Song-Fassung laden` : `Bessere Versionen für ${paths.length} Titel`}</span>
       <button class="btn btn-icon btn-sm close-btn" onclick={hide} title={running ? 'Im Hintergrund weiterlaufen lassen' : 'Schließen'} aria-label="Schließen"><i class="ti ti-x"></i></button>
     </div>
 
@@ -103,7 +105,7 @@
         <progress max={st.total} value={st.done ?? 0}></progress>
         <button class="btn btn-sm" onclick={() => send({ type: 'quality_batch_cancel' })}><i class="ti ti-player-stop"></i> Abbrechen</button>
       {:else if st.phase === 'finished'}
-        <span class="ok"><i class="ti ti-check"></i> {st.result?.ok ?? 0} ersetzt{st.result?.cancelled ? ', dann abgebrochen' : ''}.</span>
+        <span class="ok"><i class="ti ti-check"></i> {st.result?.ok ?? 0} ersetzt{video && st.result?.renamed != null ? `, ${st.result.renamed} umbenannt` : ''}{st.result?.cancelled ? ', dann abgebrochen' : ''}.</span>
         {#if st.result?.failed_count}<span class="bad">{st.result.failed_count} fehlgeschlagen.</span>{/if}
       {:else}
         {found.length} von {items.length} mit Vorschlag · {chosen.length} ausgewählt
@@ -124,7 +126,8 @@
           {:else}
             <span class="cb-ph"></span>
           {/if}
-          <span class="old" title={it.path}>{it.title}<span class="dur">{fmt(it.duration)}</span></span>
+          <span class="old" title={it.path}>{it.title}<span class="dur">{fmt(it.duration)}</span>
+            {#if video && it.candidate && it.new_name}<span class="newname" title="So heißt die Datei danach">→ {it.new_name}</span>{/if}</span>
           <i class="ti ti-chevron-right arrow" aria-hidden="true"></i>
           {#if it.candidate}
             <span class="new" title={it.candidate.url}>
@@ -135,7 +138,7 @@
               {#if !it.sure}<span class="unsure" title="Kein Künstler bekannt — gleichnamige Songs möglich, bitte prüfen">unsicher</span>{/if}
             </span>
           {:else}
-            <span class="new muted">nichts Passendes gefunden</span>
+            <span class="new muted">{video ? 'keine Song-Fassung gefunden — bleibt, wie es ist' : 'nichts Passendes gefunden'}</span>
           {/if}
           <span class="st">
             {#if rs?.state === 'done'}<i class="ti ti-check ok" title={rs.text}></i>
@@ -154,6 +157,8 @@
         <div class="notice error">
           {#each st.result.failed.slice(0, 4) as f}<div>{f.title}: {f.text}</div>{/each}
         </div>
+      {:else if video}
+        <div class="dlg-hint">Die Song-Fassung ersetzt den Mitschnitt des Videos (oft länger — Videos sind häufig gekürzt). Datei und Titel verlieren den Zusatz „(Official Video)“; Bibliothek, Warteschlange und eigene Playlists ziehen mit, Tags und Cover bleiben. Alte Dateien kommen in den Papierkorb. Andere Programme (rekordbox, FL Studio) finden umbenannte Dateien nicht mehr unter dem alten Namen.</div>
       {:else if nLonger && st.phase === 'review'}
         <div class="notice"><i class="ti ti-alert-triangle"></i>
           {nLonger} der ausgewählten Titel {nLonger === 1 ? 'ist' : 'sind'} mehr als {CUE_TOL} s anders lang — Cues und Beatgrid in rekordbox danach neu setzen.</div>
@@ -178,6 +183,7 @@
 {/if}
 
 <style>
+  .newname { display: block; font-size: var(--fs-sm); color: var(--c-accent-tx); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .bg {
     position: fixed; right: 16px; bottom: 16px; z-index: 840;
     width: 320px; max-width: calc(100vw - 32px);

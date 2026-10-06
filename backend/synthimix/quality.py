@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -9,7 +10,7 @@ from difflib import SequenceMatcher
 from fastapi import WebSocket
 from pathlib import Path
 from .core import _NO_WINDOW, _state
-from . import beatgrid, core, library, media, search, store
+from . import beatgrid, core, library, media, relocate, search, store, tags
 
 # ── Qualitaet: Bandbreite messen, bessere Version einsetzen ─────────────────
 # Die Bitrate sagt wenig: YouTube-Konverter schreiben "320 kbps" auch aus einer
@@ -302,6 +303,77 @@ async def _quality_replace(path: str, url: str, ws: WebSocket):
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+# ── Musikvideos im Bestand: Song-Fassung laden, Namen bereinigen ─────────────
+# Alte Mitschnitte von Musikvideos ("… (Official Video).mp3") haben oft Intro,
+# Pausen oder Geraeusche. Ein Ordner wird danach durchsucht (mit oder ohne
+# Unterordner), je Titel die Song-Fassung von YouTube Music gesucht, und nach
+# dem Pruefen ersetzt — hier mit bereinigtem Namen (gewuenscht 10/2026).
+_VIDEO_NAME_RE = re.compile(
+    r"\b(official\s+(?:music\s+|hd\s+|4k\s+)?video|music\s+video|official\s+mv|"
+    r"offizielles\s+(?:musik)?video|musikvideo|video\s*clip|\bmv\b|\bm\s*[/／]\s*v)\b", re.IGNORECASE)
+# Einzelspuren (Stems) eines Videos sind kein ganzer Song — nicht anfassen
+_STEM_RE = re.compile(r"[_\-]\s*(?:bass|drums?|vocals?|other|inst(?:rumental)?|piano|guitar|acapella)\s*$", re.IGNORECASE)
+
+
+def clean_name(stem: str) -> str:
+    """Video-Zusaetze aus einem Dateinamen/Titel streichen:
+    "A - B (Official Video) [Label]" -> "A - B [Label]"."""
+    s = re.sub(r"\s*[\(\[][^\)\]]*" + _VIDEO_NAME_RE.pattern + r"[^\)\]]*[\)\]]", " ", stem or "", flags=re.IGNORECASE)
+    s = _VIDEO_NAME_RE.sub(" ", s)
+    s = re.sub(r"[\(\[]\s*[\)\]]", " ", s)
+    s = re.sub(r"\s{2,}", " ", s).strip(" -_|,")
+    return s if len(s) >= 2 else (stem or "")
+
+
+def video_scan(folder: str, recursive: bool) -> list[str]:
+    """Titel der Bibliothek in diesem Ordner, die nach Musikvideo heissen."""
+    out = []
+    for lt in _state.get("library", []):
+        p = lt.get("path") or ""
+        if lt.get("missing") or not p or not library._path_in_folder(p, folder, recursive):
+            continue
+        stem = Path(p).stem
+        if _STEM_RE.search(stem):
+            continue
+        if _VIDEO_NAME_RE.search(stem) or _VIDEO_NAME_RE.search(lt.get("title") or ""):
+            out.append(p)
+    return sorted(out, key=lambda x: x.lower())
+
+
+def _rename_clean(path: str) -> str | None:
+    """Nach dem Ersetzen: Datei und Titel ohne Video-Zusatz. Bibliothek,
+    Warteschlange, Verlauf und eigene Playlists ziehen mit. Liefert den neuen
+    Pfad (auch wenn der Name schon sauber war), None wenn es nicht ging."""
+    p = Path(path)
+    stem = clean_name(p.stem)
+    target = p
+    if stem != p.stem:
+        target = p.with_name(stem + p.suffix)
+        n = 2
+        while target.exists():                       # nichts ueberschreiben
+            target = p.with_name(f"{stem} ({n}){p.suffix}")
+            n += 1
+        try:
+            os.rename(p, target)
+        except OSError as e:
+            print(f"[video] {p.name} laesst sich nicht umbenennen: {e}", flush=True)
+            return None
+        relocate.apply(str(p), str(target))
+    lt = next((x for x in _state["library"] if x.get("path") == str(target)), None)
+    if lt is not None and _VIDEO_NAME_RE.search(lt.get("title") or ""):
+        title = clean_name(lt["title"])
+        try:
+            tags._write_title_sync(str(target), title, lt.get("artist") or "")
+            lt["mtime"] = int(os.path.getmtime(target))
+        except Exception as e:
+            print(f"[video] Titel-Tag {target.name}: {e}", flush=True)
+        lt["title"] = title
+    for qt in _state.get("queue", []):
+        if qt.get("path") == str(target) and _VIDEO_NAME_RE.search(qt.get("title") or ""):
+            qt["title"] = clean_name(qt["title"])
+    return str(target)
+
+
 # ── Qualitaet: viele Titel auf einmal ersetzen ───────────────────────────────
 _qbatch_cancel = False
 _QBATCH_PARALLEL = 2
@@ -346,8 +418,10 @@ def _auto_candidate(lt: dict, results: list[dict]) -> tuple[dict | None, bool]:
     return (best[1], best[2]) if best else (None, False)
 
 
-async def _quality_batch(paths: list[str], ws: WebSocket):
-    """Fuer viele Titel je einen Ersatz vorschlagen (Liste zum Pruefen)."""
+async def _quality_batch(paths: list[str], ws: WebSocket, mode: str = ""):
+    """Fuer viele Titel je einen Ersatz vorschlagen (Liste zum Pruefen).
+    mode "video": Mitschnitte von Musikvideos — gesucht wird die Song-Fassung
+    (darf laenger sein als das Video), der Name wird beim Ersetzen bereinigt."""
     global _qbatch_cancel
     _qbatch_cancel = False
 
@@ -368,19 +442,30 @@ async def _quality_batch(paths: list[str], ws: WebSocket):
                 return
             cand, sure = None, False
             try:
-                songs, videos = await search._songs_and_videos(search._song_query(lt.get("title", "")), 4, 6)
-                if songs:
-                    await search._ytm_fill_details(songs)
-                cand, sure = _auto_candidate(lt, search._merge_songs_first(songs, videos))
+                if mode == "video":
+                    stem = Path(path).stem
+                    video = {"title": stem if _VIDEO_NAME_RE.search(stem) else (lt.get("title") or stem),
+                             "duration": lt.get("duration_sec") or 0, "uploader": lt.get("artist") or ""}
+                    cand = await search._find_song_version(video)
+                    sure = bool(cand)
+                else:
+                    songs, videos = await search._songs_and_videos(search._song_query(lt.get("title", "")), 4, 6)
+                    if songs:
+                        await search._ytm_fill_details(songs)
+                    cand, sure = _auto_candidate(lt, search._merge_songs_first(songs, videos))
             except Exception as e:
                 print(f"[quality] Sammelsuche {Path(path).name}: {e}", flush=True)
             done += 1
-            await send("quality_batch_item", path=path, title=lt.get("title", ""),
+            # Musikvideos: der Dateiname zeigt, worum es geht (der Titel-Tag ist oft schon sauber)
+            await send("quality_batch_item", path=path,
+                       title=Path(path).stem if mode == "video" else lt.get("title", ""),
                        duration=lt.get("duration_sec") or 0,
-                       candidate=search._public([cand])[0] if cand else None, sure=sure)
+                       candidate=search._public([cand])[0] if cand else None, sure=sure,
+                       **({"new_name": clean_name(Path(path).stem)} if mode == "video" else {}))
             await send("quality_batch_progress", phase="search", done=done, total=total)
 
     await asyncio.gather(*(one(p) for p in paths))
+    search._save_ytm_cache()
     await send("quality_batch_done", cancelled=_qbatch_cancel)
 
 
@@ -408,7 +493,7 @@ async def _quality_batch_replace(items: list, ws: WebSocket):
 
     send = core.sender(ws)
 
-    ok, failed, total = 0, [], len(items)
+    ok, failed, total, renamed = 0, [], len(items), 0
     for n, it in enumerate(items):
         if _qbatch_cancel:
             break
@@ -419,7 +504,19 @@ async def _quality_batch_replace(items: list, ws: WebSocket):
         await _quality_replace(path, url, fw)
         if fw.state == "done":
             ok += 1
+            if it.get("rename"):                     # Musikvideo ersetzt: Name ohne "(Official Video)"
+                try:
+                    if _rename_clean(path):
+                        renamed += 1
+                except Exception as e:
+                    print(f"[video] {path}: {e}", flush=True)
         else:
             failed.append({"title": title, "text": fw.text})
+    if renamed:
+        store.save_library()
+        store.save_queue()
+        await core.push_library()
+        await core.push_queue()
+        await core.broadcast({"type": "playlists", "items": library._get_playlists()})
     await send("quality_batch_replaced", ok=ok, failed=failed[:30], failed_count=len(failed),
-               cancelled=_qbatch_cancel)
+               cancelled=_qbatch_cancel, renamed=renamed)

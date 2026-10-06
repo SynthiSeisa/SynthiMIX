@@ -257,7 +257,7 @@ async def _audit_playlist_for_videos(playlist_url: str, progress=None,
         query = search._song_query(title)
         if query:
             async with sem:
-                song = search._pick_song_version(entry, await search._ytm_song_search(query))
+                song = await search._find_song_version(entry)
             if song:
                 entry["src"]      = entry["url"]
                 entry["url"]      = song["url"]
@@ -331,9 +331,7 @@ async def _check_video_then_download(url: str, fmt: str, ws: WebSocket, check_du
         if video and not matches and search._is_single_youtube_video(url) \
                 and "- topic" not in video["uploader"].lower() \
                 and (not search._AUDIO_TITLE_RE.search(video["title"]) or search._MV_TITLE_RE.search(video["title"])):
-            query = search._song_query(video["title"])
-            if query:
-                song = search._pick_song_version(video, await search._ytm_song_search(query))
+            song = await search._find_song_version(video)
     finally:
         await _send("video_check_done", url=url)
 

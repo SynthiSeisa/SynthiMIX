@@ -1221,10 +1221,17 @@ async def handle_message(ws: WebSocket, msg: dict):
             store.schedule_save()
             await core.broadcast({"type": "track_meta_update", "track": lt})
 
+    elif t == "video_scan":
+        # Ordner nach Mitschnitten von Musikvideos durchsuchen (mit/ohne Unterordner)
+        folder = msg.get("folder", "")
+        rec = bool(msg.get("recursive", True))
+        paths = quality.video_scan(folder, rec) if folder else []
+        await ws.send_text(json.dumps({"type": "video_scan_result", "folder": folder, "recursive": rec, "paths": paths}))
+
     elif t == "quality_batch":
         paths = [str(x) for x in (msg.get("paths") or [])]
         if paths:
-            core.spawn(quality._quality_batch(paths, ws))
+            core.spawn(quality._quality_batch(paths, ws, str(msg.get("mode") or "")))
 
     elif t == "quality_batch_replace":
         core.spawn(quality._quality_batch_replace(msg.get("items") or [], ws))

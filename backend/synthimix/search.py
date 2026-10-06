@@ -3,6 +3,7 @@ import asyncio
 import json
 import re
 import time
+import unicodedata
 from difflib import SequenceMatcher
 from fastapi import WebSocket
 from .core import _NO_WINDOW, _state
@@ -372,14 +373,38 @@ def _song_query(title: str) -> str:
 
 def _norm_words(t: str) -> set[str]:
     t = _TITLE_NOISE_RE.sub(" ", (t or "").lower())
+    # Akzente und Umlaute angleichen: YouTube schreibt "Nü", YouTube Music "NU" —
+    # der Song galt sonst als ein anderer (gemeldet 10/2026)
+    t = "".join(c for c in unicodedata.normalize("NFKD", t) if not unicodedata.combining(c))
     return {w for w in re.findall(r"\w+", t) if len(w) > 1 and w not in ("feat", "ft", "the", "and")}
+
+
+_FEAT_RE = re.compile(r"\b(?:feat\.?|ft\.?|featuring)\s+[^-–|()\[\]]+", re.IGNORECASE)
+
+
+async def _find_song_version(video: dict) -> dict | None:
+    """Song-Version zu einem Video suchen: erst mit dem ganzen Titel, findet
+    sich nichts, noch einmal ohne die Gaeste ("ft. X") — mit ihnen im
+    Suchbegriff lieferte YouTube Music oft nur andere Titel des Gasts."""
+    q = _song_query(video.get("title", ""))
+    if not q:
+        return None
+    song = _pick_song_version(video, await _ytm_song_search(q))
+    if song:
+        return song
+    q2 = re.sub(r"\s+", " ", _FEAT_RE.sub(" ", q)).strip(" -|")
+    if q2 and q2.lower() != q.lower():
+        song = _pick_song_version(video, await _ytm_song_search(q2))
+    return song
 
 
 def _pick_song_version(video: dict, results: list[dict]) -> dict | None:
     """Beste Song-Version zu einem Video oder None. results kommen aus der
     Song-Suche von YouTube Music (nur Studio-Versionen). Keine Live-Aufnahmen,
-    Titel und Kuenstler muessen passen, der Song darf nicht laenger als das
-    Video sein."""
+    Titel und Kuenstler muessen passen. Der Song darf laenger sein als das
+    Video (Musikvideos sind oft gekuerzt: 161 s Video, 246 s Song) — bis zum
+    1,6-fachen; mehr ist eine andere Fassung (Extended), deren Zusatz im Titel
+    ohnehin nicht passt."""
     vdur = video.get("duration") or 0
     want = _norm_words(_song_query(video.get("title", "")))
     best = None
@@ -392,7 +417,7 @@ def _pick_song_version(video: dict, results: list[dict]) -> dict | None:
             continue
         if LIVE_RE.search(r.get("title", "")):
             continue
-        if vdur and (dur > vdur + 3 or dur < vdur * 0.5):
+        if vdur and (dur > vdur * 1.6 + 5 or dur < vdur * 0.5):
             continue
         # Der Songtitel muss im Videotitel stecken (Kuenstler steht beim Topic-Kanal)
         got = _norm_words(r.get("title", ""))
@@ -468,7 +493,7 @@ def _save_ytm_cache():
     except Exception:
         pass
 
-async def _ytm_song_search(query: str, n: int = 3) -> list[dict]:
+async def _ytm_song_search(query: str, n: int = 5) -> list[dict]:
     """Song-Suche von YouTube Music mit Laenge und Kuenstler (siehe _ytm_songs)."""
     global _ytm_cache_dirty
     key = f"{n}|{query.strip().lower()}"
