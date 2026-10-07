@@ -17,7 +17,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 from synthimix.core import _state, clients
-from synthimix import automix, backup, beatgrid, channels, core, diagnose, download, keys, library, media, net, quality, relocate, remote, search, store, tags, tools
+from synthimix import automix, backup, beatgrid, channels, core, diagnose, download, keys, library, media, net, quality, relocate, remote, search, setlist, store, tags, tools
 
 # ── app ──────────────────────────────────────────────────────────────────────
 @asynccontextmanager
@@ -668,8 +668,8 @@ async def handle_message(ws: WebSocket, msg: dict):
         video_choice = msg.get("video_choice")
         dupe_checked = bool(msg.get("dupe_checked"))
         if url:
-            if download._is_spotify(url):
-                core.spawn(download.run_spotify_download(url, fmt))
+            if download._is_spotify(url) and msg.get("plan_id") is None:
+                core.spawn(download._spotify_add(url, fmt, ws))
             elif msg.get("plan_id") is not None:
                 # Entscheidung aus dem Playlist-Kaestchen: nur neue / alle / als Playlist
                 plan = download._plans.pop(int(msg["plan_id"]), None)
@@ -727,9 +727,6 @@ async def handle_message(ws: WebSocket, msg: dict):
 
     elif t == "download_fpcalc":
         core.spawn(tools._download_fpcalc(ws))
-
-    elif t == "install_spotdl":
-        core.spawn(tools._install_spotdl(ws))
 
     elif t == "download_stop":
         # Kill entire session (all tracks) and terminate subprocess
@@ -1144,6 +1141,23 @@ async def handle_message(ws: WebSocket, msg: dict):
             await core.broadcast({"type": "playlists", "items": library._get_playlists()})
             await download._push_followed()
 
+    # ── DJ-Set: Playlist aus rekordbox einlesen, Lautheit pruefen, zurueckgeben ──
+    elif t == "playlist_import":
+        res = await asyncio.get_running_loop().run_in_executor(None, setlist.import_playlist, msg.get("path", ""))
+        await ws.send_text(json.dumps({"type": "playlist_imported", **res}))
+        if res.get("ok"):
+            await core.broadcast({"type": "playlists", "items": library._get_playlists()})
+
+    elif t == "playlist_export":
+        res = await asyncio.get_running_loop().run_in_executor(None, setlist.export_playlist, msg.get("path", ""))
+        await ws.send_text(json.dumps({"type": "playlist_exported", **res}))
+
+    elif t == "playlist_loudness":
+        core.spawn(setlist.loudness(msg.get("path", ""), ws))
+
+    elif t == "playlist_loudness_cancel":
+        setlist._cancel.add(msg.get("path", ""))
+
     elif t == "delete_playlist":
         pl_path = msg.get("path", "")
         if pl_path and os.path.exists(pl_path):
@@ -1361,7 +1375,11 @@ async def handle_message(ws: WebSocket, msg: dict):
         target_lufs = float(msg.get("target_lufs", -14.0))
         target_tp   = float(msg.get("target_tp", -1.5))
         if paths:
-            core.spawn(media._normalize_files(paths, target_lufs, target_tp, ws))
+            core.spawn(media._normalize_files(paths, target_lufs, target_tp, ws,
+                                              skip_tol=float(msg.get("skip_tol") or 0), trash=bool(msg.get("trash"))))
+
+    elif t == "normalize_cancel":
+        media._norm_cancel = True
 
     elif t == "get_logs":
         await ws.send_json({"type": "logs", "lines": list(core._log_buffer)})
@@ -1390,7 +1408,7 @@ async def handle_message(ws: WebSocket, msg: dict):
 
     elif t == "dismiss_ytdlp_updated":
         # Ein OK fuer alle Hinweise "wurde aktualisiert"
-        for k in ("ytdlp_updated", "spotdl_updated", "ffmpeg_updated"):
+        for k in ("ytdlp_updated", "ffmpeg_updated"):
             _state.setdefault("tool_updates", {}).pop(k, None)
         store.save_settings()
         await core.broadcast({"type": "tool_updates", "items": _state["tool_updates"]})

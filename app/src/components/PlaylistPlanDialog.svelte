@@ -69,6 +69,16 @@
           <span class="fact new"><b>{plan.new}</b> neu</span>
           {#if plan.dupes}<span class="fact"><b>{plan.dupes}</b> doppelt in der Playlist</span>{/if}
         </div>
+        {#if plan.not_found?.length}
+          <!-- Spotify nennt den Titel, YouTube Music hat ihn nicht (oder nur als andere Fassung) -->
+          <details class="miss">
+            <summary><b>{plan.not_found.length}</b> weitere{plan.not_found.length === 1 ? 'r' : ''} Titel der Spotify-Liste bei YouTube Music nicht gefunden — {plan.not_found.length === 1 ? 'wird' : 'werden'} nicht geladen</summary>
+            <ul>{#each plan.not_found as t}<li>{t}</li>{/each}</ul>
+          </details>
+        {/if}
+        {#if plan.truncated}
+          <div class="miss">Spotify zeigt ohne Anmeldung nur die ersten 100 Titel einer Playlist — der Rest fehlt hier.</div>
+        {/if}
 
         <div class="body">
           <button class="opt rec" onclick={() => pick('playlist')}>
@@ -141,6 +151,10 @@
     background: var(--c-bg2); border: 1px solid var(--c-br2); font-size: var(--fs-body); color: var(--c-tx3);
   }
   .fact b { color: var(--c-tx1); font-variant-numeric: tabular-nums; }
+  .miss { font-size: var(--fs-sm); color: var(--c-tx3); line-height: 1.4; }
+  .miss summary { cursor: pointer; }
+  .miss b { color: var(--c-tx1); }
+  .miss ul { margin: 6px 0 0; padding-left: 18px; max-height: 120px; overflow-y: auto; }
   .fact.have b { color: var(--c-green-tx); }
   .fact.new b { color: var(--c-accent-tx); }
   .body { display: flex; flex-direction: column; gap: var(--sp-2); }

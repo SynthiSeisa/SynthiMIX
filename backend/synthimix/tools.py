@@ -1,4 +1,4 @@
-"""Externe Werkzeuge: yt-dlp, ffmpeg, spotdl, fpcalc aktuell halten; Changelog."""
+"""Externe Werkzeuge: yt-dlp, ffmpeg, fpcalc aktuell halten; Changelog."""
 import asyncio
 import json
 import os
@@ -35,56 +35,6 @@ def _changelog_sync() -> list[dict]:
     cached = store._load_json(_CHANGELOG_FILE, [])
     return cached if isinstance(cached, list) else []
 
-def _find_spotdl_cmd() -> list[str] | None:
-    """Return spotdl command as a list, or None if not found."""
-    if core.SPOTDL_LOCAL.exists():
-        return [str(core.SPOTDL_LOCAL)]
-    exe = shutil.which("spotdl")
-    if exe:
-        return [exe]
-    for py in ("py", "python", "python3"):
-        p = shutil.which(py)
-        if not p:
-            continue
-        try:
-            r = subprocess.run([p, "-m", "spotdl", "--version"],
-                               capture_output=True, timeout=5, creationflags=_NO_WINDOW)
-            if r.returncode == 0:
-                return [p, "-m", "spotdl"]
-        except Exception:
-            pass
-    return None
-
-# spotdl.exe entpackt sich bei jedem Start erst (~46 MB). Nach einem Neustart
-# oder Update, wenn der Virenscanner sie neu prueft, dauerte "--version" laenger
-# als die 8 s von frueher — dann stand "Nicht installiert" da, obwohl die Datei
-# im Datenordner lag. Jetzt: laenger warten, Ergebnis je Datei merken, und eine
-# vorhandene Datei gilt immer als installiert.
-_spotdl_ver_cache: dict = {}
-
-def _spotdl_version_sync() -> str | None:
-    spotdl = _find_spotdl_cmd()
-    if not spotdl:
-        return None
-    try:
-        st = os.stat(spotdl[0]) if len(spotdl) == 1 else None
-        key = (spotdl[0], st.st_size, int(st.st_mtime)) if st else tuple(spotdl)
-    except OSError:
-        key = tuple(spotdl)
-    if key in _spotdl_ver_cache:
-        return _spotdl_ver_cache[key]
-    try:
-        r = subprocess.run(spotdl + ["--version"], capture_output=True,
-                           text=True, encoding="utf-8", errors="replace",
-                           timeout=45, creationflags=_NO_WINDOW)
-        m = re.search(r'(\d+\.\d+[\.\d]*)', r.stdout + r.stderr)
-        ver = m.group(1) if m else "installiert"
-        _spotdl_ver_cache[key] = ver
-        return ver
-    except Exception as e:
-        print(f"[spotdl] Version nicht lesbar ({e.__class__.__name__}) — Datei ist aber da", flush=True)
-        return "installiert"
-
 async def _check_tools(ws: WebSocket):
     loop = asyncio.get_running_loop()
     info: dict = {}
@@ -103,7 +53,6 @@ async def _check_tools(ws: WebSocket):
             info["ffmpeg_version"] = m.group(1) if m else first[:40]
         except Exception:
             info["ffmpeg_version"] = None
-        info["spotdl_version"] = _spotdl_version_sync()
         info["fpcalc_found"] = bool(core._find_fpcalc())
     await loop.run_in_executor(None, _sync)
     try:
@@ -200,92 +149,6 @@ async def _download_fpcalc(ws):
     await _send("fpcalc_install_done")
     # Re-broadcast tools_info so UI updates fpcalc_found flag
     await _send("tools_info", fpcalc_found=True)
-
-# ── spotdl auto-install ───────────────────────────────────────────────────────
-# Standalone-Exe statt "pip install": im gepackten Betrieb ist sys.executable
-# backend.exe (kein pip), und ein System-Python ist auf fremden PCs nicht
-# vorausgesetzt. Der Download läuft damit in Dev und Release identisch.
-_SPOTDL_API      = "https://api.github.com/repos/spotDL/spotify-downloader/releases/latest"
-_SPOTDL_FALLBACK = "https://github.com/spotDL/spotify-downloader/releases/download/v4.5.2/spotdl-4.5.2-win32.exe"
-
-def _spotdl_asset_url() -> str:
-    """Neueste Windows-Exe aus der GitHub-Release-API, sonst gepinnte Version."""
-    try:
-        req = _urllib_req.Request(_SPOTDL_API, headers={"User-Agent": "SynthiMIX"})
-        with _urllib_req.urlopen(req, timeout=10) as r:
-            data = json.loads(r.read().decode("utf-8", errors="replace"))
-        for a in data.get("assets", []):
-            if a.get("name", "").lower().endswith("-win32.exe"):
-                return a["browser_download_url"]
-    except Exception:
-        pass
-    return _SPOTDL_FALLBACK
-
-def _spotdl_latest_tag() -> str:
-    try:
-        req = _urllib_req.Request(_SPOTDL_API, headers={"User-Agent": "SynthiMIX"})
-        with _urllib_req.urlopen(req, timeout=15) as r:
-            return json.loads(r.read().decode("utf-8", errors="replace")).get("tag_name", "")
-    except Exception:
-        return ""
-
-def _spotify_download_active() -> bool:
-    return any(d.get("status") == "active" and d.get("session_label") == "Spotify"
-               for d in _state.get("downloads", []))
-
-async def _install_spotdl(ws):
-    async def _send(t, **kw):
-        if ws is None:                       # automatische Aktualisierung
-            if kw.get("text"):
-                print(f"[spotdl] {kw['text']}", flush=True)
-            return
-        try: await ws.send_text(json.dumps({"type": t, **kw}))
-        except Exception: pass
-
-    # Unter Windows laesst sich die Exe nicht ersetzen, solange sie laeuft
-    if _spotify_download_active():
-        await _send("spotdl_install_error",
-                    text="Erst nach dem laufenden Spotify-Download aktualisieren")
-        return
-    await _send("spotdl_install_progress", text="Suche Download…")
-    loop = asyncio.get_running_loop()
-    last_pct = -1
-
-    def _on_block(done_blocks, block_size, total):
-        nonlocal last_pct
-        if total <= 0:
-            return
-        pct = min(100, int(done_blocks * block_size * 100 / total))
-        if pct != last_pct and pct % 5 == 0:
-            last_pct = pct
-            mb = total / 1024 / 1024
-            asyncio.run_coroutine_threadsafe(
-                _send("spotdl_install_progress", text=f"Lädt… {pct}% von {mb:.0f} MB"), loop)
-
-    try:
-        url = await loop.run_in_executor(None, _spotdl_asset_url)
-
-        def _do_install():
-            tmp = core.SPOTDL_LOCAL.with_suffix(".part")
-            _urllib_req.urlretrieve(url, tmp, _on_block)
-            # Erst nach vollständigem Download an den finalen Platz — ein
-            # abgebrochener Download soll nicht als "installiert" gelten.
-            tmp.replace(core.SPOTDL_LOCAL)
-        await loop.run_in_executor(None, _do_install)
-    except Exception as e:
-        core.SPOTDL_LOCAL.with_suffix(".part").unlink(missing_ok=True)
-        await _send("spotdl_install_error", text=str(e))
-        return
-
-    # Version der neuen Datei (im Hintergrund-Thread: der erste Start entpackt ~46 MB)
-    version = await asyncio.get_running_loop().run_in_executor(None, _spotdl_version_sync)
-    tu = _state.setdefault("tool_updates", {})
-    alt = tu.get("spotdl") or {}
-    tu["spotdl"] = {"current": version or "", "latest": alt.get("latest", ""),
-                    "available": _is_newer(alt.get("latest", ""), version or "")}
-    store.save_settings()
-    await core.broadcast({"type": "tool_updates", "items": tu})
-    await _send("spotdl_install_done", version=version)
 
 _FFMPEG_API   = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest"
 _FFMPEG_ASSET = "ffmpeg-master-latest-win64-gpl.zip"
@@ -440,12 +303,12 @@ def _is_newer(latest: str, current: str) -> bool:
     return bool(a) and bool(b) and a > b
 
 async def _tools_check_once(force: bool = False):
-    """yt-dlp und spotdl mit dem neuesten Release auf GitHub vergleichen.
+    """yt-dlp mit dem neuesten Release auf GitHub vergleichen, ffmpeg nach Alter.
 
-    Bisher lief die Pruefung nur fuer yt-dlp und nur mit eingeschalteter
-    Automatik — und sagte nie etwas. spotdl wurde gar nicht geprueft, obwohl
-    die Exe ihr eigenes yt-dlp mitbringt, das genauso altert. Jetzt landet das
-    Ergebnis in tool_updates; die App zeigt daraus einen Hinweis.
+    Bisher lief die Pruefung nur mit eingeschalteter Automatik — und sagte nie
+    etwas. Jetzt landet das Ergebnis in tool_updates; die App zeigt daraus
+    einen Hinweis. (spotdl gibt es seit 10/2026 nicht mehr: Spotify-Links
+    laufen ueber die eigene Suche, siehe spotify.py.)
     """
     loop = asyncio.get_running_loop()
     tu   = _state.setdefault("tool_updates", {})
@@ -471,23 +334,9 @@ async def _tools_check_once(force: bool = False):
         tu.pop("ytdlp", None)       # nicht installiert: kein alter Hinweis stehen lassen
     # Ohne Netz (neueste leer) bleibt der letzte bekannte Stand
 
-    if await loop.run_in_executor(None, _find_spotdl_cmd):
-        s_lokal   = await loop.run_in_executor(None, _spotdl_version_sync)
-        s_neueste = await loop.run_in_executor(None, _spotdl_latest_tag)
-        # "installiert" = Version nicht lesbar (Start zu langsam): nicht vergleichen
-        if s_lokal and s_lokal != "installiert" and s_neueste:
-            tu["spotdl"] = {"current": s_lokal, "latest": s_neueste.lstrip("v"),
-                            "available": _is_newer(s_neueste, s_lokal)}
-            # Nur die von SynthiMIX geladene Exe selbst ersetzen — ein per pip
-            # oder von Hand installiertes spotdl gehoert dem Nutzer.
-            if (tu["spotdl"]["available"] and _state.get("ytdlp_autoupdate", True)
-                    and core.SPOTDL_LOCAL.exists() and not _spotify_download_active()):
-                await _install_spotdl(None)
-                s_neu = await loop.run_in_executor(None, _spotdl_version_sync)
-                if s_neu and s_neu != s_lokal:
-                    tu["spotdl_updated"] = {"from": s_lokal, "to": s_neu, "at": now}
-    else:
-        tu.pop("spotdl", None)
+    # Alte Hinweise zu spotdl aus frueheren Versionen
+    tu.pop("spotdl", None)
+    tu.pop("spotdl_updated", None)
 
     try:
         await _ffmpeg_check(tu, now, force=force)

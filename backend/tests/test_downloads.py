@@ -115,6 +115,20 @@ class UrlTest(BackendTest):
         arg = cmd[cmd.index("--postprocessor-args") + 1]
         self.assertTrue(arg.startswith("ExtractAudio+ffmpeg_o:-af loudnorm="), arg)
 
+    def test_dateiname_ohne_na_wenn_der_kuenstler_fehlt(self):
+        # "%(artist)s - %(title)s" ergab bei Videos ohne Kuenstler "NA - Titel":
+        # der Vorsatz steht jetzt nur da, wenn es ihn gibt
+        alt = main._state.get("dl_filename_format", "title")
+        try:
+            for fmt, feld in (("artist_title", "artist"), ("uploader_title", "uploader")):
+                main._state["dl_filename_format"] = fmt
+                cmd = main._ytdlp_cmd("https://www.youtube.com/watch?v=ABC", "mp3-best", str(self.tmp))
+                tmpl = cmd[cmd.index("-o") + 1]
+                self.assertTrue(tmpl.endswith("%(" + feld + "&{} - |)s%(title)s.%(ext)s"), tmpl)
+                self.assertNotIn("%(" + feld + ")s", tmpl)
+        finally:
+            main._state["dl_filename_format"] = alt
+
     def test_loudnorm_standardmaessig_aus(self):
         main.SETTINGS_FILE.write_text("{}", "utf-8")
         alt = main._state.get("loudnorm_on_dl", False)

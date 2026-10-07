@@ -1,8 +1,6 @@
-"""Dienste: Testergebnis ueber Neustart/Update, spotdl-Status bei langsamem Start."""
-import subprocess
-
+"""Dienste: Testergebnis ueber Neustart/Update."""
 from tests.support import BackendTest, main
-from synthimix import store, tools, core
+from synthimix import store, core
 
 
 class ServiceTestsRemembered(BackendTest):
@@ -90,40 +88,3 @@ class ServiceCheckOnStart(BackendTest):
         self.run_async(self.tags._check_services_on_start())
         self.assertFalse(self.sent[0]["lastfm"]["ok"])
         self.assertNotIn("lastfm", store.known_service_tests())
-
-
-class SpotdlStatus(BackendTest):
-
-    def test_langsamer_start_gilt_trotzdem_als_installiert(self):
-        exe = self.tmp / "spotdl.exe"
-        exe.write_bytes(b"MZ" + b"\0" * 100)
-        keep_local, keep_run = core.SPOTDL_LOCAL, tools.subprocess.run
-        core.SPOTDL_LOCAL = exe
-        tools._spotdl_ver_cache.clear()
-        def slow(*a, **kw):
-            raise subprocess.TimeoutExpired(a[0], kw.get("timeout", 0))
-        tools.subprocess.run = slow
-        try:
-            self.assertEqual(tools._spotdl_version_sync(), "installiert")
-        finally:
-            core.SPOTDL_LOCAL, tools.subprocess.run = keep_local, keep_run
-
-    def test_version_wird_gemerkt(self):
-        exe = self.tmp / "spotdl.exe"
-        exe.write_bytes(b"MZ" + b"\0" * 100)
-        keep_local, keep_run = core.SPOTDL_LOCAL, tools.subprocess.run
-        core.SPOTDL_LOCAL = exe
-        tools._spotdl_ver_cache.clear()
-        calls = []
-        class R:
-            stdout, stderr, returncode = "4.2.11\n", "", 0
-        def fake(*a, **kw):
-            calls.append(1)
-            return R()
-        tools.subprocess.run = fake
-        try:
-            self.assertEqual(tools._spotdl_version_sync(), "4.2.11")
-            self.assertEqual(tools._spotdl_version_sync(), "4.2.11")
-            self.assertEqual(len(calls), 1)
-        finally:
-            core.SPOTDL_LOCAL, tools.subprocess.run = keep_local, keep_run

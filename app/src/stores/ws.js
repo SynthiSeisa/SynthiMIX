@@ -60,7 +60,7 @@ export const automixStatus = writable('')
 export const autoMixEnabled = writable(true)
 export const normalizeProgress = writable(null)
 export const dlHistory = writable([])
-export const toolsInfo = writable({ ytdlp_version: null, ffmpeg_version: null, spotdl_version: null })
+export const toolsInfo = writable({ ytdlp_version: null, ffmpeg_version: null })
 export const spotifyClientId     = writable('')
 export const spotifyClientSecret = writable('')
 export const lastfmApiKey        = writable('')
@@ -90,7 +90,7 @@ export const ytdlpAutoupdate     = writable(true)
 export const watchedFolders      = writable([])   // [{path, exists, tracks, inside}]
 export const watchedFolderImpact = writable(null) // {folder, tracks} — Antwort auf dry_run
 export const excludedFolders     = writable([])   // aus der Bibliothek ausgeschlossene Ordner
-// Ergebnis der taeglichen Pruefung: { ytdlp: {latest, available}, spotdl: {current, latest, available},
+// Ergebnis der taeglichen Pruefung: { ytdlp: {latest, available},
 // ytdlp_updated: {from, to, at} } — daraus kommen Punkt am Zahnrad und Hinweise
 export const toolUpdates         = writable({})
 // Playlist-Kaestchen vor dem Laden: Warteliste fertiger Pruefungen
@@ -137,9 +137,6 @@ export const setupOpen           = writable(false)  // Einrichtungs-Assistent   
 export const qualityScan         = writable(null)   // null | {done, total}
 export const qualityCandidates   = writable(null)   // {path, query, results, final}
 export const qualityReplace      = writable({})     // {[path]: {state, text}}
-export const spotdlInstalling    = writable(false)
-export const spotdlInstallText   = writable(null)   // Fortschrittstext während des Downloads
-export const spotdlInstallError  = writable(null)
 export const updateProgress = writable(null)
 export const loudnormOnDl = writable(false)
 export const loudnormTarget = writable(-10)
@@ -151,6 +148,17 @@ export const analyzeProgress    = writable(null)  // null | { done, total }
 export const livePositionMs     = writable(0)      // live-updated aus Player.svelte (nicht vom Backend)
 export const skipNextCrossfade  = writable(false)  // set true before any user-initiated play_at/play_now
 export const playlistContent = writable({})   // { [path]: track[] }
+// DJ-Set: Lautheit einer Playlist pruefen — { path, name, tracks, measuring, loading, error } oder null
+export const setLoudness = writable(null)
+// Ergebnis des letzten Einlesens einer Playlist-Datei (rekordbox .m3u8): { ok, path, name, total, missing_n, … }
+export const playlistImported = writable(null)
+export function openSetLoudness(pl) {
+  setLoudness.set({ path: pl.path, name: pl.name, tracks: [], measuring: 0, loading: true })
+  send({ type: 'playlist_loudness', path: pl.path })
+}
+export function importPlaylistFile(path) {
+  if (path) send({ type: 'playlist_import', path })
+}
 export const playlistRenamed = writable(null) // Antwort auf rename_playlist / follow_rename
 export const selectionOwner  = writable('')   // '' | 'library' | 'queue' — only one panel may have a selection at a time
 export const notes           = writable('')   // free-text scratchpad, persisted on the backend
@@ -412,7 +420,40 @@ function connect() {
       case 'automix_status': automixStatus.set(msg.text ?? ''); break
       case 'history': dlHistory.set(msg.items ?? []); break
       case 'normalize_progress': normalizeProgress.set(msg); break
-      case 'normalize_done': normalizeProgress.set(null); break
+      case 'playlist_loudness':
+        setLoudness.update(s => s && s.path === msg.path
+          ? { ...s, tracks: msg.tracks ?? [], measuring: msg.measuring ?? 0, loading: false, error: msg.error ?? null } : s)
+        break
+      case 'playlist_loudness_one':
+        setLoudness.update(s => s && s.path === msg.path
+          ? { ...s, measuring: Math.max(0, s.measuring - 1),
+              tracks: s.tracks.map(t => t.path === msg.track ? { ...t, lufs: msg.lufs } : t) } : s)
+        break
+      case 'playlist_loudness_done':
+        setLoudness.update(s => s && s.path === msg.path ? { ...s, measuring: 0 } : s)
+        break
+      case 'playlist_imported':
+        playlistImported.set(msg)
+        if (msg.ok) {
+          scanStatus.set(`Playlist „${msg.name}“ eingelesen: ${msg.total} Titel` + (msg.missing_n ? `, ${msg.missing_n} nicht gefunden` : ''))
+          setTimeout(() => scanStatus.set(''), 12000)
+        }
+        break
+      case 'playlist_exported':
+        if (msg.ok) {
+          scanStatus.set(`Für rekordbox gespeichert: ${msg.total} Titel — in rekordbox: Datei → Importieren → Playlist importieren`)
+          window.electron?.openPath?.(msg.path)
+        } else scanStatus.set(msg.error ?? 'Ausgabe fehlgeschlagen')
+        setTimeout(() => scanStatus.set(''), 15000)
+        break
+      case 'normalize_done':
+        normalizeProgress.set(null)
+        // Offene Set-Pruefung: die neuen Werte zeigen
+        { const s = get(setLoudness); if (s) { playlistContent.update(m => { const c = { ...m }; delete c[s.path]; return c }); send({ type: 'playlist_loudness', path: s.path }) } }
+        scanStatus.set(`Lautstärke angeglichen: ${msg.normalized ?? 0} geändert` + (msg.skipped ? `, ${msg.skipped} passten schon` : '')
+          + (msg.errors ? `, ${msg.errors} fehlgeschlagen` : '') + (msg.cancelled ? ' — abgebrochen' : ''))
+        setTimeout(() => scanStatus.set(''), 12000)
+        break
       // Zusammenfuehren statt ersetzen: das taegliche yt-dlp-Update und die
       // fpcalc-Installation schicken nur ihr eigenes Feld — die anderen
       // Versionen standen danach als "fehlt" in den Einstellungen.
@@ -502,9 +543,6 @@ function connect() {
       case 'genre_suggestions':       genreState.update(s => ({ ...s, busy: false, progress: null, suggestions: msg })); break
       case 'genre_apply_progress':    genreState.update(s => ({ ...s, applying: { done: msg.done, total: msg.total } })); break
       case 'genre_applied':           genreState.update(s => ({ ...s, applying: null, applied: msg })); break
-      case 'spotdl_install_progress': spotdlInstalling.set(true);  spotdlInstallError.set(null); spotdlInstallText.set(msg.text ?? null); break
-      case 'spotdl_install_done':     spotdlInstalling.set(false); spotdlInstallText.set(null); if (msg.version) toolsInfo.update(t => ({ ...t, spotdl_version: msg.version })); break
-      case 'spotdl_install_error':    spotdlInstalling.set(false); spotdlInstallText.set(null); spotdlInstallError.set(msg.text ?? 'Fehler'); break
     }
   }
 }

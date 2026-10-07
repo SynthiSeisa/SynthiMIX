@@ -1,6 +1,6 @@
 <script>
   import { onMount, untrack, tick } from 'svelte'
-  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, playlistRenamed, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected, qualityScan, revealPath, excludedFolders, watchedFolders, downloadDir, startQualityBatch, startVideoScan } from '../stores/ws.js'
+  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, playlistRenamed, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected, qualityScan, revealPath, excludedFolders, watchedFolders, downloadDir, startQualityBatch, startVideoScan, playlistImported, openSetLoudness, importPlaylistFile } from '../stores/ws.js'
   import BetterVersionDialog from './BetterVersionDialog.svelte'
   import { keySortValue } from '../lib/keys.js'
   import { startFileDrag, ownDrag, hasFiles, droppedPaths } from '../lib/fileDrag.js'
@@ -428,6 +428,38 @@
     }
     selectNav('playlist:' + pl.path)
   }
+
+  // ── DJ-Set mit rekordbox austauschen ──────────────────────────────────────
+  // Einlesen: rekordbox → Rechtsklick auf die Playlist → "Playlist exportieren" (.m3u8)
+  const isPlaylistFile = (p) => /\.m3u8?$/i.test(p ?? '')
+  let plImportDrag = $state(false)
+  async function pickPlaylistFile() {
+    const p = await window.electron?.pickFile?.({ title: 'Playlist aus rekordbox einlesen (.m3u8)',
+                                                  filters: [{ name: 'Playlist', extensions: ['m3u8', 'm3u'] }] })
+    importPlaylistFile(p)
+  }
+  function dropPlaylistFile(e) {
+    plImportDrag = false
+    if (!hasFiles(e)) return
+    const files = droppedPaths(e).filter(isPlaylistFile)
+    if (!files.length) return
+    e.preventDefault(); e.stopPropagation()
+    files.forEach(importPlaylistFile)
+  }
+  // Nach dem Einlesen: die Playlist zeigen und gleich die Lautheit pruefen
+  $effect(() => {
+    const r = $playlistImported
+    if (!r) return
+    untrack(() => {
+      playlistImported.set(null)
+      if (!r.ok) { plImportError = r; return }
+      secPlaylistOpen = true
+      openPlaylistInLibrary({ path: r.path, name: r.name })
+      openSetLoudness({ path: r.path, name: r.name })
+      if (r.missing_n) plImportError = r
+    })
+  })
+  let plImportError = $state(null)   // { ok, error?, name?, missing, missing_n }
 
   function loadPlaylistToQueue(path) {
     send({ type: 'load_playlist', path })
@@ -1423,8 +1455,18 @@
     normDlg = { paths, lufs: $appSettings.targetLUFS ?? -10 }
     closeCtx()
   }
+  // Ganzer Ordner (Rechtsklick): alle Titel auf dieselbe Lautstaerke, z. B. fuer rekordbox
+  function openNormalizeFolder(recursive) {
+    const fp = folderCtx?.path
+    folderCtx = null
+    if (!fp) return
+    const paths = tracksInFolder(fp, recursive).filter(t => !t.missing).map(t => t.path)
+    if (paths.length) normDlg = { paths, lufs: $appSettings.targetLUFS ?? -10, folder: fp.split(/[\\/]/).filter(Boolean).pop() ?? fp, recursive }
+    else { scanStatus.set('Keine Titel in diesem Ordner'); setTimeout(() => scanStatus.set(''), 4000) }
+  }
   function runNormalize() {
-    send({ type: 'normalize_files', paths: normDlg.paths, target_lufs: normDlg.lufs, target_tp: -1.5 })
+    // Was hoechstens 0,5 dB abweicht, bleibt unberuehrt; Originale in den Papierkorb
+    send({ type: 'normalize_files', paths: normDlg.paths, target_lufs: normDlg.lufs, target_tp: -1.5, skip_tol: 0.5, trash: true })
     normDlg = null
   }
 
@@ -1682,13 +1724,19 @@
     {/if}
 
     <!-- 3. PLAYLISTEN -->
-    <div class="t-sec-hdr" role="button" tabindex="0"
+    <div class="t-sec-hdr" class:pl-drop-hover={plImportDrag} role="button" tabindex="0"
          onclick={() => toggleSection('playlist')}
-         onkeydown={(e) => e.key === 'Enter' && toggleSection('playlist')}>
+         onkeydown={(e) => e.key === 'Enter' && toggleSection('playlist')}
+         ondragover={(e) => { if (hasFiles(e)) { e.preventDefault(); plImportDrag = true } }}
+         ondragleave={() => plImportDrag = false}
+         ondrop={dropPlaylistFile}>
       <i class="ti ti-chevron-right t-chevron" class:open={secPlaylistOpen} aria-hidden="true"></i>
       <i class="ti ti-list t-sec-ico" aria-hidden="true"></i>
       <span class="t-sec-label">Playlisten</span>
       <span class="t-count">{zahl(filteredPlaylists.length, $playlists.length)}</span>
+      <span class="row-act" title="Playlist aus rekordbox einlesen (.m3u8) — in rekordbox: Rechtsklick auf die Playlist → Playlist exportieren. Die Datei lässt sich auch hierher ziehen." aria-label="Playlist aus rekordbox einlesen" role="button" tabindex="0"
+            onclick={(e) => { e.stopPropagation(); pickPlaylistFile() }}
+            onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), pickPlaylistFile())}><i class="ti ti-playlist-add"></i></span>
       <span class="row-act" title="Queue als Playlist speichern" aria-label="Queue als Playlist speichern" role="button" tabindex="0"
             onclick={(e) => { e.stopPropagation(); saveQueueAsPlaylist() }}
             onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), saveQueueAsPlaylist())}><i class="ti ti-plus"></i></span>
@@ -1987,7 +2035,8 @@
     {/if}
     {#if $normalizeProgress}
       <div class="norm-progress">
-        Normalisierung: {$normalizeProgress.done}/{$normalizeProgress.total} — {$normalizeProgress.current}
+        Lautstärke angleichen: {$normalizeProgress.done}/{$normalizeProgress.total}{$normalizeProgress.skipped ? ` · ${$normalizeProgress.skipped} passten schon` : ''}{$normalizeProgress.current ? ` — ${$normalizeProgress.current}` : ''}
+        <button class="btn btn-sm btn-ghost" onclick={() => send({ type: 'normalize_cancel' })}>Abbrechen</button>
       </div>
     {/if}
 
@@ -2202,11 +2251,26 @@
   <TitleDialog paths={fpPaths} mode="fingerprint" onclose={() => fpPaths = null} />
 {/if}
 
+{#if plImportError}
+  <div class="dlg-overlay" onclick={() => plImportError = null} role="presentation">
+    <div class="dlg" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Playlist einlesen" style="width:520px">
+      <div class="dlg-title">{plImportError.ok ? `„${plImportError.name}“: ${plImportError.missing_n} Titel nicht gefunden` : 'Playlist nicht eingelesen'}</div>
+      <div class="dlg-hint">{plImportError.ok ? 'Diese Dateien gibt es unter dem Pfad aus rekordbox nicht (verschoben, umbenannt oder Platte nicht angeschlossen). Sie fehlen in der Playlist:' : plImportError.error}</div>
+      {#if plImportError.missing?.length}
+        <ul class="pl-missing">{#each plImportError.missing as m}<li title={m}>{m}</li>{/each}</ul>
+      {/if}
+      <div class="dlg-actions">
+        <button class="btn btn-primary" onclick={() => plImportError = null}>OK</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 {#if normDlg}
   <div class="dlg-overlay" onclick={() => normDlg = null} role="presentation">
     <div class="dlg" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Normalisieren" style="width:420px">
-      <div class="dlg-title">{normDlg.paths.length === 1 ? 'Datei' : `${normDlg.paths.length} Dateien`} normalisieren</div>
-      <div class="dlg-hint">Bringt die Lautheit dauerhaft auf den Zielwert — die Dateien werden dabei neu geschrieben. Für die Wiedergabe reicht meist die Lautstärke-Angleichung in den Einstellungen.</div>
+      <div class="dlg-title">{normDlg.folder ? `„${normDlg.folder}“${normDlg.recursive ? ' mit Unterordnern' : ''}: ${normDlg.paths.length} Titel gleich laut machen` : (normDlg.paths.length === 1 ? 'Datei' : `${normDlg.paths.length} Dateien`) + ' normalisieren'}</div>
+      <div class="dlg-hint">Bringt die Lautheit dauerhaft auf den Zielwert — die Dateien werden dabei neu geschrieben (gleiches Format und Bitrate, alle Tags, Cue-Punkte und Cover bleiben, die Länge auch). Titel, die höchstens 0,5 dB abweichen, bleiben unberührt. Die Originale kommen in den Papierkorb. Für die Wiedergabe in SynthiMIX reicht die Lautstärke-Angleichung in den Einstellungen — das hier ist für andere Programme wie rekordbox.</div>
       <label class="dlg-field">Ziel: <b>{normDlg.lufs} LUFS</b>
         <input type="range" min="-18" max="-5" step="1" bind:value={normDlg.lufs} />
       </label>
@@ -2415,6 +2479,9 @@
     <button onclick={() => analyzeFolder(false)}>Analysieren — nur dieser Ordner</button>
     <button onclick={() => analyzeFolder(true)}>Analysieren — mit Unterordnern</button>
     <button onclick={scanFolderDupes}>Auf Duplikate scannen</button>
+    <button onclick={() => openNormalizeFolder(false)}
+            title="Alle Titel dieses Ordners dauerhaft auf dieselbe Lautstärke bringen (z. B. für rekordbox) — Zielwert wählbar, passende Titel bleiben unberührt, Originale in den Papierkorb">Lautstärke angleichen — nur dieser Ordner</button>
+    <button onclick={() => openNormalizeFolder(true)} title="Wie oben, mit allen Unterordnern">Lautstärke angleichen — mit Unterordnern</button>
     <button onclick={() => { startVideoScan(folderCtx.path, false); folderCtx = null }}
             title="Sucht in diesem Ordner Titel, die nach Musikvideo heißen („Official Video“), und schlägt je Titel die Song-Fassung vor — erst prüfen, dann ersetzen">Musikvideos ersetzen — nur dieser Ordner</button>
     <button onclick={() => { startVideoScan(folderCtx.path, true); folderCtx = null }}
@@ -2461,6 +2528,11 @@
       showPlDupeScan = true
       playlistCtx = null
     }}>Auf Duplikate scannen</button>
+    <div class="ctx-sep"></div>
+    <button title="Welche Titel sind gegenüber dem Rest des Sets zu leise oder zu laut? Ausreißer lassen sich dauerhaft angleichen."
+            onclick={() => { openSetLoudness({ path: playlistCtx.path, name: playlistCtx.name }); playlistCtx = null }}>Lautstärke im Set prüfen…</button>
+    <button title="Schreibt die Playlist als .m3u8 — in rekordbox: Datei → Importieren → Playlist importieren"
+            onclick={() => { send({ type: 'playlist_export', path: playlistCtx.path }); playlistCtx = null }}>Für rekordbox ausgeben (.m3u8)</button>
     <div class="ctx-sep"></div>
     <button onclick={() => { loadPlaylistToQueue(playlistCtx.path); playlistCtx = null }}>In Queue laden</button>
     <button onclick={() => { const pl = $playlists.find(p => p.path === playlistCtx.path); if (pl) startPlRename(pl); playlistCtx = null }}>Umbenennen</button>
@@ -2582,6 +2654,8 @@
 
   .t-empty { padding: var(--sp-1) var(--sp-3); font-size: var(--fs-sm); color: var(--c-tx5); font-style: italic; }
   .pl-drop-hover { background: var(--c-green-bg) !important; box-shadow: inset 0 0 0 1px var(--c-green-br); }
+  .pl-missing { margin: 0; padding-left: 18px; max-height: 180px; overflow-y: auto; font-size: var(--fs-sm); color: var(--c-tx3); }
+  .pl-missing li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* Favoriten */
   .fav-wrap { position: relative; }

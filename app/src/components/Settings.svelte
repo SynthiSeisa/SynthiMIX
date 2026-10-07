@@ -10,7 +10,6 @@
            spotifyClientId, spotifyClientSecret,
            lastfmApiKey, acoustidApiKey,
            fpcalcInstalling, fpcalcInstallError,
-           spotdlInstalling, spotdlInstallError, spotdlInstallText,
            watchedFolders, watchedFolderImpact, ytdlpAutoupdate, excludedFolders, toolUpdates, servicesTest, setupOpen, changelog, followed, followedChannels, followTracks, playlistRenamed, dlParallel, relocateState } from '../stores/ws.js'
   import { infoHints } from '../lib/infohints.js'
 
@@ -98,10 +97,9 @@
     return {
       ytdlp: $updateProgress && $updateProgress.tool !== 'ffmpeg' ? { cls: 'busy', text: 'Wird aktualisiert…' } : tool($toolsInfo.ytdlp_version, $toolUpdates.ytdlp),
       ffmpeg: $updateProgress?.tool === 'ffmpeg' ? { cls: 'busy', text: 'Wird aktualisiert…' } : tool($toolsInfo.ffmpeg_version, $toolUpdates.ffmpeg),
-      spotify: $spotdlInstalling ? { cls: 'busy', text: 'Wird installiert…' }
-        : !$toolsInfo.spotdl_version ? { cls: 'off', text: 'Nicht installiert' }
-        : $toolUpdates.spotdl?.available ? { cls: 'busy', text: 'Update verfügbar' }
-        : { cls: 'ok', text: 'Bereit' },
+      // Spotify-Links brauchen nichts; die Zugangsdaten sind nur fuer die Genre-Abfrage
+      spotify: !($spotifyClientId && $spotifyClientSecret) ? { cls: 'off', text: 'Nicht eingerichtet' }
+        : res(t.spotify, { cls: 'ok', text: 'Eingetragen' }),
       lastfm: !$lastfmApiKey ? { cls: 'off', text: 'Nicht eingerichtet' } : res(t.lastfm, { cls: 'ok', text: 'Key eingetragen' }),
       acoustid: !$toolsInfo.fpcalc_found ? { cls: 'off', text: 'fpcalc fehlt' }
         : !$acoustidApiKey ? { cls: 'off', text: 'Key fehlt' } : res(t.acoustid, { cls: 'ok', text: 'Bereit' }),
@@ -202,7 +200,7 @@
       // Programme stehen als Karten unter Dienste: die mit dem Update gleich aufklappen
       if (tab === 'services') {
         const u = untrack(() => $toolUpdates)
-        svcOpen = u.ytdlp?.available ? 'ytdlp' : u.ffmpeg?.available ? 'ffmpeg' : u.spotdl?.available ? 'spotify' : svcOpen
+        svcOpen = u.ytdlp?.available ? 'ytdlp' : u.ffmpeg?.available ? 'ffmpeg' : svcOpen
       }
       // Kommt man ueber den Update-Punkt am Zahnrad, gleich zum Hinweis scrollen
       setTimeout(() => document.querySelector('.upd-note, [data-upd]')
@@ -225,9 +223,9 @@
 
   // Tabs mit offenem Update-Hinweis bekommen einen Punkt
   const tabNotice = $derived({
-    // Programme (yt-dlp, ffmpeg, spotdl) stehen alle unter Dienste
-    services: !!($toolUpdates.ytdlp?.available || $toolUpdates.ytdlp_updated || $toolUpdates.spotdl_updated
-                  || $toolUpdates.ffmpeg?.available || $toolUpdates.ffmpeg_updated || $toolUpdates.spotdl?.available),
+    // Programme (yt-dlp, ffmpeg) stehen alle unter Dienste
+    services: !!($toolUpdates.ytdlp?.available || $toolUpdates.ytdlp_updated
+                  || $toolUpdates.ffmpeg?.available || $toolUpdates.ffmpeg_updated),
   })
   let toolCheckRunning = $state(false)
   function checkToolUpdates() {
@@ -1056,30 +1054,13 @@
             <div class="svc" class:open={svcOpen === 'spotify'}>
               <button class="svc-head" onclick={() => toggleCard('spotify')} aria-expanded={svcOpen === 'spotify'}>
                 <i class="ti ti-brand-spotify svc-ico" aria-hidden="true"></i>
-                <span class="svc-name">Spotify-Links laden<span class="svc-sub">spotdl · lädt die Titel über YouTube Music</span></span>
+                <span class="svc-name">Spotify<span class="svc-sub">Genres · Spotify-Links laden auch ohne Zugangsdaten</span></span>
                 <span class="svc-state {svcState.spotify.cls}">{svcState.spotify.text}</span>
                 <i class="ti ti-chevron-down svc-chev" aria-hidden="true"></i>
               </button>
               {#if svcOpen === 'spotify'}
                 <div class="svc-body">
-                  <div class="row">
-                    <span class="lbl">Programm spotdl</span>
-                    {#if $spotdlInstalling}
-                      <span class="val st-busy">{$spotdlInstallText ?? 'Wird installiert…'}</span>
-                    {:else if $toolsInfo.spotdl_version}
-                      <span class="val st-ok">v{$toolsInfo.spotdl_version}</span>
-                      {#if $toolUpdates.spotdl?.available}
-                        <button class="btn btn-sm btn-primary" data-upd onclick={() => send({ type: 'install_spotdl' })}
-                                title="Lädt die neue Version (~46 MB) und ersetzt die alte erst, wenn der Download vollständig ist">
-                          Auf {$toolUpdates.spotdl.latest} aktualisieren
-                        </button>
-                      {/if}
-                    {:else}
-                      <button class="btn btn-sm btn-primary" onclick={() => send({ type: 'install_spotdl' })}
-                              title="Lädt spotdl einmalig als eigenständiges Programm (~46 MB); Python ist nicht nötig">Installieren</button>
-                    {/if}
-                  </div>
-                  {#if $spotdlInstallError}<div class="svc-note err">{$spotdlInstallError}</div>{/if}
+                  <div class="svc-note">Spotify-Links (Titel, Album, Playlist) einfach bei den Downloads einfügen — SynthiMIX liest die Titelliste und lädt die Songs über YouTube Music. Dafür ist hier nichts einzurichten.</div>
                   <div class="row">
                     <span class="lbl">Client-ID <span class="opt">optional</span></span>
                     <input class="field field-sm" type="text" bind:value={spotifyCidEdit} onchange={saveSpotifyCreds} />
@@ -1088,7 +1069,7 @@
                     <span class="lbl">Client-Secret <span class="opt">optional</span></span>
                     <input class="field field-sm" type="password" bind:value={spotifyCsecEdit} onchange={saveSpotifyCreds} />
                   </div>
-                  <div class="svc-note">Client-ID und Secret (developer.spotify.com) erlauben mehr Anfragen — nur bei sehr vielen Spotify-Links nötig.</div>
+                  <div class="svc-note">Client-ID und Secret (developer.spotify.com) braucht nur die Genre-Abfrage über Spotify.</div>
                   {#if $servicesTest?.spotify}<div class="svc-note {$servicesTest.spotify.ok ? 'ok' : 'err'}">{$servicesTest.spotify.ok ? '✓' : '✗'} {$servicesTest.spotify.text}</div>{/if}
                 </div>
               {/if}
@@ -1157,19 +1138,18 @@
           </div>
 
           <div class="group svc-auto">
-            {#if $toolUpdates.ytdlp_updated || $toolUpdates.spotdl_updated || $toolUpdates.ffmpeg_updated}
+            {#if $toolUpdates.ytdlp_updated || $toolUpdates.ffmpeg_updated}
               <div class="notice ok upd-note">
                 Automatisch aktualisiert:
                 {[$toolUpdates.ytdlp_updated && `yt-dlp ${$toolUpdates.ytdlp_updated.from} → ${$toolUpdates.ytdlp_updated.to}`,
-                  $toolUpdates.spotdl_updated && `spotdl ${$toolUpdates.spotdl_updated.from} → ${$toolUpdates.spotdl_updated.to}`,
                   $toolUpdates.ffmpeg_updated && `ffmpeg ${fmtBuild($toolUpdates.ffmpeg_updated.from)} → ${fmtBuild($toolUpdates.ffmpeg_updated.to)}`]
                   .filter(Boolean).join(' · ')}
                 <button class="btn btn-sm" onclick={() => send({ type: 'dismiss_ytdlp_updated' })}>OK</button>
               </div>
             {/if}
             <div class="row">
-              <span class="lbl">yt-dlp, spotdl und ffmpeg automatisch aktuell halten</span>
-              <button class="tog {$ytdlpAutoupdate ? 'on' : ''}" aria-label="yt-dlp, spotdl und ffmpeg automatisch aktuell halten"
+              <span class="lbl">yt-dlp und ffmpeg automatisch aktuell halten</span>
+              <button class="tog {$ytdlpAutoupdate ? 'on' : ''}" aria-label="yt-dlp und ffmpeg automatisch aktuell halten"
                 onclick={() => send({ type: 'set_ytdlp_autoupdate', value: !$ytdlpAutoupdate })}></button>
             </div>
             <div class="row">

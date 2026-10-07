@@ -1,4 +1,4 @@
-"""Automatisches Aktualisieren von ffmpeg und spotdl."""
+"""Automatisches Aktualisieren von ffmpeg."""
 import os
 import shutil
 import zipfile

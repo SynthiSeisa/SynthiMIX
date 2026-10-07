@@ -13,13 +13,11 @@
   // Nur ein Punkt am Zahnrad — beim Auflegen soll kein Fenster aufgehen.
   // Der Klick fuehrt direkt auf den Tab, in dem der Hinweis steht.
   const updTab = $derived(
-    $toolUpdates.ytdlp?.available || $toolUpdates.ffmpeg?.available || $toolUpdates.spotdl?.available
-    || $toolUpdates.ytdlp_updated || $toolUpdates.spotdl_updated || $toolUpdates.ffmpeg_updated ? 'services' : null)
+    $toolUpdates.ytdlp?.available || $toolUpdates.ffmpeg?.available
+    || $toolUpdates.ytdlp_updated || $toolUpdates.ffmpeg_updated ? 'services' : null)
   const updTitle = $derived(
     $toolUpdates.ytdlp?.available ? `Neue yt-dlp-Version ${$toolUpdates.ytdlp.latest}`
-    : $toolUpdates.spotdl?.available ? `Neue spotdl-Version ${$toolUpdates.spotdl.latest}`
     : $toolUpdates.ytdlp_updated ? `yt-dlp wurde auf ${$toolUpdates.ytdlp_updated.to} aktualisiert`
-    : $toolUpdates.spotdl_updated ? `spotdl wurde auf ${$toolUpdates.spotdl_updated.to} aktualisiert`
     : $toolUpdates.ffmpeg_updated ? 'ffmpeg wurde aktualisiert'
     : '')
 

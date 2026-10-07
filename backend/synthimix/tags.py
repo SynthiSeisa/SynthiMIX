@@ -637,7 +637,7 @@ async def _test_services() -> dict:
 
     cid, sec = (_state.get("spotify_client_id") or "").strip(), (_state.get("spotify_client_secret") or "").strip()
     if not (cid and sec):
-        out["spotify"] = {"ok": False, "text": "Client-ID oder Secret fehlt (Tab Download)."}
+        out["spotify"] = {"ok": False, "text": "Client-ID oder Secret fehlt."}
     else:
         ok = await loop.run_in_executor(None, _Spotify(cid, sec)._auth)
         out["spotify"] = {"ok": bool(ok), "text": "Verbunden." if ok else "Spotify lehnt Client-ID/Secret ab."}

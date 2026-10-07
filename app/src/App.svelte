@@ -27,6 +27,7 @@
   import Settings  from './components/Settings.svelte'
   import PlaylistChoiceDialog from './components/PlaylistChoiceDialog.svelte'
   import PlaylistPlanDialog from './components/PlaylistPlanDialog.svelte'
+  import SetLoudnessDialog from './components/SetLoudnessDialog.svelte'
   import ChannelPlanDialog from './components/ChannelPlanDialog.svelte'
   import VideoChoiceDialog from './components/VideoChoiceDialog.svelte'
   import DupeChoiceDialog from './components/DupeChoiceDialog.svelte'
@@ -208,6 +209,7 @@
 
   <PlaylistChoiceDialog />
   <PlaylistPlanDialog />
+  <SetLoudnessDialog />
   <ChannelPlanDialog />
   <VideoChoiceDialog />
   <DupeChoiceDialog />

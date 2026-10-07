@@ -10,7 +10,7 @@ from fastapi import WebSocket
 from pathlib import Path
 from typing import Any
 from .core import _NO_WINDOW, _state
-from . import channels, core, library, media, search, store, tools
+from . import channels, core, library, media, search, spotify, store, tools
 
 _dl_procs: dict[int, Any] = {}  # session_id → asyncio.Process oder Liste davon (Playlist parallel)
 _DL_PARALLEL = 3                  # gleichzeitige yt-dlp-Prozesse bei Playlists (Standard, einstellbar 1-6)
@@ -31,8 +31,18 @@ _FMT_MAP = {
     "opus":     ("opus", "0"),
 }
 
+# SoundCloud: ein Set (Playlist, Album, EP) — soundcloud.com/<wer>/sets/<name>.
+# Ein Titel mit "?in=<wer>/sets/…" ist ein einzelner Titel.
+_SC_SET_RE = re.compile(r"soundcloud\.com/[^/?#]+/sets/[^/?#]+", re.IGNORECASE)
+_SC_TRACK_RE = re.compile(r"soundcloud\.com/(?!sets/)([\w-]+/(?!sets\b)[\w-]+)", re.IGNORECASE)
+_YT_ID_RE = re.compile(r"(?:[?&]v=|youtu\.be/|/shorts/)([\w-]{11})")
+
+def _is_soundcloud_set(url: str) -> bool:
+    return bool(_SC_SET_RE.search(url or ""))
+
 def _is_playlist(url: str) -> bool:
-    return "list=" in url or "/playlist" in url
+    return "list=" in url or "/playlist" in url or (_is_spotify(url) and "/album/" in url) \
+        or _is_soundcloud_set(url)
 
 # Automatischer YouTube-Mix ("Mix - Kuenstler", list=RD…): YouTube verlaengert
 # ihn fast endlos (yt-dlp liefert ueber 1.000 Titel, aber keine Anzahl). Geladen
@@ -134,10 +144,12 @@ def _ytdlp_cmd(url: str, fmt_id: str, out_dir: str, playlist_folder: str | None 
     is_playlist = not is_search and _is_playlist(url)
 
     fn_fmt = _state.get("dl_filename_format", "title")
+    # Der Vorsatz nur, wenn es ihn gibt: fehlt bei einem Video der Kuenstler,
+    # schrieb yt-dlp sonst "NA - " davor ("NA - Karel Gott - Für immer Jung")
     if fn_fmt == "uploader_title":
-        name_tmpl = "%(uploader)s - %(title)s.%(ext)s"
+        name_tmpl = "%(uploader&{} - |)s%(title)s.%(ext)s"
     elif fn_fmt == "artist_title":
-        name_tmpl = "%(artist)s - %(title)s.%(ext)s"
+        name_tmpl = "%(artist&{} - |)s%(title)s.%(ext)s"
     else:
         name_tmpl = "%(title)s.%(ext)s"
 
@@ -202,8 +214,16 @@ async def _audit_playlist_for_videos(playlist_url: str, progress=None,
     der Suche nach Song-Versionen. known: Video-IDs, die nicht mehr gesucht
     werden muessen (verfolgte Playlist).
     """
+    if _is_spotify(playlist_url):
+        # Titelliste von Spotify, jeder Titel gleich als Song von YouTube Music
+        return await spotify.resolve(playlist_url, progress)
     pl_title = ""
     base_args = ["--flat-playlist", "-j", "--quiet", "--no-warnings"]
+    # SoundCloud nennt in der flachen Liste weder Titel noch Laenge — dort die
+    # volle Abfrage (gemessen: 6 Titel in 4 s)
+    soundcloud = _is_soundcloud_set(playlist_url)
+    if soundcloud:
+        base_args = ["-j", "--skip-download", "--ignore-errors", "--quiet", "--no-warnings"]
     if core.FFMPEG_DIR:
         base_args += ["--ffmpeg-location", core.FFMPEG_DIR]
     if _mix_id(playlist_url):
@@ -221,7 +241,8 @@ async def _audit_playlist_for_videos(playlist_url: str, progress=None,
         async for raw in proc.stdout:
             try:
                 item = json.loads(raw.decode("utf-8", errors="replace"))
-                raw_url = item.get("url") or item.get("webpage_url") or item.get("id", "")
+                raw_url = (item.get("webpage_url") if soundcloud else None) \
+                    or item.get("url") or item.get("webpage_url") or item.get("id", "")
                 url = search._normalise_yt_url(raw_url)
                 if not pl_title:
                     pl_title = (item.get("playlist_title") or item.get("playlist") or "").strip()
@@ -242,7 +263,9 @@ async def _audit_playlist_for_videos(playlist_url: str, progress=None,
     except Exception:
         pass
 
-    if not entries:
+    if not entries or soundcloud:
+        # SoundCloud bleibt SoundCloud: dort liegen Remixe und Bootlegs, die es
+        # als Song bei YouTube Music nicht gibt
         return entries, pl_title
 
     # Eintraege mit Video-Stichwort: Studio-Version von YouTube Music suchen.
@@ -349,146 +372,51 @@ async def _check_video_then_download(url: str, fmt: str, ws: WebSocket, check_du
         return
     core.spawn(run_download(url, fmt))
 
-async def run_spotify_download(url: str, fmt_id: str = "mp3-best"):
-    """Download a Spotify track/album/playlist via spotdl."""
+# ── Spotify ──────────────────────────────────────────────────────────────────
+# Spotify liefert nur die Titelliste; gesucht und geladen wird wie bei einer
+# YouTube-Playlist (siehe spotify.py). Vorher lief alles ueber spotdl — das
+# fand 10/2026 nichts mehr, in der Liste stand dann endlos "0 / 88".
+def _dl_failed(url: str, label: str, text: str):
+    """Einen Download, der gar nicht erst starten konnte, mit Grund anzeigen."""
     global _dl_counter
     _dl_counter += 1
-    session_id = _dl_counter
+    _state["downloads"].insert(0, {
+        "id": _dl_counter, "session": _dl_counter, "session_label": label, "title": label, "url": url,
+        "path": None, "track_n": 0, "track_total": 0, "progress": 0,
+        "status": "error", "status_text": text, "error_msg": text})
 
-    hdr: dict = {
-        "id":            session_id,
-        "session":       session_id,
-        "session_label": "Spotify",
-        "title":         "",
-        "url":           url,
-        "fmt":           fmt_id,
-        "path":          None,
-        "track_n":       0,
-        "track_total":   0,
-        "progress":      0,
-        "status":        "active",
-        "status_text":   "Verbinde mit Spotify…",
-        "error_msg":     "",
-    }
-    _state["downloads"].insert(0, hdr)
-    await core.push_downloads(force=True)
+_SPOTIFY_UNREADABLE = "Spotify-Link nicht lesbar (privat, gelöscht oder kein Netz)"
 
+async def _spotify_add(url: str, fmt: str, ws):
+    """Spotify-Link aus dem Eingabefeld: Album/Playlist geht ins Playlist-
+    Kaestchen, ein einzelner Titel wird gesucht und geladen."""
     loop = asyncio.get_running_loop()
-    spotdl_cmd = await loop.run_in_executor(None, tools._find_spotdl_cmd)
-
-    if not spotdl_cmd:
-        hdr["status"]      = "error"
-        hdr["status_text"] = "spotdl nicht gefunden"
-        hdr["error_msg"]   = "spotdl ist nicht installiert"
-        # Sagt dem Frontend, welcher Einstellungen-Tab das Problem loest
-        hdr["fix_tab"]     = "services"
+    url = await loop.run_in_executor(None, spotify._expand_sync, url)
+    p = spotify.parse(url)
+    if not p:
+        _dl_failed(url, "Spotify", "Diesen Spotify-Link kann SynthiMIX nicht laden (nur Titel, Alben, Playlists)")
         await core.push_downloads(force=True)
         return
-
-    out_dir = _state.get("download_dir", str(core.BASE_DIR / "Downloads"))
-    os.makedirs(out_dir, exist_ok=True)
-
-    fmt_map  = {"mp3-best": "mp3", "flac": "flac", "wav": "wav", "m4a": "m4a", "opus": "opus"}
-    sdl_fmt  = fmt_map.get(fmt_id, "mp3")
-    out_tmpl = str(Path(out_dir) / "{artist} - {title}.{output-ext}")
-
-    cmd = spotdl_cmd + [
-        "download", url,
-        "--output",  out_tmpl,
-        "--format",  sdl_fmt,
-        # Der Ton kommt auch bei spotdl von YouTube Music (~130-160 kbps).
-        # 320k CBR blaehte die Datei nur auf; V0 wie bei yt-dlp haelt den
-        # Verlust beim Umwandeln genauso klein.
-        "--bitrate", "0" if sdl_fmt == "mp3" else "auto",
-        "--print-errors",
-    ]
-    # Die spotdl-Standalone-Exe hat kein eigenes ffmpeg — auf das gebundelte zeigen
-    if core.FFMPEG and core.FFMPEG != "ffmpeg" and os.path.exists(core.FFMPEG):
-        cmd += ["--ffmpeg", core.FFMPEG]
-    cid  = _state.get("spotify_client_id",     "").strip()
-    csec = _state.get("spotify_client_secret",  "").strip()
-    if cid and csec:
-        cmd += ["--client-id", cid, "--client-secret", csec]
-
-    track_total = 0
-    track_done  = 0
-    error_lines: list[str] = []   # collect error/warning lines for display
-
+    url = f"https://open.spotify.com/{p[0]}/{p[1]}"          # ohne ?si=… — derselbe Link fuers Verfolgen
+    if p[0] != "track":
+        if url not in _plan_tasks:
+            await _plan_playlist(url, fmt, ws)
+        return
+    _send = core.sender(ws)
+    await _send("video_check_pending", url=url)
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            creationflags=_NO_WINDOW)
-        _dl_procs[session_id] = proc
-
-        async def _read_stderr():
-            async for raw in proc.stderr:
-                ln = raw.decode('utf-8', errors='replace').strip()
-                if ln:
-                    error_lines.append(ln)
-                    print('[spotdl err] ' + ln, flush=True)
-        core.spawn(_read_stderr())
-
-        async for raw in proc.stdout:
-            if hdr not in _state['downloads']:
-                try: proc.kill()
-                except Exception: pass
-                break
-            line = raw.decode('utf-8', errors='replace').strip()
-            if not line:
-                continue
-            print('[spotdl] ' + line, flush=True)
-            if re.search(r'error|failed|rate.?limit|unauthorized|invalid', line, re.IGNORECASE):
-                error_lines.append(line)
-            m = re.search(r'Found\s+(\d+)\s+songs?', line, re.IGNORECASE)
-            if m:
-                track_total = int(m.group(1))
-                hdr['track_total'] = track_total
-                hdr['status_text'] = str(track_total) + ' Titel gefunden…'
-                await core.push_downloads()
-                continue
-            m = re.search(r'(?:Downloaded|Skipping)\s+[““”]?([^”“”\n]+?)[““”]?(?:\s+to\s+|$)', line, re.IGNORECASE)
-            if m:
-                track_done += 1
-                title = m.group(1).strip()
-                hdr['track_n']     = track_done
-                hdr['title']       = title[:80]
-                hdr['status_text'] = title[:60]
-                hdr['progress']    = (track_done / track_total * 100) if track_total else 50
-                await core.push_downloads()
-                continue
-            m = re.search(r'Downloading\s+(\d+)\s+songs?', line, re.IGNORECASE)
-            if m and not track_total:
-                track_total = int(m.group(1))
-                hdr['track_total'] = track_total
-                await core.push_downloads()
-
-        await proc.wait()
-        _dl_procs.pop(session_id, None)
-
-        if hdr in _state['downloads']:
-            if proc.returncode == 0 or track_done > 0:
-                hdr['status']      = 'done'
-                hdr['status_text'] = '✓ ' + str(track_done) + ' Titel'
-                hdr['progress']    = 100
-                core.spawn(library.scan_folder(out_dir))
-            else:
-                err_msg = 'spotdl Fehler'
-                for ln in reversed(error_lines):
-                    clean = re.sub(r'\x1b\[[0-9;]*m', '', ln).strip()
-                    if clean and len(clean) < 120:
-                        err_msg = clean
-                        break
-                hdr['status']      = 'error'
-                hdr['status_text'] = err_msg
-            await core.push_downloads(force=True)
-    except Exception as exc:
-        _dl_procs.pop(session_id, None)
-        if hdr in _state["downloads"]:
-            hdr["status"]      = "error"
-            hdr["status_text"] = f"Fehler: {exc}"
-            await core.push_downloads(force=True)
+        entries, _ = await spotify.resolve(url)
+    except Exception:
+        entries = []
+    finally:
+        await _send("video_check_done", url=url)
+    if entries:
+        await _check_video_then_download(entries[0]["url"], fmt, ws)
+        return
+    missing = spotify.not_found.get(url) or []
+    _dl_failed(url, missing[0] if missing else "Spotify",
+               "Bei YouTube Music nicht gefunden" if missing else _SPOTIFY_UNREADABLE)
+    await core.push_downloads(force=True)
 
 
 _DL_REASON_TEXT = {
@@ -498,6 +426,7 @@ _DL_REASON_TEXT = {
     "net":   "Verbindung unterbrochen",
     "bot":   "YouTube verlangt eine Anmeldung – später nochmal",
     "age":   "Altersbeschränkt – nur mit Anmeldung",
+    "drm":   "Kopiergeschützt – nicht ladbar",
     "other": "Fehler beim Laden",
 }
 _PLACEHOLDER_TITLE_RE = re.compile(r'^\[(deleted|private|unavailable)\s+video\]$', re.I)
@@ -559,11 +488,17 @@ async def _plan_playlist(url: str, fmt: str, ws):
     finally:
         _plan_tasks.pop(url, None)
     if not entries:
-        # Pruefung ging nicht: wie frueher einfach laden
         await _send("playlist_plan_cancel", url=url)
+        if _is_spotify(url):
+            missing = spotify.not_found.get(url) or []
+            _dl_failed(url, title or "Spotify", f"Keiner der {len(missing)} Titel bei YouTube Music gefunden"
+                       if missing else _SPOTIFY_UNREADABLE)
+            await core.push_downloads(force=True)
+            return
+        # Pruefung ging nicht: wie frueher einfach laden
         core.spawn(run_download(url, fmt))
         return
-    if not title:
+    if not title and not _is_spotify(url):
         try: title = (await _playlist_probe(url)).get("playlist_title") or ""
         except Exception: title = ""
     stats = await asyncio.get_running_loop().run_in_executor(None, _plan_stats, entries)
@@ -575,7 +510,8 @@ async def _plan_playlist(url: str, fmt: str, ws):
     _plans[pid] = {"url": url, "fmt": fmt, "title": title, "entries": entries, "ts": now}
     await _send("playlist_plan", plan_id=pid, url=url, format=fmt, title=title,
                 followed=any(f["url"] == url for f in _state.get("followed", [])),
-                mix=bool(_mix_id(url)), **stats)
+                mix=bool(_mix_id(url)), not_found=(spotify.not_found.get(url) or [])[:200],
+                truncated=bool(spotify.truncated.get(url)), **stats)
 
 def _playlist_tracks(entries: list[dict], lib_idx: list) -> list[tuple]:
     """Pfade aller Titel einer Playlist in deren Reihenfolge: geladen, schon in
@@ -657,8 +593,13 @@ async def _save_as_playlist(name: str, folder: str | None, tracks: list[tuple]) 
 _follow_running: set[str] = set()
 
 def _vid_of(u: str) -> str:
-    m = re.search(r'(?:[?&]v=|youtu\.be/|/shorts/)([\w-]{11})', u or "")
-    return m.group(1) if m else ""
+    """Kennung eines Titels aus seinem Link (oder aus einer yt-dlp-Zeile, die
+    ihn nennt): die YouTube-ID, bei SoundCloud "sc:<wer>/<titel>"."""
+    m = _YT_ID_RE.search(u or "")
+    if m:
+        return m.group(1)
+    m = _SC_TRACK_RE.search(u or "")
+    return "sc:" + m.group(1).lower() if m else ""
 
 def _follow_public() -> list[dict]:
     out = []
@@ -680,21 +621,15 @@ async def _follow_check(f: dict):
     await _push_followed()
     try:
         fmt = f.get("fmt") or "mp3-best"
-        if _is_spotify(url):
-            vorher = {lt.get("path") for lt in _state["library"]}
-            await run_spotify_download(url, fmt)
-            await asyncio.sleep(2)
-            neu = [lt["path"] for lt in _state["library"] if lt.get("path") not in vorher]
-        else:
-            # Eigener Name (umbenannt): fuer die SynthiMIX-Playlist und die .m3u8
-            await run_download(url, fmt, follow=f, mode=f.get("mode") or "new", label=f.get("name") or None)
-            neu = f.pop("_new_paths", [])
-            seen = list(f.get("seen") or [])
-            seen += [v for v in f.pop("_seen_add", []) if v not in seen]
-            f["seen"] = seen[-5000:]
-            placed = list(f.get("placed") or [])
-            placed += [v for v in dict.fromkeys(f.pop("_placed_add", [])) if v not in placed]
-            f["placed"] = placed[-5000:]
+        # Eigener Name (umbenannt): fuer die SynthiMIX-Playlist und die .m3u8
+        await run_download(url, fmt, follow=f, mode=f.get("mode") or "new", label=f.get("name") or None)
+        neu = f.pop("_new_paths", [])
+        seen = list(f.get("seen") or [])
+        seen += [v for v in f.pop("_seen_add", []) if v not in seen]
+        f["seen"] = seen[-5000:]
+        placed = list(f.get("placed") or [])
+        placed += [v for v in dict.fromkeys(f.pop("_placed_add", [])) if v not in placed]
+        f["placed"] = placed[-5000:]
         f["last_check"] = int(time.time())
         f["last_new"] = len(neu)
         if neu:
@@ -791,6 +726,8 @@ def _remember_gone(vids: list[str]):
 def _dl_error_reason(msg: str) -> str:
     """yt-dlp-Fehlermeldung → Grund (Schluessel von _DL_REASON_TEXT)."""
     m = (msg or "").lower()
+    if "drm protected" in m or "drm-protected" in m:
+        return "drm"
     if ("in your country" in m or "geo restrict" in m or "geo-restrict" in m
             or "not available in your location" in m):
         return "geo"
@@ -830,7 +767,7 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
     elif url.startswith("http") and _is_playlist(url):
         # Vorlaeufige Beschriftung; den echten Namen liefert gleich die Playlist-Pruefung
         m = re.search(r'list=([^&]+)', url)
-        slabel = f"Playlist · {m.group(1)[:28]}" if m else url[:60]
+        slabel = f"Playlist · {m.group(1)[:28]}" if m else "Spotify" if _is_spotify(url) else url[:60]
     elif url.startswith("http"):
         slabel = url[:60]
     else:
@@ -957,7 +894,17 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
                 await core.push_downloads()
         entries, pl_title = await _audit_playlist_for_videos(
             url, _an_progress, known=set((follow or {}).get("seen") or []))
-        _use_playlist_title(pl_title or await _playlist_title_fallback())
+        _use_playlist_title(pl_title or ("" if _is_spotify(url) else await _playlist_title_fallback()))
+        if not entries and _is_spotify(url):
+            # yt-dlp kann mit dem Spotify-Link selbst nichts anfangen
+            hdr["status"] = "error"
+            hdr["status_text"] = hdr["error_msg"] = _SPOTIFY_UNREADABLE
+            hdr["quiet"] = False
+            if follow is not None:
+                follow["last_result"] = _SPOTIFY_UNREADABLE
+                follow["_new_paths"] = []; follow["_seen_add"] = []; follow["_placed_add"] = []
+            await core.push_downloads(force=True)
+            return None
         if entries:
             replaced_count = sum(1 for e in entries if e["replaced"])
             _audited_entries = entries  # always use per-URL mode → one flat-list total
@@ -1013,9 +960,7 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
                     await core.broadcast(store._history_payload())
             await core.push_downloads(force=True)
 
-        def _vid(u: str) -> str:
-            m = re.search(r'(?:[?&]v=|youtu\.be/|/shorts/)([\w-]{11})', u or "")
-            return m.group(1) if m else ""
+        _vid = _vid_of
 
         # Gar nicht erst laden:
         # - schon geladen (Verlauf mit guter Qualitaet)
@@ -1310,7 +1255,9 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
                     wait_s = max(wait_s, _RETRY_WAIT[reason])
                     wait_rate = wait_rate or reason == "rate"
                     continue
-                if reason not in ("geo", "gone"):
+                # Kopiergeschuetzt (SoundCloud, grosse Labels): denselben Song
+                # von YouTube Music nehmen
+                if reason not in ("geo", "gone", "drm"):
                     continue
                 t = (orig.get("title") or "").strip()
                 if not t or _PLACEHOLDER_TITLE_RE.match(t):

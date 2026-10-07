@@ -87,7 +87,6 @@ else:
     BASE_DIR = Path(__file__).parent.parent.parent
 
 FPCALC_LOCAL  = BASE_DIR / "fpcalc.exe"   # downloaded via Settings
-SPOTDL_LOCAL  = BASE_DIR / "spotdl.exe"   # downloaded via Settings
 
 def _find_fpcalc() -> str | None:
     """Return path to fpcalc executable or None."""
@@ -408,8 +407,8 @@ def _find_js_runtime() -> list[str]:
 
 _JS_ARGS = _find_js_runtime()
 # Gilt fuer alle Kindprozesse dieses Backends. Betrifft nur die Faelle, in denen
-# tatsaechlich die Electron-Exe als Laufzeit gestartet wird; ffmpeg, yt-dlp und
-# spotdl ignorieren die Variable.
+# tatsaechlich die Electron-Exe als Laufzeit gestartet wird; ffmpeg und yt-dlp
+# ignorieren die Variable.
 os.environ["ELECTRON_RUN_AS_NODE"] = "1"
 print(f"[backend] JS-Laufzeit: {_JS_ARGS[1] if _JS_ARGS else 'keine gefunden'}", flush=True)
 

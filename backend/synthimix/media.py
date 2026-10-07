@@ -1000,42 +1000,74 @@ def _waveform_sync(path: str, bars: int) -> list[float]:
         return []
 
 
-async def _normalize_files(paths: list, target_lufs: float, target_tp: float, ws: WebSocket):
-    loop   = asyncio.get_running_loop()
-    total  = len(paths)
-    done   = 0
-    errors = 0
-    for path in paths:
-        if not os.path.exists(path):
-            errors += 1; done += 1; continue
-        try:
-            await ws.send_text(json.dumps({
-                "type": "normalize_progress",
-                "done": done, "total": total,
-                "current": Path(path).name[:60]
-            }))
-            ok = await loop.run_in_executor(None, _normalize_one_sync,
-                                            path, target_lufs, target_tp)
-            if ok:
-                # Update LUFS in library
-                for lt in _state["library"]:
-                    if lt.get("path") == path:
-                        lt["lufs"] = target_lufs
-                        lt.pop("lufs_main", None)       # misst der Hintergrund neu
-                        break
-            else:
-                errors += 1
-        except Exception:
-            errors += 1
-        done += 1
+# Lautheit dauerhaft angleichen (einzelne Titel oder ein ganzer Ordner, z. B.
+# damit in rekordbox alles gleich laut ist). Ein Ordner hat schnell tausende
+# Dateien: mehrere gleichzeitig, abbrechbar, und was schon passt, bleibt
+# unberuehrt — jedes Neu-Schreiben kostet bei MP3 etwas Qualitaet.
+_NORM_PARALLEL = 4
+_norm_cancel = False
 
+
+async def _normalize_files(paths: list, target_lufs: float, target_tp: float, ws: WebSocket,
+                           skip_tol: float = 0.0, trash: bool = False):
+    """skip_tol: Titel, die hoechstens so viele dB abweichen, ueberspringen.
+    trash: das Original in den Papierkorb statt es zu ueberschreiben."""
+    global _norm_cancel
+    _norm_cancel = False
+    loop = asyncio.get_running_loop()
+    by_path = {lt.get("path"): lt for lt in _state["library"]}
+    total, done = len(paths), 0
+    count = {"done": 0, "skipped": 0, "failed": 0}
+    sem = asyncio.Semaphore(_NORM_PARALLEL)
+
+    async def tell(current=""):
+        try:
+            await ws.send_text(json.dumps({"type": "normalize_progress", "done": done, "total": total,
+                                           "current": current, **count}))
+        except Exception:
+            pass
+
+    async def one(path):
+        nonlocal done
+        if _norm_cancel:
+            return
+        async with sem:
+            if _norm_cancel:
+                return
+            lt = by_path.get(path)
+            res = "failed"
+            # Schon gemessen und passend: gar nicht erst anfassen
+            known = (lt or {}).get("lufs", -99)
+            if skip_tol and known is not None and known > -90 and abs(known - target_lufs) <= skip_tol:
+                res = "skipped"
+            elif os.path.exists(path):
+                await tell(Path(path).name[:60])
+                try:
+                    res = await loop.run_in_executor(None, _normalize_one_sync, path, target_lufs, target_tp, skip_tol, trash) or "failed"
+                except Exception as e:
+                    print(f"[normalisieren] {Path(path).name}: {e}", flush=True)
+            if res is True:
+                res = "done"
+            if res == "done" and lt is not None:
+                lt["lufs"] = target_lufs
+                lt.pop("lufs_main", None)       # misst der Hintergrund neu
+                try:
+                    lt["mtime"] = int(os.path.getmtime(path))
+                except OSError:
+                    pass
+                _wf_cache.pop(path, None)
+            count[res if res in count else "failed"] += 1
+            done += 1
+            await tell()
+
+    await asyncio.gather(*(one(p) for p in paths))
     store.save_library()
     await core.push_library()
-    await ws.send_text(json.dumps({
-        "type": "normalize_done",
-        "normalized": done - errors,
-        "errors": errors
-    }))
+    try:
+        await ws.send_text(json.dumps({"type": "normalize_done", "normalized": count["done"], "skipped": count["skipped"],
+                                       "errors": count["failed"], "cancelled": _norm_cancel, "total": total}))
+    except Exception:
+        pass
 
 
 def _audio_stream_info(path: str) -> tuple[int, int]:
@@ -1059,7 +1091,12 @@ def _audio_stream_info(path: str) -> tuple[int, int]:
 _REENCODE = {".mp3": "libmp3lame", ".m4a": "aac", ".aac": "aac",
              ".ogg": "libvorbis", ".opus": "libopus", ".wma": "wmav2"}
 
-def _normalize_one_sync(path: str, target_lufs: float, target_tp: float) -> bool:
+def _normalize_one_sync(path: str, target_lufs: float, target_tp: float,
+                        skip_tol: float = 0.0, trash: bool = False):
+    """Eine Datei auf die Ziel-Lautheit bringen. Liefert "done", "skipped"
+    (weicht hoechstens skip_tol dB ab — bleibt unberuehrt) oder False.
+    Alle Tags bleiben (auch Cue-Punkte von Mixed In Key, Serato, rekordbox —
+    ffmpeg allein verlor sie, gemessen 10/2026). trash: Original in den Papierkorb."""
     ext = Path(path).suffix.lower()
     tmp = path + ".norm_tmp" + ext
     try:
@@ -1078,6 +1115,12 @@ def _normalize_one_sync(path: str, target_lufs: float, target_tp: float) -> bool
         if buf.strip():
             try: meas = json.loads(buf)
             except Exception: pass
+        if skip_tol and meas:
+            try:
+                if abs(float(meas.get("input_i")) - target_lufs) <= skip_tol:
+                    return "skipped"
+            except (TypeError, ValueError):
+                pass
         # Pass 2 – apply
         if meas:
             af = (f"loudnorm=I={target_lufs}:TP={target_tp}:LRA=11"
@@ -1100,8 +1143,23 @@ def _normalize_one_sync(path: str, target_lufs: float, target_tp: float) -> bool
              "-map_metadata", "0", "-y", tmp],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600, creationflags=_NO_WINDOW)
         if p2.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
-            os.replace(tmp, path)
-            return True
+            # ffmpeg uebernimmt nur die gaengigen Tags: alle Felder des Originals
+            # (Cue-Punkte, Serato-Marker, Kommentar) wieder auf die neue Datei
+            from . import library, quality
+            if not quality._copy_tags_sync(path, tmp):
+                return False
+            if trash:
+                # Ohne Audio-Endung: der Ordner-Waechter nimmt die Zwischendatei nicht auf
+                staged = path + ".synthimix-neu"
+                os.replace(tmp, staged)
+                if not library._move_to_trash(path):
+                    try: os.remove(staged)
+                    except OSError: pass
+                    return False
+                os.replace(staged, path)
+            else:
+                os.replace(tmp, path)
+            return "done"
         return False
     except Exception:
         return False
