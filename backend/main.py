@@ -1079,8 +1079,16 @@ async def handle_message(ws: WebSocket, msg: dict):
             safe = re.sub(r'[<>:"/\\|?*]', '_', name)
             pl_path = core.PLAYLISTS_DIR / (safe + ".m3u")
             paths_filter = set(msg.get("paths") or [])
-            tracks_to_save = [tr for tr in _state["queue"]
-                              if not paths_filter or tr.get("path") in paths_filter]
+            # empty: eine neue, leere Playlist. Vorher landete beim Anlegen immer
+            # die ganze Warteschlange darin (gemeldet 10/2026: "gleich 271 Tracks").
+            empty = bool(msg.get("empty"))
+            if empty:
+                n = 2
+                while pl_path.exists():                 # eine vorhandene nicht leeren
+                    pl_path = core.PLAYLISTS_DIR / f"{safe} ({n}).m3u"
+                    n += 1
+            tracks_to_save = [] if empty else [tr for tr in _state["queue"]
+                                               if not paths_filter or tr.get("path") in paths_filter]
             with open(pl_path, "w", encoding="utf-8") as f:
                 f.write("#EXTM3U\n")
                 for track in tracks_to_save:

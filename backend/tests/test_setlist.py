@@ -111,3 +111,33 @@ class SetlistTest(BackendTest):
         zurueck, fehlt = setlist.parse_playlist_file(str(dest))
         self.assertEqual(([t["path"] for t in zurueck], fehlt), ([b, a], []))
         self.assertFalse(setlist.export_playlist(str(self.tmp / "fehlt.m3u"))["ok"])
+
+
+class NewPlaylistTest(BackendTest):
+    """Gemeldet 10/2026: eine neu angelegte Playlist enthielt gleich die ganze Warteschlange (271 Titel)."""
+
+    def setUp(self):
+        super().setUp()
+        self._dir = core.PLAYLISTS_DIR
+        core.PLAYLISTS_DIR = self.tmp / "Downloads" / "playlists"
+
+    def tearDown(self):
+        core.PLAYLISTS_DIR = self._dir
+        super().tearDown()
+
+    def zeilen(self, name):
+        return [ln for ln in (core.PLAYLISTS_DIR / name).read_text(encoding="utf-8").splitlines() if not ln.startswith("#")]
+
+    def test_neue_playlist_ist_leer_und_ueberschreibt_nichts(self):
+        a = self.tmp / "a.mp3"
+        a.write_bytes(b"x")
+        main._state["queue"] = [{"path": str(a), "title": "A", "duration_sec": 10}]
+        self.run_async(main.handle_message(FakeWS(), {"type": "save_playlist", "name": "Set", "empty": True}))
+        self.assertEqual(self.zeilen("Set.m3u"), [])
+        # mit Haken: die Warteschlange kommt hinein (wie bisher)
+        self.run_async(main.handle_message(FakeWS(), {"type": "save_playlist", "name": "Voll"}))
+        self.assertEqual(self.zeilen("Voll.m3u"), [str(a)])
+        # gleicher Name noch einmal leer anlegen: die volle bleibt, eine zweite entsteht
+        self.run_async(main.handle_message(FakeWS(), {"type": "save_playlist", "name": "Voll", "empty": True}))
+        self.assertEqual(self.zeilen("Voll.m3u"), [str(a)])
+        self.assertEqual(self.zeilen("Voll (2).m3u"), [])

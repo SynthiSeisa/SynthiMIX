@@ -1,6 +1,6 @@
 <script>
   import { onMount, untrack, tick } from 'svelte'
-  import { library, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, playlistRenamed, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected, qualityScan, revealPath, excludedFolders, watchedFolders, downloadDir, startQualityBatch, startVideoScan, playlistImported, openSetLoudness, importPlaylistFile } from '../stores/ws.js'
+  import { library, queue, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, playlistRenamed, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected, qualityScan, revealPath, excludedFolders, watchedFolders, downloadDir, startQualityBatch, startVideoScan, playlistImported, openSetLoudness, importPlaylistFile } from '../stores/ws.js'
   import BetterVersionDialog from './BetterVersionDialog.svelte'
   import { keySortValue } from '../lib/keys.js'
   import { startFileDrag, ownDrag, hasFiles, droppedPaths } from '../lib/fileDrag.js'
@@ -411,13 +411,17 @@
     if (secFsOpen && !fsReady) loadFsRoots()
   })
 
+  // Neue Playlist: leer — die Warteschlange nur, wenn man es anhakt. Vorher
+  // landete beim Anlegen immer die ganze Warteschlange darin.
+  let plWithQueue = $state(false)
   function saveQueueAsPlaylist() {
     plNameValue = ''
+    plWithQueue = false
     plNameDialog = true
   }
 
   function confirmSavePlaylist() {
-    if (plNameValue.trim()) send({ type: 'save_playlist', name: plNameValue.trim() })
+    if (plNameValue.trim()) send({ type: 'save_playlist', name: plNameValue.trim(), empty: !plWithQueue })
     plNameDialog = false
   }
 
@@ -1752,13 +1756,13 @@
       <span class="row-act" title="Playlist aus rekordbox einlesen (.m3u8) — in rekordbox: Rechtsklick auf die Playlist → Playlist exportieren. Die Datei lässt sich auch hierher ziehen." aria-label="Playlist aus rekordbox einlesen" role="button" tabindex="0"
             onclick={(e) => { e.stopPropagation(); pickPlaylistFile() }}
             onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), pickPlaylistFile())}><i class="ti ti-playlist-add"></i></span>
-      <span class="row-act" title="Queue als Playlist speichern" aria-label="Queue als Playlist speichern" role="button" tabindex="0"
+      <span class="row-act" title="Neue Playlist anlegen" aria-label="Neue Playlist anlegen" role="button" tabindex="0"
             onclick={(e) => { e.stopPropagation(); saveQueueAsPlaylist() }}
             onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), saveQueueAsPlaylist())}><i class="ti ti-plus"></i></span>
     </div>
     {#if secPlaylistOpen}
       {#if $playlists.length === 0}
-        <div class="t-empty">Noch keine · + zum Speichern</div>
+        <div class="t-empty">Noch keine · + zum Anlegen</div>
       {:else if filteredPlaylists.length === 0}
         <div class="t-empty">Keine Treffer</div>
       {:else}
@@ -2374,15 +2378,22 @@
 <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 <div class="dlg-overlay" onclick={() => plNameDialog = false} role="dialog">
   <div class="dlg" onclick={(e) => e.stopPropagation()}>
-    <div class="dlg-title">Playlist speichern</div>
+    <div class="dlg-title">Neue Playlist</div>
     <label class="dlg-field">Name
       <input class="field" bind:value={plNameValue} placeholder="Playlist-Name…"
              onkeydown={(e) => { if (e.key === 'Enter') confirmSavePlaylist(); if (e.key === 'Escape') plNameDialog = false }}
              use:focus />
     </label>
+    {#if $queue.length}
+      <label class="pl-with-queue">
+        <input type="checkbox" bind:checked={plWithQueue} />
+        Die {$queue.length} Titel der Warteschlange übernehmen
+      </label>
+    {/if}
+    <div class="dlg-hint">{plWithQueue ? 'Die Playlist enthält dann die ganze Warteschlange.' : 'Die Playlist ist zunächst leer — Titel per Ziehen oder Rechtsklick hinzufügen.'}</div>
     <div class="dlg-actions">
       <button class="btn" onclick={() => plNameDialog = false}>Abbrechen</button>
-      <button class="btn btn-primary" onclick={confirmSavePlaylist}>Speichern</button>
+      <button class="btn btn-primary" onclick={confirmSavePlaylist} disabled={!plNameValue.trim()}>Anlegen</button>
     </div>
   </div>
 </div>
@@ -2672,6 +2683,7 @@
 
   .t-empty { padding: var(--sp-1) var(--sp-3); font-size: var(--fs-sm); color: var(--c-tx5); font-style: italic; }
   .pl-drop-hover { background: var(--c-green-bg) !important; box-shadow: inset 0 0 0 1px var(--c-green-br); }
+  .pl-with-queue { display: flex; align-items: center; gap: 8px; font-size: var(--fs-body); color: var(--c-tx2); cursor: pointer; }
   .pl-missing { margin: 0; padding-left: 18px; max-height: 180px; overflow-y: auto; font-size: var(--fs-sm); color: var(--c-tx3); }
   .pl-missing li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
