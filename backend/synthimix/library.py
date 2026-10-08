@@ -162,9 +162,64 @@ def _parse_m3u(path: str) -> list[dict]:
 # ── library scan ─────────────────────────────────────────────────────────────
 AUDIO_EXTS = {".mp3", ".flac", ".wav", ".ogg", ".m4a", ".aac", ".opus", ".wma"}
 
+# Zwischendateien anderer Programme (".Titel.tmp.wav", "~neu.mp3"): gemeldet
+# 10/2026 — ein Ordner mit 7 Titeln zeigte 50, weil jede Zwischendatei eines
+# Mashup-Programms sofort als Titel aufgenommen wurde. Nur nicht aufnehmen;
+# aufgeraeumt (core.is_temp_audio) werden weiter nur die eigenen.
+_FOREIGN_TEMP_RE = re.compile(r'^~|\.tmp\.[a-z0-9]{2,5}$', re.I)
+
 def _is_audio_file(name: str) -> bool:
-    """Audio-Datei, aber keine liegengebliebene Zwischendatei (core.is_temp_audio)."""
-    return Path(name).suffix.lower() in AUDIO_EXTS and not core.is_temp_audio(name)
+    """Audio-Datei, aber keine Zwischendatei (eigene: core.is_temp_audio, fremde: s. o.)."""
+    return Path(name).suffix.lower() in AUDIO_EXTS and not core.is_temp_audio(name) \
+        and not _FOREIGN_TEMP_RE.search(name)
+
+# ── Geloeschte Dateien ───────────────────────────────────────────────────────
+# Der Waechter nahm neue Dateien sofort auf, bemerkte aber nie, wenn eine
+# verschwand — die Eintraege blieben fuer immer. Jetzt: liegt der Ordner noch
+# da, die Datei aber nicht, ist sie geloescht und der Eintrag geht. Ist der
+# Ordner (die Platte) nicht erreichbar, bleibt alles — nur als fehlend markiert.
+_GONE_MASS = 30        # so viele auf einmal und mehr als die Haelfte des Ordners: lieber nur markieren
+_CARRY_SKIP = {"path", "folder", "missing", "mtime", "fid"}
+
+def _really_gone(folder: str, recursive: bool = True) -> tuple[list[dict], bool]:
+    """(Eintraege unter folder, deren Datei es nicht mehr gibt oder die nur eine
+    Zwischendatei sind, sicher?). sicher=False: auffaellig viele — nicht loeschen."""
+    if not os.path.isdir(folder):
+        return [], False
+    inside = gone = 0
+    out = []
+    for lt in _state["library"]:
+        p = lt.get("path") or ""
+        if not p or not _path_in_folder(p, folder, recursive):
+            continue
+        inside += 1
+        name = os.path.basename(p)
+        if core.is_temp_audio(name) or _FOREIGN_TEMP_RE.search(name):
+            out.append(lt)
+        elif not os.path.exists(p) and not _is_excluded(p):
+            out.append(lt)
+            gone += 1
+    return out, not (gone >= _GONE_MASS and gone > inside / 2)
+
+def _drop_entries(entries: list[dict]) -> int:
+    """Eintraege aus der Bibliothek nehmen. Wurde die Datei nur verschoben oder
+    umbenannt (gleiche Datei-Kennung an anderem Ort), wandern Messwerte und
+    Zaehler zum neuen Eintrag."""
+    if not entries:
+        return 0
+    drop = {id(e) for e in entries}
+    by_fid = {}
+    for lt in _state["library"]:
+        if id(lt) not in drop and lt.get("fid") and not lt.get("missing"):
+            by_fid.setdefault(lt["fid"], lt)
+    for e in entries:
+        new = by_fid.get(e.get("fid")) if e.get("fid") else None
+        if new is not None:
+            for k, v in e.items():
+                if k not in _CARRY_SKIP and new.get(k) in (None, "", 0, -99.0, [], {}):
+                    new[k] = v
+    _state["library"][:] = [lt for lt in _state["library"] if id(lt) not in drop]
+    return len(entries)
 
 # ── Einlesen ─────────────────────────────────────────────────────────────────
 # Frueher: jede Datei nacheinander pruefen (ffprobe), alles erst am Schluss in
@@ -287,7 +342,11 @@ async def scan_folder(folder: str, recursive: bool | None = None):
                 existing.pop("missing", None)        # unveraendert und wieder da
         added, updated = await _ingest(todo)
 
-        # Tracks aus diesem Ordner die nicht mehr auf der Platte liegen → als missing markieren
+        # Geloeschte Dateien: Eintrag entfernen (Ordner ist da, Datei nicht)
+        gone, sure = await loop.run_in_executor(None, _really_gone, folder, recursive)
+        removed = _drop_entries(gone) if sure else 0
+
+        # Was dann noch fehlt (Ordner nicht erreichbar, auffaellig viele) → als missing markieren
         folder_path = Path(folder)
         for lt in _state["library"]:
             lt_path = Path(lt.get("path", ""))
@@ -312,6 +371,7 @@ async def scan_folder(folder: str, recursive: bool | None = None):
     parts = [f"{len(_state['library'])} Tracks"]
     if added:    parts.append(f"+{added} neu")
     if updated:  parts.append(f"{updated} aktualisiert")
+    if removed:  parts.append(f"{removed} gelöschte entfernt")
     if scan_unreadable: parts.append(f"{len(scan_unreadable)} nicht lesbar (Einstellungen → System → Diagnose)")
     await core.broadcast({"type": "scan_status", "text": "Fertig · " + " · ".join(parts)})
     await asyncio.sleep(4)
@@ -517,8 +577,24 @@ async def _watcher_loop():
     """Periodically check watched folders for new audio files."""
     global _scan_busy
     await asyncio.sleep(15)   # initial delay — let app settle
+    runde = 0
     while True:
         try:
+            # Jede dritte Runde (~30 s): geloeschte Dateien aus der Bibliothek nehmen
+            runde += 1
+            if runde % 3 == 0 and not _scan_busy:
+                loop = asyncio.get_running_loop()
+                weg = []
+                for folder in _scan_folders():
+                    gone, sure = await loop.run_in_executor(
+                        None, _really_gone, folder, _state.get("scan_recursive", True))
+                    if sure:
+                        weg += gone
+                if weg and not _scan_busy:
+                    n = _drop_entries(list({id(e): e for e in weg}.values()))
+                    store.save_library()
+                    await core.push_library()
+                    print(f"[watcher] {n} Eintraege geloeschter Dateien entfernt", flush=True)
             folders   = [] if _scan_busy else _scan_folders()
             recursive = _state.get("scan_recursive", True)
             if folders:

@@ -43,19 +43,23 @@ class ScanTest(BackendTest):
         self.assertEqual(calls, [str(neu)])                     # nur die neue Datei
         self.assertEqual(len(main._state["library"]), 21)
 
-    def test_geloeschte_datei_wird_als_fehlend_markiert_und_kommt_wieder(self):
+    def test_geloeschte_datei_verschwindet_und_kommt_wieder(self):
+        # Frueher blieb der Eintrag als "fehlend" stehen — fuer immer (gemeldet
+        # 10/2026: 7 Dateien im Ordner, 50 in der App). Der Ordner ist noch da,
+        # also ist die Datei geloescht.
         root = self.make_tree(1, 3)
         main._state["library"] = []
         self.run_async(library.scan_folder(str(root)))
         weg = root / "Ordner 0" / "tief" / "Titel 0-1.mp3"
         weg.unlink()
         self.run_async(library.scan_folder(str(root)))
-        lt = next(t for t in main._state["library"] if t["path"] == str(weg))
-        self.assertTrue(lt.get("missing"))
+        self.assertNotIn(str(weg), {t["path"] for t in main._state["library"]})
+        self.assertEqual(len(main._state["library"]), 2)
         weg.write_bytes(b"kein echtes mp3")
-        os.utime(weg, (lt["mtime"], lt["mtime"]))
         self.run_async(library.scan_folder(str(root)))
+        lt = next(t for t in main._state["library"] if t["path"] == str(weg))
         self.assertFalse(lt.get("missing", False))
+        self.assertEqual(len(main._state["library"]), 3)
 
     def test_fortschritt_bei_vielen_dateien(self):
         root = self.make_tree(3, 40)
