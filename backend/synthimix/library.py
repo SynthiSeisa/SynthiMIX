@@ -254,14 +254,28 @@ async def _ingest(paths: list[str], label: str = "Scanne") -> tuple[int, int]:
     return added, updated
 
 
-async def scan_folder(folder: str):
+def in_library_folders(folder: str) -> bool:
+    """Gehoert der Ordner zur Bibliothek (ein eingelesener Ordner oder darin)?"""
+    f = os.path.normcase(os.path.abspath(folder))
+    for s in _scan_folders():
+        b = os.path.normcase(os.path.abspath(s))
+        if f == b or f.startswith(b + os.sep):
+            return True
+    return False
+
+
+async def scan_folder(folder: str, recursive: bool | None = None):
+    """recursive: None = wie in den Einstellungen. "Aktualisieren" an einem
+    Ordner nimmt die Unterordner immer mit."""
     global _scan_busy
+    if recursive is None:
+        recursive = _state.get("scan_recursive", True)
     _scan_busy += 1
     try:
         await core.broadcast({"type": "scan_status", "text": "Scanne…"})
         loop = asyncio.get_running_loop()
         scan_unreadable.clear()
-        found = await loop.run_in_executor(None, _list_audio_sync, folder, _state.get("scan_recursive", True))
+        found = await loop.run_in_executor(None, _list_audio_sync, folder, recursive)
         lib_by_path = {t["path"]: t for t in _state["library"]}
         scanned_paths = {p for p, _ in found}
         todo = []
@@ -281,6 +295,8 @@ async def scan_folder(folder: str):
                 lt_path.relative_to(folder_path)
             except ValueError:
                 continue
+            if not recursive and lt_path.parent != folder_path:
+                continue                             # Unterordner wurden nicht angesehen
             was_missing = lt.get("missing", False)
             now_missing = lt["path"] not in scanned_paths
             if now_missing and not was_missing:

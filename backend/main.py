@@ -601,6 +601,27 @@ async def handle_message(ws: WebSocket, msg: dict):
                 await library.scan_folder(f)
         core.spawn(_scan_all())
 
+    elif t == "refresh_folder":
+        # "Aktualisieren": neue Dateien aufnehmen, geaenderte (Tags, Name) neu
+        # lesen, verschwundene als fehlend markieren. Ohne Ordner: alles.
+        folder = msg.get("folder", "")
+
+        async def _refresh():
+            if folder:
+                if not os.path.isdir(folder):
+                    await core.broadcast({"type": "scan_status", "text": "Ordner nicht erreichbar"})
+                elif not library.in_library_folders(folder):
+                    await core.broadcast({"type": "scan_status",
+                                          "text": "Dieser Ordner gehört nicht zur Bibliothek — erst über „Ordner hinzufügen“ einlesen"})
+                else:
+                    await library.scan_folder(folder, True)
+            else:
+                for f in library._scan_folders():
+                    await library.scan_folder(f)
+            await _send_download_tree(ws)
+            await core.broadcast({"type": "playlists", "items": library._get_playlists()})
+        core.spawn(_refresh())
+
     elif t == "get_watched_folders":
         await ws.send_text(json.dumps({"type": "watched_folders", "items": library._watched_folders_info()}))
 

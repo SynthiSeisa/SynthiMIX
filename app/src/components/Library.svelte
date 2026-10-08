@@ -1385,6 +1385,15 @@
     e.dataTransfer.effectAllowed = 'copy'
   }
 
+  // Aktualisieren: neue Dateien aufnehmen, geaenderte Tags/Namen neu lesen,
+  // geloeschte als fehlend markieren — fuer einen Ordner (mit Unterordnern)
+  // oder, ohne Ordner, fuer die ganze Bibliothek. Nur Neues/Geaendertes wird gelesen.
+  function refreshFolder(path = '') {
+    playlistContent.set({})
+    send({ type: 'refresh_folder', folder: path })
+  }
+  const refreshTarget = $derived(navMode.startsWith('dir:') ? navMode.slice(4) : '')
+
   async function scanLibrary() {
     if (window.electron?.pickFolder) {
       const folder = await window.electron.pickFolder()
@@ -1539,6 +1548,7 @@
     // Don't capture keystrokes that originate from the queue panel
     if (e.target?.closest?.('.queue')) return
     if (e.key === 'Escape') { clearSelection(); ctxMenu = null; editTrack = null }
+    if (e.key === 'F5') { e.preventDefault(); refreshFolder(refreshTarget) }
     if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
       if (!_libHover) return
       e.preventDefault()
@@ -1706,6 +1716,11 @@
       <i class="ti ti-chevron-right t-chevron" class:open={secDirsOpen} aria-hidden="true"></i>
       <i class="ti ti-folder t-sec-ico" aria-hidden="true"></i>
       <span class="t-sec-label">Musikordner</span>
+      <span class="row-act" role="button" tabindex="0"
+            title="{refreshTarget ? 'Geöffneten Ordner' : 'Alle Musikordner'} aktualisieren (F5): neue Dateien aufnehmen, geänderte Titel und Tags neu lesen, gelöschte entfernen"
+            aria-label="Aktualisieren"
+            onclick={(e) => { e.stopPropagation(); refreshFolder(refreshTarget) }}
+            onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), refreshFolder(refreshTarget))}><i class="ti ti-refresh"></i></span>
     </div>
     {#if secDirsOpen}
       {#if navQ}
@@ -2476,6 +2491,9 @@
 {#if folderCtx}
   <div class="ctx-menu" use:fitMenu style="left:{Math.min(folderCtx.x, window.innerWidth - 220)}px;top:{Math.min(folderCtx.y, window.innerHeight - 160)}px"
        onclick={(e) => e.stopPropagation()}>
+    <button title="Neue Dateien aufnehmen, geänderte Titel und Tags neu lesen, gelöschte entfernen — mit Unterordnern"
+            onclick={() => { refreshFolder(folderCtx.path); folderCtx = null }}>Aktualisieren</button>
+    <div class="ctx-sep"></div>
     <button onclick={() => analyzeFolder(false)}>Analysieren — nur dieser Ordner</button>
     <button onclick={() => analyzeFolder(true)}>Analysieren — mit Unterordnern</button>
     <button onclick={scanFolderDupes}>Auf Duplikate scannen</button>
