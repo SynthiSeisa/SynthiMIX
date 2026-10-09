@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('electron', {
   setPlaying:        (playing) => ipcRenderer.send('player-playing', !!playing),
   // Titel als echte Dateien herausziehen (src/lib/fileDrag.js)
   startDrag:         (paths) => ipcRenderer.send('start-drag', paths),
+  startDragPlaylist: (plPath) => { try { return ipcRenderer.sendSync('start-drag-playlist', plPath) } catch { return [] } },
   pathForFile:       (file) => { try { return webUtils.getPathForFile(file) } catch { return '' } },
   onUpdateAvailable: (cb) => ipcRenderer.on('update-available',  (_, version, size, notes) => cb(version, size, notes)),
   onUpdateProgress:  (cb) => ipcRenderer.on('update-progress',   (_, pct)           => cb(pct)),

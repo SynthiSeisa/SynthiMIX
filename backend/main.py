@@ -154,6 +154,7 @@ async def handle_message(ws: WebSocket, msg: dict):
         await core.send_library_full(ws)
         await ws.send_text(json.dumps({"type": "downloads", "items": core.downloads_public()}))
         await ws.send_text(json.dumps({"type": "playlists", "items": library._get_playlists()}))
+        await ws.send_text(json.dumps({"type": "playlist_folders", "items": library.playlist_folders()}))
         # Ohne das hier haette ein frisch gestarteter Client die Wuensche erst
         # gesehen, wenn sich der naechste geaendert hat.
         await ws.send_text(json.dumps({"type": "wishes", "items": _state.get("wishes", [])}))
@@ -1169,6 +1170,22 @@ async def handle_message(ws: WebSocket, msg: dict):
             store.save_settings()
             await core.broadcast({"type": "playlists", "items": library._get_playlists()})
             await download._push_followed()
+
+    # ── Ordner fuer Playlisten (eine Ebene, per Ziehen oder Rechtsklick) ──────
+    elif t in ("playlist_folder_add", "playlist_folder_rename", "playlist_folder_delete", "playlist_set_folder"):
+        if t == "playlist_folder_add":
+            res = library.playlist_folder_add(msg.get("name", ""))
+        elif t == "playlist_folder_rename":
+            res = library.playlist_folder_rename(msg.get("old", ""), msg.get("name", ""))
+        elif t == "playlist_folder_delete":
+            res = library.playlist_folder_delete(msg.get("name", ""))
+        else:
+            res = library.playlist_set_folder(msg.get("path", ""), msg.get("folder", ""))
+        await ws.send_text(json.dumps({"type": "playlist_folder_result", "op": t, **res}))
+        if res.get("ok"):
+            store.save_settings()
+            await core.broadcast({"type": "playlist_folders", "items": library.playlist_folders()})
+            await core.broadcast({"type": "playlists", "items": library._get_playlists()})
 
     # ── DJ-Set: Playlist aus rekordbox einlesen, Lautheit pruefen, zurueckgeben ──
     elif t == "playlist_import":

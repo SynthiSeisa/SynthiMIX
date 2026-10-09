@@ -68,9 +68,75 @@ def sync_playlists_dir() -> int:
     return moved
 
 
+# ── Ordner fuer Playlisten ───────────────────────────────────────────────────
+# Eine Ebene Ordner ("DnB", "Hochzeit") zum Sortieren der Playlisten. Die
+# .m3u-Dateien bleiben alle im Playlisten-Ordner liegen — die Zuordnung steht
+# in den Einstellungen (Playlist-Name → Ordner). So aendert sich kein Pfad:
+# Sicherung, Umzug, verfolgte Playlisten und die Ausgabe fuer rekordbox laufen
+# unveraendert weiter.
+def _pl_folders() -> dict:
+    pf = _state.setdefault("playlist_folders", {"folders": [], "of": {}})
+    pf.setdefault("folders", [])
+    pf.setdefault("of", {})
+    return pf
+
+def playlist_folders() -> list[str]:
+    return list(_pl_folders()["folders"])
+
+def _folder_name_ok(name: str) -> str:
+    return re.sub(r"\s+", " ", (name or "").strip())[:60]
+
+def playlist_folder_add(name: str) -> dict:
+    name = _folder_name_ok(name)
+    pf = _pl_folders()
+    if not name:
+        return {"ok": False, "error": "Bitte einen Namen eingeben."}
+    if name.lower() in (f.lower() for f in pf["folders"]):
+        return {"ok": False, "error": f"„{name}“ gibt es schon."}
+    pf["folders"].append(name)
+    pf["folders"].sort(key=str.lower)
+    return {"ok": True, "name": name}
+
+def playlist_folder_rename(old: str, name: str) -> dict:
+    name = _folder_name_ok(name)
+    pf = _pl_folders()
+    if old not in pf["folders"]:
+        return {"ok": False, "error": "Ordner nicht gefunden."}
+    if not name:
+        return {"ok": False, "error": "Bitte einen Namen eingeben."}
+    if name.lower() != old.lower() and name.lower() in (f.lower() for f in pf["folders"]):
+        return {"ok": False, "error": f"„{name}“ gibt es schon."}
+    pf["folders"] = sorted([name if f == old else f for f in pf["folders"]], key=str.lower)
+    pf["of"] = {k: (name if v == old else v) for k, v in pf["of"].items()}
+    return {"ok": True, "name": name, "old": old}
+
+def playlist_folder_delete(name: str) -> dict:
+    """Ordner entfernen — seine Playlisten bleiben und stehen wieder ohne Ordner da."""
+    pf = _pl_folders()
+    if name not in pf["folders"]:
+        return {"ok": False, "error": "Ordner nicht gefunden."}
+    pf["folders"].remove(name)
+    pf["of"] = {k: v for k, v in pf["of"].items() if v != name}
+    return {"ok": True}
+
+def playlist_set_folder(pl_path: str, folder: str) -> dict:
+    """Playlist in einen Ordner legen (folder leer: aus dem Ordner nehmen)."""
+    pf = _pl_folders()
+    p = Path(pl_path or "")
+    if not p.is_file() or p.suffix.lower() != ".m3u":
+        return {"ok": False, "error": "Playlist nicht gefunden."}
+    if folder and folder not in pf["folders"]:
+        return {"ok": False, "error": "Ordner nicht gefunden."}
+    if folder:
+        pf["of"][p.stem] = folder
+    else:
+        pf["of"].pop(p.stem, None)
+    return {"ok": True}
+
 def _get_playlists() -> list[dict]:
     if not core.PLAYLISTS_DIR.exists():
         return []
+    pf = _pl_folders()
     result = []
     for p in sorted(core.PLAYLISTS_DIR.glob("*.m3u")):
         try:
@@ -78,7 +144,9 @@ def _get_playlists() -> list[dict]:
                         if ln.strip() and not ln.startswith("#"))
         except Exception:
             count = 0
-        result.append({"name": p.stem, "path": str(p), "track_count": count})
+        folder = pf["of"].get(p.stem, "")
+        result.append({"name": p.stem, "path": str(p), "track_count": count,
+                       "folder": folder if folder in pf["folders"] else ""})
     return result
 
 def _safe_pl_name(name: str) -> str:
@@ -105,6 +173,9 @@ def _rename_playlist(path: str, name: str) -> dict:
         return {"ok": False, "error": f"„{safe}“ gibt es schon."}
     old = src.stem
     os.rename(src, dst)
+    of = _pl_folders()["of"]                       # der Ordner zieht mit dem neuen Namen mit
+    if old in of:
+        of[dst.stem] = of.pop(old)
     out_dir = Path(_state.get("download_dir") or (core.BASE_DIR / "Downloads"))
     for f in _state.get("followed", []):
         if _safe_pl_name(f.get("name") or f.get("title") or "") != old:

@@ -21,6 +21,24 @@ export function startFileDrag(e, tracks, extra = {}) {
   return true
 }
 
+/**
+ * Eine ganze Playlist als Dateien ziehen (alle ihre Titel) — auf eine Playlist
+ * in rekordbox, in den Explorer. false: kein Electron oder die Playlist ist
+ * leer — dann normal per HTML ziehen (das Verschieben in einen Ordner geht so).
+ */
+export function startPlaylistDrag(e, plPath) {
+  const api = typeof window !== 'undefined' ? window.electron : null
+  if (!api?.startDragPlaylist || !plPath) return false
+  const paths = api.startDragPlaylist(plPath)
+  if (!Array.isArray(paths) || !paths.length) return false
+  e.preventDefault()
+  current = { paths, tracks: [], playlist: plPath }
+  return true
+}
+
+/** Wird gerade eine eigene Playlist gezogen? (zum Hervorheben der Ziele) */
+export const draggingPlaylist = () => current?.playlist ?? null
+
 /** Werden Dateien gezogen (eigener Zug oder aus dem Explorer)? */
 export const hasFiles = (e) => !!e.dataTransfer?.types?.includes('Files')
 

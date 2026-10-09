@@ -246,6 +246,26 @@ ipcMain.on('start-drag', (e, paths) => {
   try { e.sender.startDrag({ file: files[0], files, icon: dragIcon }) } catch (_) {}
 })
 
+// Eine ganze Playlist herausziehen (z. B. auf eine Playlist in rekordbox): alle
+// ihre Titel als Dateien, in der Reihenfolge der Playlist. Die Antwort (die
+// Pfade) braucht das Fenster sofort, um den eigenen Zug wiederzuerkennen.
+ipcMain.on('start-drag-playlist', (e, plPath) => {
+  const fs = require('fs')
+  let files = []
+  try {
+    if (typeof plPath === 'string' && /\.m3u8?$/i.test(plPath)) {
+      files = fs.readFileSync(plPath, 'utf-8').replace(/^\uFEFF/, '').split(/\r?\n/)
+        .map(l => l.trim()).filter(l => l && !l.startsWith('#') && fs.existsSync(l))
+      files = [...new Set(files)]
+    }
+  } catch (_) { files = [] }
+  if (files.length) {
+    dragIcon = dragIcon || glyph('note', true, [255, 154, 51])
+    try { e.sender.startDrag({ file: files[0], files, icon: dragIcon }) } catch (_) { files = [] }
+  }
+  e.returnValue = files
+})
+
 ipcMain.on('player-playing', (_, playing) => {
   if (thumbPlaying === !!playing) return
   thumbPlaying = !!playing

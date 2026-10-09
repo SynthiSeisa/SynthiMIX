@@ -159,6 +159,8 @@ export function openSetLoudness(pl) {
 export function importPlaylistFile(path) {
   if (path) send({ type: 'playlist_import', path })
 }
+export const playlistFolders = writable([])   // Ordner fuer Playlisten (Namen, eine Ebene)
+export const playlistFolderResult = writable(null)   // Antwort auf playlist_folder_* / playlist_set_folder
 export const playlistRenamed = writable(null) // Antwort auf rename_playlist / follow_rename
 export const selectionOwner  = writable('')   // '' | 'library' | 'queue' — only one panel may have a selection at a time
 export const notes           = writable('')   // free-text scratchpad, persisted on the backend
@@ -358,6 +360,8 @@ function connect() {
         break
       case 'playlists':       playlists.set(msg.items ?? []); break
       case 'playlist_renamed': playlistRenamed.set({ ...msg, at: Date.now() }); break
+      case 'playlist_folders': playlistFolders.set(msg.items ?? []); break
+      case 'playlist_folder_result': playlistFolderResult.set({ ...msg, at: Date.now() }); break
       case 'download_tree':   downloadTree.set(msg.tree ?? { folders: [], files: [] }); downloadTreeLoaded.set(true); break
       case 'search_results':  searchResults.set(msg); break
       case 'settings':

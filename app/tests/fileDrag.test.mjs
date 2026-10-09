@@ -43,3 +43,31 @@ test('ohne Electron: normales HTML-Ziehen', () => {
   assert.equal(e.prevented, false)
   window.electron = keep
 })
+
+test('ganze Playlist ziehen: alle Titel als Dateien, im Fenster als eigener Zug erkannt', async () => {
+  const { startPlaylistDrag, draggingPlaylist } = await import('../src/lib/fileDrag.js')
+  const keep = window.electron
+  const asked = []
+  window.electron = { ...keep, startDragPlaylist: (p) => { asked.push(p); return p.includes('Leer') ? [] : ['M:\Musik\a.mp3', 'M:\Musik\b.mp3'] } }
+  try {
+    const e = startEv()
+    assert.equal(startPlaylistDrag(e, 'M:\pl\Set.m3u'), true)
+    assert.equal(e.prevented, true)
+    assert.deepEqual(asked, ['M:\pl\Set.m3u'])
+    assert.equal(draggingPlaylist(), 'M:\pl\Set.m3u')
+    // fremde Dateien aus dem Explorer sind nicht dieser Zug
+    assert.equal(ownDrag(ev(['C:\neu.mp3'])), null)
+    const own = ownDrag(ev(['M:\Musik\b.mp3', 'M:\Musik\a.mp3']))
+    assert.equal(own.playlist, 'M:\pl\Set.m3u')
+    assert.deepEqual(own.tracks, [])                    // auf eine andere Playlist gelegt: keine Titel anhaengen
+    assert.equal(draggingPlaylist(), null)
+    // leere Playlist: kein Datei-Zug — das HTML-Ziehen (in einen Ordner) bleibt
+    const e2 = startEv()
+    assert.equal(startPlaylistDrag(e2, 'M:\pl\Leer.m3u'), false)
+    assert.equal(e2.prevented, false)
+  } finally { window.electron = keep }
+  // ohne Electron: HTML-Ziehen
+  const k2 = window.electron
+  window.electron = undefined
+  try { assert.equal(startPlaylistDrag(startEv(), 'M:\pl\Set.m3u'), false) } finally { window.electron = k2 }
+})

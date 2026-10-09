@@ -311,6 +311,9 @@ def load_settings():
     _state["scan_recursive"]  = bool(raw.get("scan_recursive", True))
     _state["watched_folders"] = list(raw.get("watched_folders", []))
     _state["excluded_folders"] = list(raw.get("excluded_folders", []))
+    pf = raw.get("playlist_folders") if isinstance(raw.get("playlist_folders"), dict) else {}
+    _state["playlist_folders"] = {"folders": [str(x) for x in pf.get("folders") or []],
+                                  "of": {str(k): str(v) for k, v in (pf.get("of") or {}).items()}}
     _state["auto_mix"]                = bool(raw.get("auto_mix", True))
     _state["loudnorm_on_dl"]          = bool(raw.get("loudnorm_on_dl", False))
     _state["loudnorm_target"]         = float(raw.get("loudnorm_target", -10.0))
@@ -386,6 +389,7 @@ def save_settings():
         "scan_recursive":  _state.get("scan_recursive", True),
         "watched_folders": _state.get("watched_folders", []),
         "excluded_folders": _state.get("excluded_folders", []),
+        "playlist_folders": _state.get("playlist_folders", {"folders": [], "of": {}}),
         "auto_mix":                _state.get("auto_mix", True),
         "loudnorm_on_dl":          _state.get("loudnorm_on_dl", False),
         "loudnorm_target":         _state.get("loudnorm_target", -10.0),

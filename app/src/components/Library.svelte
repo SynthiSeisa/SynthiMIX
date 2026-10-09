@@ -1,9 +1,9 @@
 <script>
   import { onMount, untrack, tick } from 'svelte'
-  import { library, queue, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, playlistRenamed, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected, qualityScan, revealPath, excludedFolders, watchedFolders, downloadDir, startQualityBatch, startVideoScan, playlistImported, openSetLoudness, importPlaylistFile } from '../stores/ws.js'
+  import { library, queue, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, playlistRenamed, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected, qualityScan, revealPath, excludedFolders, watchedFolders, downloadDir, startQualityBatch, startVideoScan, playlistImported, openSetLoudness, importPlaylistFile, playlistFolders, playlistFolderResult } from '../stores/ws.js'
   import BetterVersionDialog from './BetterVersionDialog.svelte'
   import { keySortValue } from '../lib/keys.js'
-  import { startFileDrag, ownDrag, hasFiles, droppedPaths } from '../lib/fileDrag.js'
+  import { startFileDrag, startPlaylistDrag, draggingPlaylist, ownDrag, hasFiles, droppedPaths } from '../lib/fileDrag.js'
   import KeyChip from './KeyChip.svelte'
   import { density } from '../lib/prefs.js'
   import DuplicateScanDialog from './DuplicateScanDialog.svelte'
@@ -1220,6 +1220,59 @@
   let folderCtx    = $state(null)  // { x, y, path }
   let playlistCtx  = $state(null)  // { x, y, path, name }
 
+  // ── Ordner fuer Playlisten ───────────────────────────────────────────────
+  // Eine Ebene Ordner; Playlisten per Ziehen (oder Rechtsklick) hineinlegen.
+  // Auf die Ueberschrift "Playlisten" gezogen, kommt eine Playlist wieder heraus.
+  const PL_DRAG = 'application/x-synthimix-playlist'
+  let plFolderOpen = $state((() => { try { return JSON.parse(localStorage.getItem('plFolderOpen') || '{}') } catch { return {} } })())
+  function togglePlFolder(name) {
+    plFolderOpen[name] = plFolderOpen[name] === false
+    try { localStorage.setItem('plFolderOpen', JSON.stringify(plFolderOpen)) } catch {}
+  }
+  const rootPlaylists = $derived(filteredPlaylists.filter(pl => !pl.folder))
+  const playlistsIn = (f) => filteredPlaylists.filter(pl => pl.folder === f)
+  let plFolderEdit = $state(null)      // { orig: Name oder null (neu), name }
+  let plFolderCtx = $state(null)       // { x, y, name }
+  let dragOverPlFolder = $state(null)  // Ordnername oder '' (Ueberschrift = kein Ordner)
+  function newPlFolder() { secPlaylistOpen = true; plFolderEdit = { orig: null, name: '' } }
+  function commitPlFolder() {
+    const e = plFolderEdit
+    plFolderEdit = null
+    const name = e?.name.trim()
+    if (!e || !name || name === e.orig) return
+    send(e.orig === null ? { type: 'playlist_folder_add', name } : { type: 'playlist_folder_rename', old: e.orig, name })
+  }
+  function movePlaylist(path, folder) {
+    send({ type: 'playlist_set_folder', path, folder })
+    if (folder) { plFolderOpen[folder] = true; try { localStorage.setItem('plFolderOpen', JSON.stringify(plFolderOpen)) } catch {} }
+  }
+  // In der App wird eine Playlist als Datei-Zug gezogen (alle ihre Titel) — so
+  // laesst sie sich auch auf eine Playlist in rekordbox oder in den Explorer
+  // legen. Im Fenster erkennt die App den eigenen Zug wieder (Ordner-Ziele).
+  const isPlDrag = (e) => [...(e.dataTransfer?.types ?? [])].includes(PL_DRAG) || (hasFiles(e) && !!draggingPlaylist())
+  function dragPlaylist(e, pl) {
+    if (startPlaylistDrag(e, pl.path)) return
+    e.dataTransfer.setData(PL_DRAG, pl.path)
+    e.dataTransfer.effectAllowed = 'move'
+  }
+  function dropOnPlFolder(e, folder) {
+    dragOverPlFolder = null
+    if (!isPlDrag(e)) return false
+    const path = e.dataTransfer.getData(PL_DRAG) || ownDrag(e)?.playlist
+    if (!path) return false                       // doch Dateien aus dem Explorer
+    e.preventDefault(); e.stopPropagation()
+    movePlaylist(path, folder)
+    return true
+  }
+  $effect(() => {
+    const r = $playlistFolderResult
+    if (!r || r.ok) return
+    untrack(() => {
+      plRenameErr = { text: r.error || 'Das ging nicht.' }
+      setTimeout(() => { plRenameErr = null }, 4000)
+    })
+  })
+
   // ── Playlist umbenennen (Rechtsklick → Umbenennen) ──────────────────────
   let plRename = $state(null)       // { path, name, orig }
   let plRenameErr = $state(null)    // { path, text }
@@ -1743,12 +1796,12 @@
     {/if}
 
     <!-- 3. PLAYLISTEN -->
-    <div class="t-sec-hdr" class:pl-drop-hover={plImportDrag} role="button" tabindex="0"
+    <div class="t-sec-hdr" class:pl-drop-hover={plImportDrag || dragOverPlFolder === ''} role="button" tabindex="0"
          onclick={() => toggleSection('playlist')}
          onkeydown={(e) => e.key === 'Enter' && toggleSection('playlist')}
-         ondragover={(e) => { if (hasFiles(e)) { e.preventDefault(); plImportDrag = true } }}
-         ondragleave={() => plImportDrag = false}
-         ondrop={dropPlaylistFile}>
+         ondragover={(e) => { if (isPlDrag(e)) { e.preventDefault(); dragOverPlFolder = '' } else if (hasFiles(e)) { e.preventDefault(); plImportDrag = true } }}
+         ondragleave={() => { plImportDrag = false; dragOverPlFolder = null }}
+         ondrop={(e) => { if (!dropOnPlFolder(e, '')) dropPlaylistFile(e) }}>
       <i class="ti ti-chevron-right t-chevron" class:open={secPlaylistOpen} aria-hidden="true"></i>
       <i class="ti ti-list t-sec-ico" aria-hidden="true"></i>
       <span class="t-sec-label">Playlisten</span>
@@ -1756,25 +1809,23 @@
       <span class="row-act" title="Playlist aus rekordbox einlesen (.m3u8) — in rekordbox: Rechtsklick auf die Playlist → Playlist exportieren. Die Datei lässt sich auch hierher ziehen." aria-label="Playlist aus rekordbox einlesen" role="button" tabindex="0"
             onclick={(e) => { e.stopPropagation(); pickPlaylistFile() }}
             onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), pickPlaylistFile())}><i class="ti ti-playlist-add"></i></span>
+      <span class="row-act" title="Neuer Ordner für Playlisten — Playlisten danach hineinziehen" aria-label="Neuer Ordner für Playlisten" role="button" tabindex="0"
+            onclick={(e) => { e.stopPropagation(); newPlFolder() }}
+            onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), newPlFolder())}><i class="ti ti-folder-plus"></i></span>
       <span class="row-act" title="Neue Playlist anlegen" aria-label="Neue Playlist anlegen" role="button" tabindex="0"
             onclick={(e) => { e.stopPropagation(); saveQueueAsPlaylist() }}
             onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), saveQueueAsPlaylist())}><i class="ti ti-plus"></i></span>
     </div>
-    {#if secPlaylistOpen}
-      {#if $playlists.length === 0}
-        <div class="t-empty">Noch keine · + zum Anlegen</div>
-      {:else if filteredPlaylists.length === 0}
-        <div class="t-empty">Keine Treffer</div>
-      {:else}
-        {#each filteredPlaylists as pl}
-          <div class="t-child t-pl-row {navMode === 'playlist:' + pl.path ? 'active' : ''}
+    {#snippet plRow(pl, indent)}
+          <div class="t-child t-pl-row {indent ? 't-pl-in' : ''} {navMode === 'playlist:' + pl.path ? 'active' : ''}
                       {dragOverPlaylist === pl.path ? 'pl-drop-hover' : ''}"
                role="button" tabindex="0"
                onclick={() => openPlaylistInLibrary(pl)}
                oncontextmenu={(e) => onPlaylistCtx(e, pl)}
                ondragover={(e) => { e.preventDefault(); dragOverPlaylist = pl.path }}
                ondragleave={() => dragOverPlaylist = null}
-               ondrop={(e) => dropOnPlaylist(e, pl.path)}
+               draggable="true" ondragstart={(e) => dragPlaylist(e, pl)}
+               ondrop={(e) => { if (!dropOnPlFolder(e, pl.folder || '')) dropOnPlaylist(e, pl.path) }}
                title={pl.name}>
             <i class="ti ti-list t-ico-sm" aria-hidden="true"></i>
             {#if plRename?.path === pl.path}
@@ -1797,9 +1848,60 @@
                   onclick={(e) => { e.stopPropagation(); deletePlaylist(pl.path) }}
                   onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), deletePlaylist(pl.path))}><i class="ti ti-trash"></i></span>
           </div>
-        {/each}
-        {#if plRenameErr}<div class="t-rename-err" role="alert">{plRenameErr.text}</div>{/if}
+    {/snippet}
+    {#if secPlaylistOpen}
+      {#if plFolderEdit?.orig === null}
+        <div class="t-child t-pl-folder">
+          <i class="ti ti-folder t-ico-sm" aria-hidden="true"></i>
+          <input class="t-rename" value={plFolderEdit.name} oninput={(e) => { if (plFolderEdit) plFolderEdit.name = e.target.value }} use:focusSelect placeholder="Name des Ordners…" aria-label="Name des neuen Ordners"
+                 onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Enter') commitPlFolder(); else if (e.key === 'Escape') plFolderEdit = null }}
+                 onblur={commitPlFolder} />
+        </div>
       {/if}
+      {#if $playlists.length === 0 && $playlistFolders.length === 0}
+        {#if !plFolderEdit}<div class="t-empty">Noch keine · + zum Anlegen</div>{/if}
+      {:else if navQ}
+        {#each filteredPlaylists as pl (pl.path)}
+          {@render plRow(pl, false)}
+        {:else}
+          <div class="t-empty">Keine Treffer</div>
+        {/each}
+      {:else}
+        {#each $playlistFolders as f (f)}
+          {@const inside = playlistsIn(f)}
+          <div class="t-child t-pl-folder {dragOverPlFolder === f ? 'pl-drop-hover' : ''}" role="button" tabindex="0"
+               title="{f} — Playlisten hierher ziehen"
+               onclick={() => togglePlFolder(f)}
+               onkeydown={(e) => e.key === 'Enter' && togglePlFolder(f)}
+               oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); closeCtx(); playlistCtx = null; folderCtx = null; plFolderCtx = { x: e.clientX, y: e.clientY, name: f } }}
+               ondragover={(e) => { if (isPlDrag(e)) { e.preventDefault(); dragOverPlFolder = f } }}
+               ondragleave={() => dragOverPlFolder = null}
+               ondrop={(e) => dropOnPlFolder(e, f)}>
+            <i class="ti ti-chevron-right t-chevron" class:open={plFolderOpen[f] !== false} aria-hidden="true"></i>
+            <i class="ti ti-folder t-ico-sm" aria-hidden="true"></i>
+            {#if plFolderEdit?.orig === f}
+              <input class="t-rename" value={plFolderEdit.name} oninput={(e) => { if (plFolderEdit) plFolderEdit.name = e.target.value }} use:focusSelect aria-label="Neuer Name des Ordners"
+                     onclick={(e) => e.stopPropagation()}
+                     onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Enter') commitPlFolder(); else if (e.key === 'Escape') plFolderEdit = null }}
+                     onblur={commitPlFolder} />
+            {:else}
+              <span class="t-name">{f}</span>
+            {/if}
+            <span class="t-count">{inside.length}</span>
+          </div>
+          {#if plFolderOpen[f] !== false}
+            {#each inside as pl (pl.path)}
+              {@render plRow(pl, true)}
+            {:else}
+              <div class="t-empty t-pl-in">Leer · Playlisten hierher ziehen</div>
+            {/each}
+          {/if}
+        {/each}
+        {#each rootPlaylists as pl (pl.path)}
+          {@render plRow(pl, false)}
+        {/each}
+      {/if}
+      {#if plRenameErr}<div class="t-rename-err" role="alert">{plRenameErr.text}</div>{/if}
     {/if}
 
 
@@ -2252,7 +2354,7 @@
 </div>
 
 <!-- Click-outside / right-click-outside to close context menu -->
-<svelte:window onclick={() => { closeCtx(); folderCtx = null; playlistCtx = null; colPickerOpen = false; libMenu = null }} oncontextmenu={() => { if (!ctxMenu) return; closeCtx() }} onkeydown={libKey} />
+<svelte:window onclick={() => { closeCtx(); folderCtx = null; playlistCtx = null; plFolderCtx = null; colPickerOpen = false; libMenu = null }} oncontextmenu={() => { if (!ctxMenu) return; closeCtx() }} onkeydown={libKey} />
 
 {#if qTip && qTip.reasons.length}
   <div class="q-tip" role="tooltip" style="left:{qTip.x}px;top:{qTip.y}px">
@@ -2548,6 +2650,15 @@
   </div>
 {/if}
 
+{#if plFolderCtx}
+  <div class="ctx-menu" use:fitMenu style="left:{Math.min(plFolderCtx.x, window.innerWidth - 220)}px;top:{Math.min(plFolderCtx.y, window.innerHeight - 100)}px"
+       onclick={(e) => e.stopPropagation()}>
+    <button onclick={() => { plFolderEdit = { orig: plFolderCtx.name, name: plFolderCtx.name }; plFolderCtx = null }}>Umbenennen</button>
+    <button class="ctx-danger" title="Die Playlisten darin bleiben erhalten und stehen danach wieder ohne Ordner da"
+            onclick={() => { send({ type: 'playlist_folder_delete', name: plFolderCtx.name }); plFolderCtx = null }}>Ordner löschen (Playlisten bleiben)</button>
+  </div>
+{/if}
+
 {#if playlistCtx}
   <div class="ctx-menu" use:fitMenu style="left:{Math.min(playlistCtx.x, window.innerWidth - 220)}px;top:{Math.min(playlistCtx.y, window.innerHeight - 120)}px"
        onclick={(e) => e.stopPropagation()}>
@@ -2565,6 +2676,15 @@
     <div class="ctx-sep"></div>
     <button onclick={() => { loadPlaylistToQueue(playlistCtx.path); playlistCtx = null }}>In Queue laden</button>
     <button onclick={() => { const pl = $playlists.find(p => p.path === playlistCtx.path); if (pl) startPlRename(pl); playlistCtx = null }}>Umbenennen</button>
+    {#if $playlistFolders.length}
+      {@const cur = $playlists.find(p => p.path === playlistCtx.path)?.folder ?? ''}
+      <div class="ctx-sep"></div>
+      {#each $playlistFolders.filter(f => f !== cur) as f (f)}
+        <button onclick={() => { movePlaylist(playlistCtx.path, f); playlistCtx = null }}>In den Ordner „{f}“</button>
+      {/each}
+      {#if cur}<button onclick={() => { movePlaylist(playlistCtx.path, ''); playlistCtx = null }}>Aus dem Ordner „{cur}“ nehmen</button>{/if}
+      <div class="ctx-sep"></div>
+    {/if}
     <button class="ctx-danger" onclick={() => { deletePlaylist(playlistCtx.path); playlistCtx = null }}>Löschen</button>
   </div>
 {/if}
@@ -2683,6 +2803,9 @@
 
   .t-empty { padding: var(--sp-1) var(--sp-3); font-size: var(--fs-sm); color: var(--c-tx5); font-style: italic; }
   .pl-drop-hover { background: var(--c-green-bg) !important; box-shadow: inset 0 0 0 1px var(--c-green-br); }
+  .t-pl-folder { font-weight: 600; }
+  .t-pl-folder .t-chevron { margin-left: -14px; }
+  .t-pl-in { padding-left: 38px; }
   .pl-with-queue { display: flex; align-items: center; gap: 8px; font-size: var(--fs-body); color: var(--c-tx2); cursor: pointer; }
   .pl-missing { margin: 0; padding-left: 18px; max-height: 180px; overflow-y: auto; font-size: var(--fs-sm); color: var(--c-tx3); }
   .pl-missing li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
