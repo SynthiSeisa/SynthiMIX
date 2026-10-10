@@ -951,6 +951,10 @@ async def compute_waveform(path: str, bars: int = 1000) -> list[float]:
                 pass
     loop = asyncio.get_running_loop()
     data = await loop.run_in_executor(_WF_POOL, _waveform_sync, path, bars)
+    if not data:
+        # Ein leeres Ergebnis (Datei gerade gesperrt, Platte noch nicht wach) nicht
+        # merken — sonst blieb die Waveform bis zum Neustart leer
+        return data
     _wf_cache[path] = data
     if key and data:
         d = _wf_disk_dict()
@@ -1049,8 +1053,17 @@ async def _normalize_files(paths: list, target_lufs: float, target_tp: float, ws
             if res is True:
                 res = "done"
             if res == "done" and lt is not None:
-                lt["lufs"] = target_lufs
-                lt.pop("lufs_main", None)       # misst der Hintergrund neu
+                # Nachmessen statt den Zielwert einzutragen: loudnorm trifft ihn
+                # bei MP3 nur auf etwa ±0,5-0,8 dB (gemessen −8,9 … −9,9 bei Ziel −9,0)
+                try:
+                    val, main_l = await loop.run_in_executor(None, _measure_loudness_sync, path)
+                except Exception:
+                    val, main_l = None, None
+                lt["lufs"] = val if val is not None and val > -90 else target_lufs
+                if main_l is not None:
+                    lt["lufs_main"] = main_l
+                else:
+                    lt.pop("lufs_main", None)   # misst der Hintergrund neu
                 try:
                     lt["mtime"] = int(os.path.getmtime(path))
                 except OSError:
@@ -1137,9 +1150,13 @@ def _normalize_one_sync(path: str, target_lufs: float, target_tp: float,
             codec = ["-c:a", _REENCODE[ext], "-b:a", f"{max(br, 128) if br else 320}k"]
         # Cover und Tags unveraendert mitnehmen; loudnorm rechnet intern mit
         # 192 kHz, deshalb die urspruengliche Abtastrate wieder setzen.
+        # WAV: ffmpeg kann das eingebettete Cover nicht als Bildspur in eine WAV
+        # schreiben und brach ab (gemessen 10/2026) — dort ohne Bildspur; das
+        # Cover kommt mit den Tags zurueck (quality._copy_tags_sync).
+        cover = [] if ext == ".wav" else ["-map", "0:v?", "-c:v", "copy"]
         p2 = subprocess.run(
-            [core.FFMPEG, "-nostdin", "-i", path, "-map", "0:a:0", "-map", "0:v?",
-             "-af", af, *codec, "-c:v", "copy", "-ar", str(sr or 48000),
+            [core.FFMPEG, "-nostdin", "-i", path, "-map", "0:a:0", *cover,
+             "-af", af, *codec, "-ar", str(sr or 48000),
              "-map_metadata", "0", "-y", tmp],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600, creationflags=_NO_WINDOW)
         if p2.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:

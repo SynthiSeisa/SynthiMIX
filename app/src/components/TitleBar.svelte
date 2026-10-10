@@ -1,5 +1,5 @@
 <script>
-  import { settingsOpen, openSettings, send, backendLogs, notes, wishes, toolUpdates, wishesOpen } from '../stores/ws.js'
+  import { settingsOpen, openSettings, send, backendLogs, notes, wishes, toolUpdates, wishesOpen, scanStatus } from '../stores/ws.js'
   import WishesDialog from './WishesDialog.svelte'
   import { theme } from '../lib/prefs.js'
   const win = window.electron ?? {}
@@ -116,7 +116,16 @@
     win.onUpdateAvailable?.((v, size, notes) => { updateVersion = v; updateSize = size; updateNotes = notes ?? ''; updateDismissed = false })
     win.onUpdateProgress?.((p) => { updateProgress = p })
     win.onUpdateDownloaded?.(() => { updateReady = true; updateDownloading = false; updateProgress = null })
-    win.onUpdateError?.((msg) => { console.warn('[updater]', msg) })
+    win.onUpdateError?.((msg) => {
+      console.warn('[updater]', msg)
+      // Netzfehler beim stillen Pruefen bleiben still; ein fehlgeschlagenes
+      // Einspielen (Platten-Update) muss man sehen
+      if (/^Das Update/.test(msg ?? '')) {
+        updateReady = false
+        scanStatus.set(msg)
+        setTimeout(() => scanStatus.set(''), 30000)
+      }
+    })
   })
 </script>
 

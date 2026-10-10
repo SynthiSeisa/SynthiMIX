@@ -240,6 +240,8 @@ function connect() {
     ws.send(JSON.stringify({ type: 'get_download_tree' }))
     ws.send(JSON.stringify({ type: 'get_watched_folders' }))   // Musikordner in der Navigation
     ws.send(JSON.stringify({ type: 'get_followed' }))
+    // Waveforms, die waehrend der Unterbrechung angefragt wurden, kamen nie an
+    for (const [kind, path] of Object.entries(_wfWant)) if (path) ws.send(JSON.stringify({ type: 'get_' + kind, path }))
   }
 
   ws.onclose = () => {
@@ -402,6 +404,12 @@ function connect() {
         break
       case 'playlist_content':
         playlistContent.update(m => ({ ...m, [msg.path]: msg.tracks ?? [] }))
+        if (msg.added !== undefined) {
+          const name = (msg.path ?? '').replace(/\\/g, '/').split('/').pop().replace(/\.m3u$/i, '')
+          scanStatus.set(msg.added ? `${msg.added} Titel zu „${name}“ hinzugefügt` + (msg.already ? ` · ${msg.already} waren schon drin` : '')
+                                   : `Schon in „${name}“ — nichts hinzugefügt`)
+          setTimeout(() => scanStatus.set(''), 6000)
+        }
         break
       case 'track_enriched':
         nowPlaying.update(t => t?.path === msg.path

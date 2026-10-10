@@ -4,6 +4,7 @@ const { spawn } = require('child_process')
 const { autoUpdater } = require('electron-updater')
 const fs = require('fs')
 const portable = require('./portable.cjs')
+const portableUpdate = require('./portableUpdate.cjs')
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 
@@ -259,11 +260,18 @@ ipcMain.on('start-drag-playlist', (e, plPath) => {
       files = [...new Set(files)]
     }
   } catch (_) { files = [] }
-  if (files.length) {
-    dragIcon = dragIcon || glyph('note', true, [255, 154, 51])
-    try { e.sender.startDrag({ file: files[0], files, icon: dragIcon }) } catch (_) { files = [] }
-  }
+  // Erst antworten, dann ziehen: startDrag kehrt erst zurueck, wenn losgelassen
+  // wurde. Solange wartete das Fenster auf die Antwort und war eingefroren —
+  // das Ablegen auf einen Playlist-Ordner im Fenster ging deshalb nicht
+  // (gemeldet 10/2026).
   e.returnValue = files
+  if (files.length) {
+    const sender = e.sender
+    setImmediate(() => {
+      dragIcon = dragIcon || glyph('note', true, [255, 154, 51])
+      try { sender.startDrag({ file: files[0], files, icon: dragIcon }) } catch (_) {}
+    })
+  }
 })
 
 ipcMain.on('player-playing', (_, playing) => {
@@ -300,12 +308,34 @@ function notesToText(n) {
     .replace(/[ \t]{2,}/g, ' ').replace(/[ \t]*\n[ \t]*/g, '\n').replace(/\n{3,}/g, '\n\n').trim()
 }
 
+let downloadedInstaller = null      // Pfad des geladenen Updates (fuer den tragbaren Betrieb)
+
+/** Tragbar: Programmdateien auf der Platte ersetzen, dann neu starten. */
+function installPortableUpdate() {
+  const ok = portableUpdate.start({
+    installer: downloadedInstaller,
+    installDir: path.dirname(process.execPath),
+    resourcesDir: process.resourcesPath,
+    dataDir: portableData,
+    fs, spawn: require('child_process').spawn, tmpRoot: app.getPath('temp'),
+  })
+  if (!ok) {
+    mainWindow?.webContents.send('update-error', 'Das Update konnte nicht vorbereitet werden (Datei fehlt). Bitte später erneut versuchen.')
+    return
+  }
+  quitting = true
+  if (pythonProcess) { try { pythonProcess.kill() } catch (e) {} }
+  app.quit()
+}
+
 function setupAutoUpdater() {
-  // Tragbar: das Update gehoert auf die Festplatte, nicht in den Standardordner
-  // des PCs, an dem sie gerade haengt (dort ist nichts installiert)
-  if (portableData) autoUpdater.installDirectory = path.dirname(process.execPath)
+  // Tragbar: das Update gehoert auf die Festplatte. Der Windows-Installer
+  // kennt je Benutzer nur einen Installationsort — an einem PC, auf dem
+  // SynthiMIX auch fest installiert ist, traf er die PC-Installation. Deshalb
+  // ersetzt portableUpdate.cjs nur die Programmdateien auf der Platte; der
+  // Installer laeuft im tragbaren Betrieb nie (auch nicht beim Beenden).
   autoUpdater.autoDownload = false
-  autoUpdater.autoInstallOnAppQuit = true
+  autoUpdater.autoInstallOnAppQuit = !portableData
 
   autoUpdater.on('update-available', (info) => {
     const size = info.files?.[0]?.size ?? null
@@ -314,7 +344,8 @@ function setupAutoUpdater() {
   autoUpdater.on('download-progress', (p) => {
     mainWindow?.webContents.send('update-progress', Math.round(p.percent))
   })
-  autoUpdater.on('update-downloaded', () => {
+  autoUpdater.on('update-downloaded', (info) => {
+    downloadedInstaller = info?.downloadedFile || null
     mainWindow?.webContents.send('update-downloaded')
   })
   autoUpdater.on('error', (err) => {
@@ -329,6 +360,11 @@ app.whenReady().then(() => {
   setTimeout(() => {
     createWindow()
     registerMediaKeys()
+    // Das Platten-Update ging schief (portableUpdate.cjs): die alte Fassung laeuft weiter
+    if (process.argv.includes('--update-failed')) {
+      setTimeout(() => mainWindow?.webContents.send('update-error',
+        'Das Update konnte nicht eingespielt werden, die bisherige Version läuft weiter. Der Grund steht in „portable-update.log“ im Datenordner.'), 6000)
+    }
     if (app.isPackaged) {
       setupAutoUpdater()
       // Update-Check 10 Sekunden nach Start (Backend muss erst hochfahren),
@@ -354,7 +390,7 @@ app.on('window-all-closed', () => {
 
 // Update herunterladen / installieren
 ipcMain.on('download-update', () => autoUpdater.downloadUpdate().catch(() => {}))
-ipcMain.on('install-update',  () => autoUpdater.quitAndInstall())
+ipcMain.on('install-update',  () => { if (portableData) installPortableUpdate(); else autoUpdater.quitAndInstall() })
 // "Nach Updates suchen" (Einstellungen → Info). Ist eins da, meldet sich
 // zusaetzlich das Update-Fenster wie beim automatischen Check.
 ipcMain.handle('check-update', async () => {

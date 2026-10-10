@@ -187,7 +187,13 @@
   function onRowDragStart(e, i) {
     dragFrom = i
     // In der App: echter Datei-Zug (auch nach FL Studio); umsortiert wird ueber queueFrom
-    if (startFileDrag(e, [$queue[i]], { queueFrom: i })) return
+    // Mehrere markiert und einer davon gegriffen: alle mitnehmen (z. B. auf eine
+    // Playlist) — vorher ging immer nur der eine mit. In der Warteschlange selbst
+    // wird weiter nur der gegriffene umsortiert (queueFrom).
+    const multi = qSelected.has(i) && qSelected.size > 1
+    const tracks = multi ? [...qSelected].sort((a, b) => a - b).map(k => $queue[k]).filter(Boolean) : [$queue[i]]
+    if (startFileDrag(e, tracks, { queueFrom: i })) return
+    if (multi) e.dataTransfer.setData('application/x-ytdl-multi', JSON.stringify(tracks.map(t => ({ path: t.path, title: t.title, duration_sec: t.duration_sec ?? 0 }))))
     e.dataTransfer.setData('application/x-queue-move', String(i))
     e.dataTransfer.effectAllowed = 'move'
   }

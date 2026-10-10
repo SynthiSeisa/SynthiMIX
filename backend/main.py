@@ -1131,11 +1131,12 @@ async def handle_message(ws: WebSocket, msg: dict):
                                            "path": pl_path, "tracks": result}))
 
     elif t == "playlist_add_track":
-        pl_path   = msg.get("playlist", "")
-        trk_path  = msg.get("path", "")
-        trk_title = msg.get("title", "") or Path(trk_path).stem
-        trk_dur   = int(msg.get("duration_sec", 0))
-        if os.path.exists(pl_path) and trk_path:
+        # Ein Titel (path/title/duration_sec) oder mehrere auf einmal (tracks).
+        pl_path = msg.get("playlist", "")
+        tracks = msg.get("tracks") or [{"path": msg.get("path", ""), "title": msg.get("title", ""),
+                                        "duration_sec": msg.get("duration_sec", 0)}]
+        tracks = [x for x in tracks if isinstance(x, dict) and x.get("path")]
+        if os.path.exists(pl_path) and tracks:
             # Read existing paths to avoid dupes
             existing = set()
             try:
@@ -1146,14 +1147,27 @@ async def handle_message(ws: WebSocket, msg: dict):
                             existing.add(l)
             except Exception:
                 pass
-            if trk_path not in existing:
+            neu = []
+            for x in tracks:
+                if x["path"] not in existing:
+                    existing.add(x["path"])
+                    neu.append(x)
+            if neu:
                 with open(pl_path, "a", encoding="utf-8") as f:
-                    f.write(f"#EXTINF:{trk_dur},{trk_title}\n{trk_path}\n")
-                pl_tracks = library._parse_m3u(pl_path)
-                lib_by_path = {lt["path"]: lt for lt in _state["library"]}
-                result = [lib_by_path.get(pt["path"], pt) for pt in pl_tracks]
-                await ws.send_text(json.dumps({"type": "playlist_content",
-                                               "path": pl_path, "tracks": result}))
+                    for x in neu:
+                        try: dur = int(float(x.get("duration_sec") or 0))
+                        except (TypeError, ValueError): dur = 0
+                        f.write(f"#EXTINF:{dur},{x.get('title') or Path(x['path']).stem}\n{x['path']}\n")
+            # Immer antworten — auch wenn alle Titel schon drin waren. Ohne Antwort
+            # blieb die Ansicht bei "Lade Playlist…" stehen, und die Zahl in der
+            # Liste stimmte nicht mehr (gemeldet 10/2026).
+            pl_tracks = library._parse_m3u(pl_path)
+            lib_by_path = {lt["path"]: lt for lt in _state["library"]}
+            result = [lib_by_path.get(pt["path"], pt) for pt in pl_tracks]
+            await ws.send_text(json.dumps({"type": "playlist_content", "path": pl_path, "tracks": result,
+                                           "added": len(neu), "already": len(tracks) - len(neu)}))
+            if neu:
+                await core.broadcast({"type": "playlists", "items": library._get_playlists()})
 
     elif t == "rename_playlist":
         res = library._rename_playlist(msg.get("path", ""), msg.get("name", ""))

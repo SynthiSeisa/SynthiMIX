@@ -3,6 +3,7 @@
   import { library, queue, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, playlistRenamed, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected, qualityScan, revealPath, excludedFolders, watchedFolders, downloadDir, startQualityBatch, startVideoScan, playlistImported, openSetLoudness, importPlaylistFile, playlistFolders, playlistFolderResult } from '../stores/ws.js'
   import BetterVersionDialog from './BetterVersionDialog.svelte'
   import { keySortValue } from '../lib/keys.js'
+  import { rawIndexAt, rangePaths, edgeScroll, isSweepMove } from '../lib/sweepselect.js'
   import { startFileDrag, startPlaylistDrag, draggingPlaylist, ownDrag, hasFiles, droppedPaths } from '../lib/fileDrag.js'
   import KeyChip from './KeyChip.svelte'
   import { density } from '../lib/prefs.js'
@@ -479,12 +480,9 @@
   function dropOnPlaylist(e, plPath) {
     e.preventDefault()
     dragOverPlaylist = null
-    let added = false
-
+    const adding = []
     function addTrack(t) {
-      added = true
-      send({ type: 'playlist_add_track', playlist: plPath,
-             path: t.path, title: t.title, duration_sec: t.duration_sec ?? 0 })
+      if (t?.path) adding.push({ path: t.path, title: t.title ?? '', duration_sec: t.duration_sec ?? 0 })
     }
 
     const own = ownDrag(e)
@@ -511,8 +509,22 @@
         }
       }
     }
-    // Invalidate cache so playlist content refreshes after drop
-    if (added) playlistContent.update(m => { const c = {...m}; delete c[plPath]; return c })
+    // Alle auf einmal; die Antwort bringt den neuen Inhalt (kein Leeren der
+    // Ansicht mehr — sie blieb sonst bei "Lade Playlist…" stehen)
+    if (adding.length) send({ type: 'playlist_add_track', playlist: plPath, tracks: adding })
+  }
+  // Geoeffnete Playlist: Titel direkt in die Liste ziehen (Warteschlange, Downloads, Explorer)
+  let dragOverList = $state(false)
+  const openPlPath = $derived(navMode.startsWith('playlist:') ? navMode.slice(9) : '')
+  function listDragOver(e) {
+    if (!openPlPath || isPlDrag(e)) return
+    e.preventDefault()
+    dragOverList = true
+  }
+  function listDrop(e) {
+    dragOverList = false
+    if (!openPlPath || isPlDrag(e)) return
+    dropOnPlaylist(e, openPlPath)
   }
 
   // ── Track list filtered + sorted ──────────────────────────────────────────
@@ -1424,6 +1436,7 @@
   }
 
   function dragStart(e, track) {
+    if (sweepInsteadOfDrag(e)) return                          // nach oben/unten gezogen: markieren
     // In der App: echter Datei-Zug — auch nach FL Studio, Explorer, rekordbox
     const multi = selected.has(track.path) && selected.size > 1
     if (startFileDrag(e, multi ? filtered.filter(t => selected.has(t.path)) : [track])) return
@@ -1460,7 +1473,81 @@
     }
   }
 
+  // ── Markieren mit gehaltener Maustaste (wie im Explorer) ──────────────────
+  // Druecken und nach oben/unten ziehen markiert den Bereich — auf einem Titel
+  // oder in der leeren Flaeche unter der Liste. Seitwaerts ziehen bewegt die
+  // Titel wie bisher (Warteschlange, Playlist, rekordbox). Die erste Fassung
+  // unterschied nach "markiert oder nicht": wer einen Titel anklickte und dann
+  // zog, bekam einen Datei-Zug statt einer Markierung (gemeldet 10/2026).
+  let _rowsInner = $state(null)
+  let sweeping = $state(false)
+  let _sweep = null              // { anchor, base, x0, y0, lastY, blank, timer }
+  let _sweptAt = 0
+  function sweepDown(e, track, vi) {
+    if (e.button !== 0 || e.shiftKey || !_rowsInner) return
+    if (e.target?.closest?.('button, input, select, textarea, a, .r-btn, .row-act')) return
+    const blank = !track
+    _sweep = { anchor: blank ? rawIndexAt(e.clientY, _rowsInner.getBoundingClientRect().top, ROW_H) : _vStart + vi,
+               base: (e.ctrlKey || e.metaKey) ? [...selected] : null,
+               x0: e.clientX, y0: e.clientY, lastY: e.clientY, blank, timer: null }
+    window.addEventListener('mousemove', sweepMove)
+    window.addEventListener('mouseup', sweepUp, { once: true })
+  }
+  function sweepApply() {
+    if (!_sweep || !_rowsInner) return
+    const idx = rawIndexAt(_sweep.lastY, _rowsInner.getBoundingClientRect().top, ROW_H)
+    selected = rangePaths(filtered.map(t => t.path), _sweep.anchor, idx, _sweep.base)
+  }
+  function sweepBegin() {
+    sweeping = true
+    selectionOwner.set('library')
+    // am oberen/unteren Rand mitrollen, auch wenn die Maus stillsteht
+    _sweep.timer = setInterval(() => {
+      if (!_sweep || !_rowsEl) return
+      const r = _rowsEl.getBoundingClientRect()
+      const d = edgeScroll(_sweep.lastY, r.top, r.bottom)
+      if (d) { _rowsEl.scrollTop += d; sweepApply() }
+    }, 30)
+    sweepApply()
+  }
+  function sweepMove(e) {
+    if (!_sweep) return
+    _sweep.lastY = e.clientY
+    if (!sweeping) {
+      const dx = Math.abs(e.clientX - _sweep.x0), dy = Math.abs(e.clientY - _sweep.y0)
+      if (Math.max(dx, dy) < 5) return
+      // seitwaerts auf einem Titel: das wird ein Datei-Zug (dragStart), kein Markieren
+      if (!_sweep.blank && !isSweepMove(dx, dy)) return
+      sweepBegin()
+    }
+    e.preventDefault()
+    sweepApply()
+  }
+  function sweepUp() {
+    window.removeEventListener('mousemove', sweepMove)
+    if (_sweep?.timer) clearInterval(_sweep.timer)
+    if (sweeping) _sweptAt = Date.now()       // der Klick danach darf die Markierung nicht ersetzen
+    else if (_sweep?.blank && !_sweep.base) clearSelection()     // Klick ins Leere hebt die Auswahl auf
+    sweeping = false
+    _sweep = null
+  }
+  // Der Browser will einen Titel ziehen: nach oben/unten ist es ein Markieren
+  function sweepInsteadOfDrag(e) {
+    if (sweeping) { e.preventDefault(); return true }
+    if (!_sweep) return false
+    const dx = Math.abs(e.clientX - _sweep.x0), dy = Math.abs(e.clientY - _sweep.y0)
+    if (isSweepMove(dx, dy)) {
+      e.preventDefault()
+      _sweep.lastY = e.clientY
+      sweepBegin()
+      return true
+    }
+    sweepUp()                    // seitwaerts: ziehen wie bisher
+    return false
+  }
+
   function handleRowClick(e, track) {
+    if (Date.now() - _sweptAt < 350) return
     selectionOwner.set('library')
     if (e.ctrlKey || e.metaKey) {
       e.preventDefault()
@@ -2161,15 +2248,6 @@
       </div>
     {/if}
 
-    {#if selected.size > 0}
-      <div class="sel-bar">
-        <span class="sel-count">{selected.size} ausgewählt</span>
-        {#if navMode === 'quality'}
-          <button class="btn btn-sm btn-primary" onclick={() => startQualityBatch([...selected])}><i class="ti ti-list-check"></i> Bessere Versionen suchen ({selected.size})</button>
-        {/if}
-      </div>
-    {/if}
-
     <div class="col-header-wrap">
       <div class="col-header" bind:this={_colHeaderEl}>
         <div class="col-pad"></div>
@@ -2218,7 +2296,9 @@
       </div>
     </div>
 
-    <div class="rows" bind:this={_rowsEl} onscroll={onRowsScroll}>
+    <div class="rows" class:pl-list-drop={dragOverList} bind:this={_rowsEl} onscroll={onRowsScroll}
+         ondragover={listDragOver} ondragleave={() => dragOverList = false} ondrop={listDrop} role="grid" tabindex="-1"
+         onmousedown={(e) => { if (!e.target?.closest?.('.row') && e.offsetX < e.currentTarget.clientWidth && e.offsetY < e.currentTarget.clientHeight) sweepDown(e, null, 0) }}>
       {#if filtered.length === 0}
         <div class="empty">
           {navMode.startsWith('playlist:') && !$playlistContent[navMode.slice(9)]
@@ -2234,14 +2314,15 @@
           </div>
         {/if}
       {:else}
-        <div style="height:{filtered.length * ROW_H}px; position:relative; min-width:max-content">
+        <div style="height:{filtered.length * ROW_H}px; position:relative; min-width:max-content" bind:this={_rowsInner} class:sweeping>
           <div style="position:absolute; top:{_vStart * ROW_H}px; width:100%">
             {#each _vItems as track, vi (track.path)}
               {@const qdot = qualityDot(track)}
               {@const at = getTrackArtistTitle(track)}
               <div class="row {(track.play_count ?? 0) > 0 ? 'played' : ''} {selected.has(track.path) ? 'sel' : ''} {track.missing ? 'missing' : ''} {navMode === 'duplicates' && dupesHidden.has(track.path) ? 'dupe-copy' : ''} {dupeGrpStart.has(track.path) ? 'grp-start' : ''}"
                    role="row"
-                   draggable={!track._gone}
+                   draggable={!sweeping && !track._gone}
+                   onmousedown={(e) => sweepDown(e, track, vi)}
                    ondragstart={(e) => dragStart(e, track)}
                    onclick={(e) => handleRowClick(e, track)}
                    ondblclick={(e) => track._gone ? null : navMode === 'quality' ? openBetterVersion(track) : onCtx(e, track)}
@@ -2348,6 +2429,18 @@
         </div>
       {/if}
     </div>
+
+    <!-- Auswahl-Leiste unter der Liste: oben schob sie beim Markieren alle Zeilen nach unten -->
+    {#if selected.size > 0}
+      <div class="sel-bar">
+        <span class="sel-count">{selected.size} ausgewählt</span>
+        {#if navMode === 'quality'}
+          <button class="btn btn-sm btn-primary" onclick={() => startQualityBatch([...selected])}><i class="ti ti-list-check"></i> Bessere Versionen suchen ({selected.size})</button>
+        {/if}
+        <span class="sel-spacer"></span>
+        <button class="btn btn-sm btn-ghost" onclick={clearSelection} title="Auswahl aufheben (Esc)">Auswahl aufheben</button>
+      </div>
+    {/if}
 
   </div>
 
@@ -2806,6 +2899,7 @@
   .t-pl-folder { font-weight: 600; }
   .t-pl-folder .t-chevron { margin-left: -14px; }
   .t-pl-in { padding-left: 38px; }
+  .pl-list-drop { box-shadow: inset 0 0 0 2px var(--c-green-br); background: var(--c-green-bg); }
   .pl-with-queue { display: flex; align-items: center; gap: 8px; font-size: var(--fs-body); color: var(--c-tx2); cursor: pointer; }
   .pl-missing { margin: 0; padding-left: 18px; max-height: 180px; overflow-y: auto; font-size: var(--fs-sm); color: var(--c-tx3); }
   .pl-missing li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2945,7 +3039,8 @@
     font-size: var(--fs-sm);
   }
   .norm-progress { color: var(--c-green-tx); background: var(--c-green-bg); }
-  .sel-bar { background: var(--c-act-bg); }
+  .sel-bar { background: var(--c-act-bg); border-bottom: none; border-top: 1px solid var(--c-br1); padding-block: 4px; }
+  .sel-spacer { flex: 1; }
   .sel-count { color: var(--c-accent-tx); font-weight: 600; }
 
   /* Spaltenkopf — gehoert sichtbar zur Tabelle: gleicher Grund wie die
@@ -2993,13 +3088,15 @@
 
   /* Zeilen: klare Hoehe (Dichte), dezente Trennlinie statt Zebra,
      deutliche Hover- und Auswahlfarbe */
-  .rows { flex: 1; overflow: auto; }
+  .rows { flex: 1; overflow: auto; user-select: none; }
   .row {
     display: flex; align-items: center; height: var(--row-h); min-width: max-content;
     border-bottom: 1px solid var(--c-br1); cursor: default;
     font-size: var(--row-fs);
   }
   .row:hover { background: var(--c-hover); }
+  .sweeping, .sweeping * { user-select: none; cursor: default; }
+  .sweeping .row:hover:not(.sel) { background: none; }
   .row.sel { background: var(--c-sel); box-shadow: inset 3px 0 0 var(--c-blue); }
   .row.sel:hover { background: var(--c-sel); }
   .row.missing { opacity: .5; }

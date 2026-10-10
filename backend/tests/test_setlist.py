@@ -141,3 +141,44 @@ class NewPlaylistTest(BackendTest):
         self.run_async(main.handle_message(FakeWS(), {"type": "save_playlist", "name": "Voll", "empty": True}))
         self.assertEqual(self.zeilen("Voll.m3u"), [str(a)])
         self.assertEqual(self.zeilen("Voll (2).m3u"), [])
+
+
+class AddToPlaylistTest(BackendTest):
+    """Gemeldet 10/2026: mehrere Titel aus der Warteschlange gezogen — nur einer kam an;
+    war der Titel schon drin, blieb die Ansicht bei "Lade Playlist…" stehen."""
+
+    def setUp(self):
+        super().setUp()
+        self._dir = core.PLAYLISTS_DIR
+        core.PLAYLISTS_DIR = self.tmp / "Downloads" / "playlists"
+        core.PLAYLISTS_DIR.mkdir(parents=True)
+        self.pl = core.PLAYLISTS_DIR / "Set.m3u"
+        self.pl.write_text("#EXTM3U\n", encoding="utf-8")
+        self.files = []
+        for n in ("a", "b", "c"):
+            p = self.tmp / f"{n}.mp3"
+            p.write_bytes(b"x")
+            self.files.append(str(p))
+
+    def tearDown(self):
+        core.PLAYLISTS_DIR = self._dir
+        super().tearDown()
+
+    def add(self, **msg):
+        ws = FakeWS()
+        self.run_async(main.handle_message(ws, {"type": "playlist_add_track", "playlist": str(self.pl), **msg}))
+        return [m for m in ws.sent if m["type"] == "playlist_content"]
+
+    def test_mehrere_auf_einmal_und_immer_eine_antwort(self):
+        a, b, c = self.files
+        r = self.add(tracks=[{"path": a, "title": "A", "duration_sec": 10}, {"path": b, "title": "B"}])
+        self.assertEqual((r[0]["added"], r[0]["already"], [t["path"] for t in r[0]["tracks"]]), (2, 0, [a, b]))
+        # einer schon drin, einer neu, einer doppelt in der Auswahl
+        r = self.add(tracks=[{"path": b}, {"path": c, "duration_sec": "12.6"}, {"path": c}])
+        self.assertEqual((r[0]["added"], r[0]["already"], len(r[0]["tracks"])), (1, 2, 3))
+        # alles schon drin: trotzdem eine Antwort mit dem Inhalt (sonst haengt die Ansicht)
+        r = self.add(path=a, title="A", duration_sec=10)
+        self.assertEqual((len(r), r[0]["added"], r[0]["already"], len(r[0]["tracks"])), (1, 0, 1, 3))
+        zeilen = [ln for ln in self.pl.read_text(encoding="utf-8").splitlines() if not ln.startswith("#")]
+        self.assertEqual(zeilen, [a, b, c])
+        self.assertEqual(self.add(tracks=[]), [])

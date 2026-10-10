@@ -1128,6 +1128,19 @@
     }
   })
 
+  // Bleibt die Waveform des laufenden Titels leer (Anfrage ging verloren, nach
+  // einem Uebergang ohne vorgeladene Waveform, Datei kurz nicht lesbar): noch
+  // ein paar Mal nachfragen statt bis zum naechsten Titel leer zu bleiben.
+  let _wfRetry = { path: '', n: 0 }
+  $effect(() => {
+    const p = $nowPlaying?.path
+    if (!p || $waveform.length) return
+    if (_wfRetry.path !== p) _wfRetry = { path: p, n: 0 }
+    if (_wfRetry.n >= 4) return
+    const t = setTimeout(() => { _wfRetry.n++; requestWaveform('waveform', p) }, 2500 + _wfRetry.n * 2500)
+    return () => clearTimeout(t)
+  })
+
   // ── Play / pause sync ──────────────────────────────────────────────────────
   $effect(() => {
     const playing = $playerState.playing

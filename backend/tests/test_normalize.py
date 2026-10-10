@@ -77,8 +77,38 @@ class NormalizeTest(BackendTest):
         self.assertEqual(done["type"], "normalize_done")
         self.assertEqual((done["normalized"], done["skipped"], done["errors"], done["total"]), (1, 1, 1, 3))
         self.assertEqual(Path(b).read_bytes(), alt_b)
-        self.assertEqual(main._state["library"][0]["lufs"], -14.0)
+        # nachgemessen, nicht einfach der Zielwert eingetragen
+        self.assertAlmostEqual(main._state["library"][0]["lufs"], -14.0, delta=1.0)
+        gemessen = media._measure_loudness_sync(a)[0]
+        self.assertEqual(main._state["library"][0]["lufs"], gemessen)
         self.assertEqual(main._state["library"][0]["mtime"], int(__import__("os").path.getmtime(a)))
+
+    def test_wav_mit_eingebettetem_cover(self):
+        # ffmpeg sieht das Cover als Bildspur und kann sie nicht in eine WAV schreiben —
+        # das Angleichen brach ab (gemessen 10/2026)
+        self.require_ffmpeg()
+        p = str(self.tmp / "cover.wav")
+        subprocess.run([main.FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=220:duration=8,volume=0.1", p],
+                       check=True, capture_output=True, creationflags=main._NO_WINDOW)
+        from mutagen.wave import WAVE
+        from mutagen.id3 import APIC, TIT2
+        f = WAVE(p)
+        f.add_tags()
+        import struct
+        import zlib
+
+        def chunk(t, d):
+            return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+        png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 8, 8, 8, 2, 0, 0, 0))
+               + chunk(b"IDAT", zlib.compress(b"".join(b"\x00" + b"\xff\x80\x00" * 8 for _ in range(8)))) + chunk(b"IEND", b""))
+        f.tags.add(APIC(encoding=3, mime="image/png", type=3, desc="Cover", data=png))
+        f.tags.add(TIT2(encoding=3, text="Probe"))
+        f.save()
+        self.assertEqual(media._normalize_one_sync(p, -14.0, -1.5, 0.5, False), "done")
+        g = WAVE(p)
+        self.assertTrue(g.tags.getall("APIC"))                    # Cover kommt mit den Tags zurueck
+        self.assertEqual(str(g.tags["TIT2"]), "Probe")
+        self.assertAlmostEqual(media._measure_loudness_sync(p)[0], -14.0, delta=1.0)
 
     def test_abbrechen(self):
         a = self.make("z.mp3")
