@@ -1,6 +1,6 @@
 {
   "name": "yt-downloader",
-  "version": "1.7.6",
+  "version": "1.7.7",
   "private": true,
   "main": "app/electron/main.js",
   "scripts": {
@@ -36,11 +36,24 @@
       {
         "from": "backend/dist/backend",
         "to": "backend",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "node_modules/7zip-bin/win/x64/7za.exe",
+        "to": "7za.exe"
       }
     ],
     "win": {
-      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "artifactName": "${productName}.Setup.${version}.${ext}"
     },
     "nsis": {
