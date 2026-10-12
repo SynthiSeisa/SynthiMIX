@@ -159,6 +159,22 @@ export function openSetLoudness(pl) {
 export function importPlaylistFile(path) {
   if (path) send({ type: 'playlist_import', path })
 }
+// Kurze Meldung in der Fussleiste der Bibliothek, wahlweise mit "Rueckgaengig".
+// undoAction: { label, run } oder null — verschwindet nach ein paar Sekunden.
+export const undoAction = writable(null)
+let _noteTimer = null, _undoTimer = null
+export function notify(text, { undo = null, ms = 7000 } = {}) {
+  scanStatus.set(text)
+  clearTimeout(_noteTimer); clearTimeout(_undoTimer)
+  undoAction.set(undo ? { label: 'Rückgängig', run: undo } : null)
+  _noteTimer = setTimeout(() => scanStatus.set(''), undo ? Math.max(ms, 10000) : ms)
+  if (undo) _undoTimer = setTimeout(() => undoAction.set(null), Math.max(ms, 10000))
+}
+export function runUndo() {
+  const u = get(undoAction)
+  undoAction.set(null)
+  if (u) u.run()
+}
 export const playlistFolders = writable([])   // Ordner fuer Playlisten (Namen, eine Ebene)
 export const playlistFolderResult = writable(null)   // Antwort auf playlist_folder_* / playlist_set_folder
 export const playlistRenamed = writable(null) // Antwort auf rename_playlist / follow_rename
@@ -404,11 +420,18 @@ function connect() {
         break
       case 'playlist_content':
         playlistContent.update(m => ({ ...m, [msg.path]: msg.tracks ?? [] }))
-        if (msg.added !== undefined) {
-          const name = (msg.path ?? '').replace(/\\/g, '/').split('/').pop().replace(/\.m3u$/i, '')
-          scanStatus.set(msg.added ? `${msg.added} Titel zu „${name}“ hinzugefügt` + (msg.already ? ` · ${msg.already} waren schon drin` : '')
-                                   : `Schon in „${name}“ — nichts hinzugefügt`)
-          setTimeout(() => scanStatus.set(''), 6000)
+        if (msg.added !== undefined || msg.removed?.length) {
+          const plPath = msg.path
+          const name = (plPath ?? '').replace(/\\/g, '/').split('/').pop().replace(/\.m3u$/i, '')
+          if (msg.removed?.length) {
+            const back = msg.removed
+            notify(`${back.length} Titel aus „${name}“ entfernt`,
+                   { undo: () => send({ type: 'playlist_add_track', playlist: plPath, tracks: back }) })
+          } else if (msg.added) {
+            const paths = msg.added_paths ?? []
+            notify(`${msg.added} Titel zu „${name}“ hinzugefügt` + (msg.already ? ` · ${msg.already} waren schon drin` : ''),
+                   { undo: paths.length ? () => send({ type: 'playlist_remove_track', playlist: plPath, paths }) : null })
+          } else notify(`Schon in „${name}“ — nichts hinzugefügt`)
         }
         break
       case 'track_enriched':

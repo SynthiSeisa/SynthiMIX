@@ -207,6 +207,47 @@ def _rename_followed(url: str, name: str) -> dict:
         f.pop("name", None)
     return {"ok": True}
 
+# Felder, die zum Ort der Datei gehoeren und nicht vom Zwilling kommen duerfen
+_TWIN_SKIP = {"path", "folder", "fid", "mtime", "missing"}
+
+def playlist_tracks(pl_path: str) -> list[dict]:
+    """Inhalt einer Playlist fuer die Anzeige. Steht ein Titel unter genau
+    diesem Pfad in der Bibliothek, kommt dessen Eintrag. Sonst: liegt dieselbe
+    Datei (gleicher Name) an anderer Stelle in der Bibliothek, kommen deren
+    Messwerte (Lautheit, BPM, Tonart, Kuenstler …) — der Pfad bleibt der aus
+    der Playlist. Gemeldet 10/2026: aeltere Playlisten zeigen auf eine Kopie
+    der Musik (anderes Laufwerk, alter Ordner); alle Spalten blieben leer."""
+    by_path = {}
+    by_name: dict[str, list] = {}
+    for lt in _state["library"]:
+        p = lt.get("path") or ""
+        if not p:
+            continue
+        by_path[os.path.normcase(p)] = lt
+        if not lt.get("missing"):
+            by_name.setdefault(os.path.basename(p).lower(), []).append(lt)
+    out = []
+    for pt in _parse_m3u(pl_path):
+        lt = by_path.get(os.path.normcase(pt["path"]))
+        if lt is not None:
+            out.append(lt if lt["path"] == pt["path"] else {**lt, "path": pt["path"]})
+            continue
+        twins = by_name.get(os.path.basename(pt["path"]).lower()) or []
+        if len(twins) > 1:
+            # mehrere gleichnamige: der im gleichnamigen Ordner, sonst nur bei gleicher Laenge
+            parent = os.path.basename(os.path.dirname(pt["path"])).lower()
+            same = [t for t in twins if os.path.basename(os.path.dirname(t["path"])).lower() == parent]
+            if len(same) != 1 and pt.get("duration_sec"):
+                same = [t for t in twins if abs((t.get("duration_sec") or 0) - pt["duration_sec"]) <= 2]
+            twins = same[:1] if len(same) >= 1 and (len(same) == 1 or len({t.get("duration_sec") for t in same}) == 1) else []
+        if twins:
+            tw = twins[0]
+            out.append({**pt, **{k: v for k, v in tw.items() if k not in _TWIN_SKIP},
+                        "path": pt["path"], "twin": tw["path"]})
+        else:
+            out.append(pt)
+    return out
+
 def _parse_m3u(path: str) -> list[dict]:
     tracks = []; title = ""; dur = 0
     try:

@@ -571,12 +571,41 @@ def _write_m3u(dest: Path, tracks: list[tuple]):
         for path, title, dur in tracks:
             f.write(f"#EXTINF:{dur},{title}\n{path}\n")
 
-async def _save_as_playlist(name: str, folder: str | None, tracks: list[tuple]) -> int:
+# "Nur Playlist": die Playlist zeigt auf die vorhandenen Dateien, wo immer sie
+# liegen — kein eigener Ordner, nichts verknuepft. Was fehlt, kommt direkt in
+# den Download-Ordner ("list") oder wird gar nicht geladen ("list_only").
+# Gewuenscht 10/2026: derselbe Titel steht in mehreren YouTube-Playlists; jede
+# legte bisher einen eigenen Ordner an, in dem dann ein einzelner Titel lag.
+_LIST_MODES = ("list", "list_only")
+
+def _merge_m3u(dest: Path, tracks: list[tuple]) -> int:
+    """Playlist schreiben, ohne eine vorhandene gleichen Namens zu verlieren:
+    was schon drinsteht, bleibt in seiner Reihenfolge (auch von Hand ergaenzte
+    Titel), neue kommen hinten dran. Liefert die Anzahl Titel danach."""
+    have, known = [], set()
+    if dest.is_file():
+        for t in library._parse_m3u(str(dest)):
+            if os.path.normcase(t["path"]) not in known:
+                known.add(os.path.normcase(t["path"]))
+                have.append((t["path"], t["title"], int(t.get("duration_sec") or -1)))
+    for path, title, dur in tracks:
+        if os.path.normcase(path) not in known:
+            known.add(os.path.normcase(path))
+            have.append((path, title, dur))
+    _write_m3u(dest, have)
+    return len(have)
+
+async def _save_as_playlist(name: str, folder: str | None, tracks: list[tuple], list_only: bool = False) -> int:
     """SynthiMIX-Playlist (links unter "Playlisten") plus .m3u8 im Download-
-    Ordner fuer rekordbox / Virtual DJ. Liefert die Anzahl Titel."""
+    Ordner fuer rekordbox / Virtual DJ. Liefert die Anzahl Titel.
+    list_only: nur die SynthiMIX-Playlist, vorhandene Eintraege bleiben."""
     if not tracks or not name:
         return 0
     safe = re.sub(r'[<>:"/\\|?*]', '_', name).strip(' .')[:80] or "Playlist"
+    if list_only:
+        n = _merge_m3u(core.PLAYLISTS_DIR / (safe + ".m3u"), tracks)
+        await core.broadcast({"type": "playlists", "items": library._get_playlists()})
+        return n
     _write_m3u(core.PLAYLISTS_DIR / (safe + ".m3u"), tracks)
     out_dir = Path(_state.get("download_dir", str(core.BASE_DIR / "Downloads")))
     try:
@@ -762,7 +791,7 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
     # ── session label + playlist folder name ─────────────────────────────────
     playlist_folder: str | None = None
     if entries is not None:
-        playlist_folder = folder
+        playlist_folder = None if mode in _LIST_MODES else folder
         slabel = label or "Erneut laden"
     elif url.startswith("http") and _is_playlist(url):
         # Vorlaeufige Beschriftung; den echten Namen liefert gleich die Playlist-Pruefung
@@ -799,6 +828,8 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
             parent = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', parent)[:80].rstrip(' .')
             if parent:
                 playlist_folder = os.path.join(parent, playlist_folder)
+        if mode in _LIST_MODES:
+            playlist_folder = None          # nur Playlist: kein eigener Ordner
         slabel = title[:60]
         hdr["session_label"] = slabel
         hdr["title"] = slabel
@@ -1083,9 +1114,9 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
                 hdr["status"] = "done"; hdr["progress"] = 100
                 hdr["status_text"] = (f"✓ nichts Neues ({vor} bekannt)"
                                       + (f" · {n_placed} im Ordner ergänzt" if n_placed else "") + gone_txt())
-                if mode == "playlist":
+                if mode == "playlist" or mode in _LIST_MODES:
                     n_pl = await _save_as_playlist(label or slabel, playlist_folder,
-                                                   _playlist_tracks(all_entries, lib_idx))
+                                                   _playlist_tracks(all_entries, lib_idx), list_only=mode in _LIST_MODES)
                     if n_pl:
                         hdr["status_text"] += f" · Playlist mit {n_pl} Titeln"
                 follow["_new_paths"] = []
@@ -1154,6 +1185,13 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
                 await _finish(item, entry, ok=True, skipped=True)
                 item["status_text"] = "✓ schon in der Bibliothek"
                 state["skipped_lib"] = state.get("skipped_lib", 0) + 1
+                continue
+            if mode == "list_only":
+                # fehlt in der Sammlung und soll nicht geladen werden
+                item = _new_track(entry.get("title") or "")
+                await _finish(item, entry, ok=False, skipped=True)
+                item["status_text"] = "– fehlt in der Sammlung"
+                state["not_loaded"] = state.get("not_loaded", 0) + 1
                 continue
             todo.append(entry)
         if todo:
@@ -1310,12 +1348,14 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
             # neu hineinlegen, falls die Datei von Hand geloescht wird
             follow["_placed_add"] = placed_add + ([v for e in _audited_entries if e["url"] not in fehl_urls
                                                    for v in _vids(e)] if fill_folder else [])
-        vorhanden = state.get("skipped_lib", 0) + state.get("skipped_dupe", 0)
+        nicht = state.get("not_loaded", 0)
+        vorhanden = state.get("skipped_lib", 0) + state.get("skipped_dupe", 0) + nicht
         verkn = state.get("linked", 0)
         ok_n -= vorhanden + verkn
         verkn += n_placed
         hdr["status_text"] = (f"✓ {ok_n} neu" + (f" · {verkn} verknüpft" if verkn else "")
-                              + (f" · {vorhanden} schon da" if vorhanden else "")
+                              + (f" · {vorhanden - nicht} schon da" if vorhanden - nicht else "")
+                              + (f" · {nicht} fehlen (nicht geladen)" if nicht else "")
                               + (f" · {ersetzt} ersetzt" if ersetzt else "")
                               + (f" · {len(fehl)} nicht verfügbar" if fehl else "") + gone_txt())
         if mode == "folder":
@@ -1328,10 +1368,10 @@ async def run_download(url: str, fmt_id: str = "mp3-best", entries: list[dict] |
                         None, _write_m3u, Path(target_dir) / (safe + ".m3u8"), tracks)
                 except Exception as e:
                     print(f"[playlist] .m3u8 nicht geschrieben: {e}", flush=True)
-        if mode == "playlist":
+        if mode == "playlist" or mode in _LIST_MODES:
             # Neue Dateien sind im Index noch nicht drin — sie tragen ihren Pfad am Eintrag
             n_pl = await _save_as_playlist(label or slabel, playlist_folder,
-                                           _playlist_tracks(all_entries, lib_idx))
+                                           _playlist_tracks(all_entries, lib_idx), list_only=mode in _LIST_MODES)
             if n_pl:
                 hdr["status_text"] += f" · Playlist mit {n_pl} Titeln"
         if follow_new and url.startswith("http") and not any(f["url"] == url for f in _state.setdefault("followed", [])):

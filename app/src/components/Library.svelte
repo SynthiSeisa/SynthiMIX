@@ -1,6 +1,6 @@
 <script>
   import { onMount, untrack, tick } from 'svelte'
-  import { library, queue, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, playlistRenamed, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected, qualityScan, revealPath, excludedFolders, watchedFolders, downloadDir, startQualityBatch, startVideoScan, playlistImported, openSetLoudness, importPlaylistFile, playlistFolders, playlistFolderResult } from '../stores/ws.js'
+  import { library, queue, scanStatus, playlists, send, normalizeProgress, dlHistory, scanRecursive, playlistContent, playlistRenamed, appSettings, downloadTree, downloadTreeLoaded, skipNextCrossfade, analyzeProgress, selectionOwner, favorites, trackIdentified, acoustidApiKey, openSettings, connected, qualityScan, revealPath, excludedFolders, watchedFolders, downloadDir, startQualityBatch, startVideoScan, playlistImported, openSetLoudness, importPlaylistFile, playlistFolders, playlistFolderResult, undoAction, runUndo, notify } from '../stores/ws.js'
   import BetterVersionDialog from './BetterVersionDialog.svelte'
   import { keySortValue } from '../lib/keys.js'
   import { rawIndexAt, rangePaths, edgeScroll, isSweepMove } from '../lib/sweepselect.js'
@@ -109,6 +109,17 @@
   function loadDlTree() {
     send({ type: 'get_download_tree' })
   }
+
+  // Die Zahlen neben "Duplikate" und "Qualitaet" standen dauerhaft da (685,
+  // 1318) und wirkten wie offene Aufgaben. Jetzt nur noch, wenn seit dem letzten
+  // Besuch etwas dazugekommen ist — dann als "+N".
+  let navSeen = $state((() => { try { return JSON.parse(localStorage.getItem('navSeen') || '{}') } catch { return {} } })())
+  function markNavSeen(key, n) {
+    if (navSeen[key] === n) return
+    navSeen[key] = n
+    try { localStorage.setItem('navSeen', JSON.stringify(navSeen)) } catch {}
+  }
+  const navNew = (key, n) => (navSeen[key] === undefined ? 0 : Math.max(0, n - navSeen[key]))
 
   function selectNav(mode) {
     // Der Nav-Eintrag zeigt immer die ganze Bibliothek; Ordner und Playlisten
@@ -1254,8 +1265,13 @@
     if (!e || !name || name === e.orig) return
     send(e.orig === null ? { type: 'playlist_folder_add', name } : { type: 'playlist_folder_rename', old: e.orig, name })
   }
-  function movePlaylist(path, folder) {
+  function movePlaylist(path, folder, quiet = false) {
+    const pl = $playlists.find(x => x.path === path)
+    const before = pl?.folder ?? ''
+    if (before === folder) return
     send({ type: 'playlist_set_folder', path, folder })
+    if (!quiet && pl) notify(folder ? `„${pl.name}“ in den Ordner „${folder}“ gelegt` : `„${pl.name}“ aus dem Ordner „${before}“ genommen`,
+                             { undo: () => movePlaylist(path, before, true) })
     if (folder) { plFolderOpen[folder] = true; try { localStorage.setItem('plFolderOpen', JSON.stringify(plFolderOpen)) } catch {} }
   }
   // In der App wird eine Playlist als Datei-Zug gezogen (alle ihre Titel) — so
@@ -1473,6 +1489,22 @@
     }
   }
 
+  // Gesehen ist, was beim Besuch der Ansicht da war; wird es weniger, zaehlt der neue Stand
+  $effect(() => {
+    const d = globalDupes.groups.length, q = qualityInfo.map.size
+    untrack(() => {
+      if (navMode === 'duplicates' || navSeen.dupes === undefined || d < navSeen.dupes) markNavSeen('dupes', d)
+      if (navMode === 'quality' || navSeen.quality === undefined || q < navSeen.quality) markNavSeen('quality', q)
+    })
+  })
+  $effect(() => {
+    const m = navMode
+    untrack(() => {
+      if (m === 'duplicates') markNavSeen('dupes', globalDupes.groups.length)
+      if (m === 'quality') markNavSeen('quality', qualityInfo.map.size)
+    })
+  })
+
   // ── Markieren mit gehaltener Maustaste (wie im Explorer) ──────────────────
   // Druecken und nach oben/unten ziehen markiert den Bereich — auf einem Titel
   // oder in der leeren Flaeche unter der Liste. Seitwaerts ziehen bewegt die
@@ -1669,7 +1701,7 @@
 
   function removeSelectedFromPlaylist() {
     const plPath = navMode.slice(9)
-    for (const path of selected) send({ type: 'playlist_remove_track', playlist: plPath, path })
+    send({ type: 'playlist_remove_track', playlist: plPath, paths: [...selected] })
     selected = new Set()
     ctxMenu = null
   }
@@ -1687,8 +1719,54 @@
     editTrack = null
   }
 
+  let _searchEl = $state(null)
+  function moveSelection(step, extend) {
+    if (!filtered.length) return
+    const paths = filtered.map(t => t.path)
+    const cur = [...selected].map(p => paths.indexOf(p)).filter(i => i >= 0)
+    const from = cur.length ? (step > 0 ? Math.max(...cur) : Math.min(...cur)) : (step > 0 ? -1 : paths.length)
+    const to = Math.max(0, Math.min(paths.length - 1, from + step))
+    selectionOwner.set('library')
+    selected = extend ? new Set([...selected, paths[to]]) : new Set([paths[to]])
+    if (_rowsEl) {
+      const top = to * ROW_H, bottom = top + ROW_H
+      if (top < _rowsEl.scrollTop) _rowsEl.scrollTop = top
+      else if (bottom > _rowsEl.scrollTop + _rowsEl.clientHeight) _rowsEl.scrollTop = bottom - _rowsEl.clientHeight
+    }
+  }
   function libKey(e) {
-    if (e.target?.tagName === 'INPUT') return
+    // Strg+F: ins Suchfeld — auch wenn gerade ein anderes Feld den Fokus hat
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f' && !e.target?.closest?.('.dlg, .queue')) {
+      e.preventDefault()
+      _searchEl?.focus(); _searchEl?.select()
+      return
+    }
+    if (e.target?.tagName === 'INPUT') {
+      // im Suchfeld: Pfeil nach unten geht in die Liste, Esc leert die Suche
+      if (e.target === _searchEl && e.key === 'ArrowDown') { e.preventDefault(); _searchEl.blur(); moveSelection(1, false) }
+      else if (e.target === _searchEl && e.key === 'Escape' && search) { search = '' }
+      return
+    }
+    if (e.target?.closest?.('.dlg, .ctx-menu')) return
+    if (!e.target?.closest?.('.queue') && !editTrack && !ctxMenu) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault()
+        moveSelection(e.key === 'ArrowDown' ? 1 : -1, e.shiftKey)
+        return
+      }
+      // Enter: die markierten Titel in die Warteschlange (spielt nichts sofort — nichts wird unterbrochen)
+      if (e.key === 'Enter' && selected.size > 0 && $selectionOwner === 'library') {
+        e.preventDefault()
+        const list = filtered.filter(t => selected.has(t.path) && !t._gone && !t.missing)
+        // Die Warteschlange nimmt keinen Titel doppelt — ehrlich melden, was neu war
+        const drin = new Set($queue.map(t => t.path))
+        const neu = list.filter(t => !drin.has(t.path))
+        list.forEach(addToQueue)
+        if (list.length) notify(neu.length ? `${neu.length} Titel in die Warteschlange gelegt` + (neu.length < list.length ? ` · ${list.length - neu.length} waren schon drin` : '')
+                                           : 'Schon in der Warteschlange')
+        return
+      }
+    }
     // Don't capture keystrokes that originate from the queue panel
     if (e.target?.closest?.('.queue')) return
     if (e.key === 'Escape') { clearSelection(); ctxMenu = null; editTrack = null }
@@ -1769,7 +1847,7 @@
                 title="{globalDupes.groups.length} Songs liegen mehrfach vor ({globalDupes.all.size} Dateien)">
           <i class="ti ti-copy t-ico t-ico-warn" aria-hidden="true"></i>
           <span class="t-name">Duplikate</span>
-          <span class="t-count">{globalDupes.groups.length}</span>
+          {#if navNew('dupes', globalDupes.groups.length)}<span class="t-count t-new" title="seit dem letzten Besuch dazugekommen">+{navNew('dupes', globalDupes.groups.length)}</span>{/if}
         </button>
       {/if}
       {#if qualityInfo.map.size > 0 || navMode === 'quality'}
@@ -1777,7 +1855,7 @@
                 title="Titel mit schlechter Qualität: Musikvideo-Versionen, niedrige Bitrate, hochgerechnete Dateien">
           <i class="ti ti-alert-triangle t-ico t-ico-warn" aria-hidden="true"></i>
           <span class="t-name">Qualität</span>
-          <span class="t-count">{qualityInfo.map.size}</span>
+          {#if navNew('quality', qualityInfo.map.size)}<span class="t-count t-new" title="seit dem letzten Besuch dazugekommen">+{navNew('quality', qualityInfo.map.size)}</span>{/if}
         </button>
       {/if}
       <div class="nav-sep nav-sep-top"></div>
@@ -2115,8 +2193,6 @@
           {:else if $qualityScan}
             <span class="ns-text"><i class="ti ti-refresh spinner"></i> Höhen-Messung {$qualityScan.done} / {$qualityScan.total}</span>
             <div class="ap-bar"><div class="ap-fill" style="width:{$qualityScan.total ? Math.round($qualityScan.done / $qualityScan.total * 100) : 0}%"></div></div>
-          {:else if $scanStatus}
-            <span class="ns-text" title={$scanStatus}>{$scanStatus}</span>
           {:else}
             <span class="ns-text ns-idle">{$library.length} Titel</span>
           {/if}
@@ -2150,9 +2226,8 @@
       <div class="search-wrap">
         <i class="ti ti-search" aria-hidden="true"></i>
         <input class="field search" type="search" placeholder="Titel, Künstler, Ordner oder Tonart…"
-          bind:value={search} aria-label="Bibliothek durchsuchen" />
+          bind:value={search} bind:this={_searchEl} aria-label="Bibliothek durchsuchen (Strg+F)" title="Strg+F · Pfeil nach unten geht in die Liste" />
       </div>
-      <span class="tb-count">{filtered.length} Titel</span>
       {#if navMode === 'all' && globalDupes.hidden.size > 0}
         <button class="btn btn-ghost btn-sm dupe-hint" onclick={() => hideDupesAuto = !hideDupesAuto}
                 title={hideDupesAuto ? 'Schlechtere Kopien doppelter Songs sind ausgeblendet. Klicken zeigt sie.' : 'Klicken blendet die schlechteren Kopien wieder aus.'}>
@@ -2382,7 +2457,8 @@
                       {#if (track.play_count ?? 0) > 0}<span class="pc-badge">×{track.play_count}</span>{/if}
                     </span>
                   {:else if col.key === 'artist'}
-                    <span class="cell c-artist" style="width:{colWidths.artist}px" title={at.artist}>{at.artist}</span>
+                    <span class="cell c-artist" class:from-title={!track.artist && !!at.artist} style="width:{colWidths.artist}px"
+                          title={!track.artist && at.artist ? `${at.artist} — aus dem Titel gelesen, in der Datei steht kein Künstler. Rechtsklick → „Titel aufräumen…“ schreibt ihn hinein.` : at.artist}>{at.artist}</span>
                   {:else if col.key === 'album'}
                     <span class="cell c-folder" style="width:{colWidths.album}px" title={track.album || ''}>{track.album || ''}</span>
                   {:else if col.key === 'genre'}
@@ -2430,17 +2506,26 @@
       {/if}
     </div>
 
-    <!-- Auswahl-Leiste unter der Liste: oben schob sie beim Markieren alle Zeilen nach unten -->
-    {#if selected.size > 0}
-      <div class="sel-bar">
+    <!-- Fussleiste: immer da, damit sich nichts verschiebt. Links Zahl und Auswahl,
+         rechts die letzte Meldung — dort, wo man gerade arbeitet — mit "Rueckgaengig". -->
+    <div class="lib-foot">
+      {#if selected.size > 0}
         <span class="sel-count">{selected.size} ausgewählt</span>
+        <button class="lf-link" onclick={clearSelection} title="Auswahl aufheben (Esc)">aufheben</button>
         {#if navMode === 'quality'}
           <button class="btn btn-sm btn-primary" onclick={() => startQualityBatch([...selected])}><i class="ti ti-list-check"></i> Bessere Versionen suchen ({selected.size})</button>
         {/if}
-        <span class="sel-spacer"></span>
-        <button class="btn btn-sm btn-ghost" onclick={clearSelection} title="Auswahl aufheben (Esc)">Auswahl aufheben</button>
-      </div>
-    {/if}
+      {:else}
+        <span class="lf-count">{filtered.length} Titel</span>
+      {/if}
+      <span class="lf-spacer"></span>
+      {#if $scanStatus}
+        <span class="lf-msg" role="status" title={$scanStatus}>{$scanStatus}</span>
+        {#if $undoAction}
+          <button class="btn btn-sm lf-undo" onclick={runUndo}><i class="ti ti-arrow-back-up"></i> {$undoAction.label}</button>
+        {/if}
+      {/if}
+    </div>
 
   </div>
 
@@ -3039,8 +3124,20 @@
     font-size: var(--fs-sm);
   }
   .norm-progress { color: var(--c-green-tx); background: var(--c-green-bg); }
-  .sel-bar { background: var(--c-act-bg); border-bottom: none; border-top: 1px solid var(--c-br1); padding-block: 4px; }
-  .sel-spacer { flex: 1; }
+  .sel-bar { background: var(--c-act-bg); }
+  .lib-foot {
+    display: flex; align-items: center; gap: var(--sp-2); flex-shrink: 0;
+    height: 30px; padding: 0 var(--sp-3); border-top: 1px solid var(--c-br1);
+    font-size: var(--fs-sm); color: var(--c-tx4); background: var(--c-bg2);
+  }
+  .lf-count { font-variant-numeric: tabular-nums; }
+  .lf-spacer { flex: 1; }
+  .lf-link { border: none; background: none; color: var(--c-tx3); cursor: pointer; font: inherit; padding: 0 4px; text-decoration: underline; }
+  .lf-link:hover { color: var(--c-tx1); }
+  .lf-msg { color: var(--c-tx1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .lf-undo { flex-shrink: 0; }
+  .t-new { color: var(--c-warn-tx) !important; font-weight: 700; }
+  .c-artist.from-title { font-style: italic; color: var(--c-tx4); }
   .sel-count { color: var(--c-accent-tx); font-weight: 600; }
 
   /* Spaltenkopf — gehoert sichtbar zur Tabelle: gleicher Grund wie die

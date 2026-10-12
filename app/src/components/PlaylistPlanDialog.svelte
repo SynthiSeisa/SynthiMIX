@@ -8,7 +8,8 @@
   // frueher sperrte ein Fenster die ganze App, bis sie fertig war.
   const plan = $derived($playlistPlans[0] ?? null)
   let follow = $state(false)
-  $effect(() => { if (plan) follow = false })
+  let noLoad = $state(false)        // "Nur Playlist": fehlende Titel nicht laden
+  $effect(() => { if (plan) { follow = false; noLoad = false } })
 
   const liste = $derived(plan ? plan.total - plan.dupes : 0)
 
@@ -81,10 +82,26 @@
         {/if}
 
         <div class="body">
-          <button class="opt rec" onclick={() => pick('playlist')}>
+          <!-- Nur Playlist: zeigt auf die vorhandenen Dateien, kein eigener Ordner -->
+          <div class="opt rec opt-list">
+            <button class="opt-main" onclick={() => pick(noLoad ? 'list_only' : 'list')} disabled={noLoad && !plan.have}>
+              <i class="ti ti-playlist opt-ico" aria-hidden="true"></i>
+              <span class="opt-text">
+                <span class="opt-lbl">Nur Playlist anlegen <span class="rec-tag">Empfohlen</span></span>
+                <span class="opt-sub">Playlist „{plan.title || 'Playlist'}“, die auf deine vorhandenen Dateien zeigt — kein eigener Ordner, nichts wird kopiert.
+                  {#if plan.new}{noLoad ? `Die ${plan.new} fehlenden bleiben weg.` : `Die ${plan.new} fehlenden kommen direkt in den Download-Ordner.`}{:else}Du hast schon alle Titel.{/if}</span>
+              </span>
+            </button>
+            {#if plan.new}
+              <label class="opt-chk" title="Die Playlist enthält dann nur, was du schon hast">
+                <input type="checkbox" bind:checked={noLoad} /> Fehlende Titel nicht laden
+              </label>
+            {/if}
+          </div>
+          <button class="opt" onclick={() => pick('playlist')}>
             <i class="ti ti-list opt-ico" aria-hidden="true"></i>
             <span class="opt-text">
-              <span class="opt-lbl">Als Playlist anlegen <span class="rec-tag">Empfohlen</span></span>
+              <span class="opt-lbl">Playlist mit eigenem Ordner</span>
               <span class="opt-sub">{plan.new ? `Lädt ${plan.new} neue` : 'Nichts zu laden'} · Playlist „{plan.title || 'Playlist'}“ mit allen {liste} Titeln, auch als .m3u8 für rekordbox / Virtual DJ · Ordner komplett{plan.have ? ` (${plan.have} vorhandene verknüpft, kein zusätzlicher Platz)` : ''}</span>
             </span>
           </button>
@@ -165,6 +182,15 @@
     cursor: pointer; text-align: left; font-family: inherit;
   }
   .opt:hover:not(:disabled) { border-color: var(--c-accent); background: var(--c-act-bg); }
+  .opt-list { flex-direction: column; align-items: stretch; gap: 6px; cursor: default; padding: 0; }
+  .opt-list:hover { border-color: var(--c-accent); }
+  .opt-main { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-3) var(--sp-4) 0; border: none; background: none;
+              cursor: pointer; text-align: left; font-family: inherit; min-height: 48px; }
+  .opt-list:not(:has(.opt-chk)) .opt-main { padding-bottom: var(--sp-3); }
+  .opt-main:disabled { opacity: .45; cursor: default; }
+  .opt-main:hover:not(:disabled) .opt-ico { color: var(--c-accent-tx); }
+  .opt-chk { display: inline-flex; align-items: center; gap: 8px; padding: 0 var(--sp-4) var(--sp-3) calc(var(--sp-4) + 20px + var(--sp-3));
+             font-size: var(--fs-sm); color: var(--c-tx2); cursor: pointer; }
   .opt:disabled { opacity: .45; cursor: default; }
   .opt.rec { border-color: color-mix(in srgb, var(--c-accent) 55%, var(--c-br3)); }
   .opt-ico { font-size: 20px; color: var(--c-tx3); flex-shrink: 0; }

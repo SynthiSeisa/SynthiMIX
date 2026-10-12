@@ -1121,12 +1121,7 @@ async def handle_message(ws: WebSocket, msg: dict):
     elif t == "get_playlist_content":
         pl_path = msg.get("path", "")
         if os.path.exists(pl_path):
-            pl_tracks = library._parse_m3u(pl_path)
-            lib_by_path = {lt["path"]: lt for lt in _state["library"]}
-            result = []
-            for pt in pl_tracks:
-                lt = lib_by_path.get(pt["path"])
-                result.append(lt if lt else pt)
+            result = library.playlist_tracks(pl_path)
             await ws.send_text(json.dumps({"type": "playlist_content",
                                            "path": pl_path, "tracks": result}))
 
@@ -1161,11 +1156,10 @@ async def handle_message(ws: WebSocket, msg: dict):
             # Immer antworten — auch wenn alle Titel schon drin waren. Ohne Antwort
             # blieb die Ansicht bei "Lade Playlist…" stehen, und die Zahl in der
             # Liste stimmte nicht mehr (gemeldet 10/2026).
-            pl_tracks = library._parse_m3u(pl_path)
-            lib_by_path = {lt["path"]: lt for lt in _state["library"]}
-            result = [lib_by_path.get(pt["path"], pt) for pt in pl_tracks]
+            result = library.playlist_tracks(pl_path)
             await ws.send_text(json.dumps({"type": "playlist_content", "path": pl_path, "tracks": result,
-                                           "added": len(neu), "already": len(tracks) - len(neu)}))
+                                           "added": len(neu), "already": len(tracks) - len(neu),
+                                           "added_paths": [x["path"] for x in neu]}))
             if neu:
                 await core.broadcast({"type": "playlists", "items": library._get_playlists()})
 
@@ -1226,37 +1220,45 @@ async def handle_message(ws: WebSocket, msg: dict):
                                            "items": library._get_playlists()}))
 
     elif t == "playlist_remove_track":
-        pl_path  = msg.get("playlist", "")
-        rm_path  = msg.get("path", "")
-        if pl_path and rm_path and os.path.exists(pl_path):
+        # Ein Titel (path) oder mehrere auf einmal (paths)
+        pl_path = msg.get("playlist", "")
+        rm = set(msg.get("paths") or ([msg.get("path")] if msg.get("path") else []))
+        if pl_path and rm and os.path.exists(pl_path):
             try:
                 with open(pl_path, "r", encoding="utf-8", errors="ignore") as f:
                     lines = f.readlines()
                 out = ["#EXTM3U\n"]
+                removed = []                       # [{path, title, duration_sec}] fuer "Rueckgaengig"
                 i = 0
                 while i < len(lines):
                     line = lines[i].strip()
                     if line.startswith("#EXTINF:"):
                         nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
-                        if nxt != rm_path:
+                        if nxt not in rm:
                             out.append(lines[i])
                             if i + 1 < len(lines):
                                 out.append(lines[i + 1])
+                        else:
+                            parts = line[8:].split(",", 1)
+                            try: dur = int(float(parts[0]))
+                            except ValueError: dur = 0
+                            removed.append({"path": nxt, "title": parts[1] if len(parts) > 1 else "", "duration_sec": dur})
                         i += 2
                     elif line and not line.startswith("#"):
-                        if line != rm_path:
+                        if line not in rm:
                             out.append(lines[i])
+                        else:
+                            removed.append({"path": line, "title": "", "duration_sec": 0})
                         i += 1
                     else:
                         i += 1
                 with open(pl_path, "w", encoding="utf-8") as f:
                     f.writelines(out)
                 # Push updated content
-                pl_tracks = library._parse_m3u(pl_path)
-                lib_by_path = {lt["path"]: lt for lt in _state["library"]}
-                result = [lib_by_path.get(pt["path"], pt) for pt in pl_tracks]
-                await ws.send_text(json.dumps({"type": "playlist_content",
-                                               "path": pl_path, "tracks": result}))
+                await ws.send_text(json.dumps({"type": "playlist_content", "path": pl_path,
+                                               "tracks": library.playlist_tracks(pl_path), "removed": removed}))
+                if removed:
+                    await core.broadcast({"type": "playlists", "items": library._get_playlists()})
             except Exception as e:
                 print(f"[playlist_remove_track] {e}")
     elif t == "title_suggest":

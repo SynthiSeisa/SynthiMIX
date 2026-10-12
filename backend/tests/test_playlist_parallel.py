@@ -367,6 +367,66 @@ class PlaylistParallelTest(BackendTest):
         self.assertTrue((folder / "Party.m3u8").exists())
         self.assertIn("Playlist mit 3 Titeln", main._state["downloads"][0]["status_text"])
 
+    # ── Nur Playlist: zeigt auf die vorhandenen Dateien, kein eigener Ordner ──
+    def _nur_playlist(self, mode, url="https://www.youtube.com/playlist?list=PLn", **kw):
+        async def ablauf():
+            entries, title = await main._audit_playlist_for_videos("x")
+            return await main.run_download(url, "mp3-best", entries=entries, folder="Party", label=title, mode=mode, **kw)
+        self.run_async(ablauf())
+        m3u = (main.PLAYLISTS_DIR / "Party.m3u").read_text("utf-8").splitlines()
+        return [l for l in m3u if l and not l.startswith("#")]
+
+    def test_nur_playlist_fehlende_in_den_download_ordner(self):
+        alt = self._lib_and_audit()
+        pfade = self._nur_playlist("list")
+        dl = self.tmp / "Downloads"
+        self.assertFalse((dl / "Party").exists())                             # kein eigener Ordner
+        self.assertEqual(len(list(dl.glob("*.mp3"))), 2)                      # die zwei fehlenden direkt im Download-Ordner
+        self.assertEqual(len(pfade), 3)
+        self.assertEqual(pfade[0], str(alt))                                  # der vorhandene: seine Datei, wo sie liegt
+        self.assertEqual(len(list(alt.parent.glob("*.mp3"))), 1)              # nichts kopiert oder verknuepft
+        self.assertFalse(list(dl.glob("*.m3u8")))                             # keine Datei fuer rekordbox im Download-Ordner
+        self.assertIn("Playlist mit 3 Titeln", main._state["downloads"][0]["status_text"])
+
+    def test_nur_playlist_ohne_laden(self):
+        alt = self._lib_and_audit()
+        pfade = self._nur_playlist("list_only")
+        dl = self.tmp / "Downloads"
+        self.assertEqual(pfade, [str(alt)])                                   # nur, was schon da ist
+        self.assertFalse(list(dl.rglob("*.mp3")))                             # nichts geladen
+        self.assertFalse((self.log.exists() and [l for l in self.log.read_text("utf-8").splitlines() if l.startswith("start")]))
+        txt = main._state["downloads"][0]["status_text"]
+        self.assertIn("2 fehlen (nicht geladen)", txt)
+        self.assertIn("Playlist mit 1 Titeln", txt)
+
+    def test_nur_playlist_laesst_vorhandene_playlist_stehen(self):
+        # Eine eigene Playlist gleichen Namens (von Hand gepflegt) darf nicht ueberschrieben werden
+        alt = self._lib_and_audit()
+        eigen = self.tmp / "Sammlung" / "Von Hand.mp3"
+        eigen.write_bytes(b"ID3")
+        main.PLAYLISTS_DIR.mkdir(parents=True, exist_ok=True)
+        (main.PLAYLISTS_DIR / "Party.m3u").write_text(f"#EXTM3U\n#EXTINF:100,Von Hand\n{eigen}\n", "utf-8")
+        pfade = self._nur_playlist("list_only")
+        self.assertEqual(pfade, [str(eigen), str(alt)])                       # vorhandenes bleibt vorn, Neues hinten dran
+        self.assertEqual(self._nur_playlist("list_only"), [str(eigen), str(alt)])   # zweiter Lauf: nichts doppelt
+
+    def test_nur_playlist_verfolgen_bleibt_ohne_ordner(self):
+        self._lib_and_audit()
+        url = "https://www.youtube.com/playlist?list=PLfollow"
+        self._nur_playlist("list", url=url, follow_new=True)
+        f = main._state["followed"][-1]
+        self.assertEqual((f["mode"], f["folder"]), ("list", None))
+        # ein neuer Titel kommt dazu: wieder in den Download-Ordner, nicht in einen eigenen
+        self.fake_audit(["idaaaaaaaaa", "idccccccccc", "iddddddddd1", "ideeeeeeee1"], "Party",
+                        titles=["Pendulum - Witchcraft (Official Video)", "Pendulum - Crush", "Pendulum - Tarantula", "Pendulum - Slam"],
+                        durs={"idaaaaaaaaa": 262, "idccccccccc": 250, "iddddddddd1": 290, "ideeeeeeee1": 345})
+        self.run_async(main._follow_check(f))
+        dl = self.tmp / "Downloads"
+        self.assertFalse((dl / "Party").exists())
+        self.assertEqual(len(list(dl.glob("*.mp3"))), 3)
+        m3u = [l for l in (main.PLAYLISTS_DIR / "Party.m3u").read_text("utf-8").splitlines() if l and not l.startswith("#")]
+        self.assertEqual(len(m3u), 4)
+
     def test_alle_laden(self):
         self._lib_and_audit()
         async def ablauf():

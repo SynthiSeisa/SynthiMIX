@@ -2,7 +2,7 @@
 from pathlib import Path
 
 from tests.support import BackendTest, FakeWS, main
-from synthimix import core, media, setlist
+from synthimix import core, library, media, setlist
 
 
 class SetlistTest(BackendTest):
@@ -182,3 +182,72 @@ class AddToPlaylistTest(BackendTest):
         zeilen = [ln for ln in self.pl.read_text(encoding="utf-8").splitlines() if not ln.startswith("#")]
         self.assertEqual(zeilen, [a, b, c])
         self.assertEqual(self.add(tracks=[]), [])
+
+
+class PlaylistTwinsTest(BackendTest):
+    """Gemeldet 10/2026: aeltere Playlisten zeigen auf eine Kopie der Musik (anderes
+    Laufwerk) — in der Ansicht blieben LUFS, BPM, Tonart und kbps leer."""
+
+    def setUp(self):
+        super().setUp()
+        self.pl = self.tmp / "Set.m3u"
+        self.lib_dir = self.tmp / "Bibliothek" / "House"
+        self.alt_dir = self.tmp / "Kopie" / "House"
+        self.lib_dir.mkdir(parents=True); self.alt_dir.mkdir(parents=True)
+
+    def datei(self, ordner, name):
+        p = ordner / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+        return str(p)
+
+    def test_messwerte_vom_zwilling_pfad_bleibt(self):
+        a_lib = self.datei(self.lib_dir, "Cloud Rider.mp3")
+        a_alt = self.datei(self.alt_dir, "cloud rider.mp3")          # gleiche Datei, anderer Ort
+        b_lib = self.datei(self.lib_dir, "Direkt.mp3")
+        c_alt = self.datei(self.alt_dir, "Nur dort.mp3")
+        main._state["library"] = [
+            {"path": a_lib, "title": "Cloud Rider", "artist": "Paul Kalkbrenner", "lufs": -9.1, "bpm": 126.0, "key": "8A",
+             "bitrate_kbps": 320, "duration_sec": 390, "folder": "House", "fid": "v:1", "mtime": 5},
+            {"path": b_lib, "title": "Direkt", "lufs": -8.0, "bpm": 174.0, "duration_sec": 200}]
+        self.pl.write_text(f"#EXTM3U\n#EXTINF:390,Cloud Rider\n{a_alt}\n#EXTINF:200,Direkt\n{b_lib}\n#EXTINF:100,Nur dort\n{c_alt}\n", encoding="utf-8")
+        a, b, c = library.playlist_tracks(str(self.pl))
+        self.assertEqual((a["path"], a["twin"], a["lufs"], a["bpm"], a["key"], a["artist"]),
+                         (a_alt, a_lib, -9.1, 126.0, "8A", "Paul Kalkbrenner"))
+        self.assertNotIn("fid", a)                                    # was zum Ort gehoert, kommt nicht mit
+        self.assertNotIn("mtime", a)
+        self.assertIs(b, main._state["library"][1])                   # genau dieser Pfad: der Bibliothekseintrag selbst
+        self.assertEqual((c["path"], c["lufs"]), (c_alt, -99.0))      # nirgends in der Bibliothek: bleibt leer
+        self.assertNotIn("twin", c)
+
+    def test_mehrere_gleichnamige_nur_bei_eindeutigem_treffer(self):
+        x1 = self.datei(self.tmp / "Bibliothek" / "Dnb", "Pressure.mp3")
+        x2 = self.datei(self.tmp / "Bibliothek" / "Tomboy", "Pressure.mp3")
+        alt = self.datei(self.tmp / "Kopie" / "Tomboy", "Pressure.mp3")
+        fremd = self.datei(self.tmp / "Kopie" / "Sonstwo", "Pressure.mp3")
+        main._state["library"] = [{"path": x1, "title": "Pressure", "bpm": 174.0, "duration_sec": 200},
+                                  {"path": x2, "title": "Pressure", "bpm": 140.0, "duration_sec": 260}]
+        self.pl.write_text(f"#EXTM3U\n#EXTINF:260,Pressure\n{alt}\n#EXTINF:0,Pressure\n{fremd}\n#EXTINF:200,Pressure\n{fremd}\n", encoding="utf-8")
+        t = library.playlist_tracks(str(self.pl))
+        self.assertEqual((t[0]["twin"], t[0]["bpm"]), (x2, 140.0))    # gleichnamiger Ordner
+        self.assertNotIn("twin", t[1])                                 # nicht zu entscheiden: lieber leer als falsch
+        self.assertEqual(t[2]["twin"], x1)                             # ueber die Laenge eindeutig
+
+    def test_entfernen_mehrere_mit_rueckweg(self):
+        a = self.datei(self.lib_dir, "a.mp3"); b = self.datei(self.lib_dir, "b.mp3"); c = self.datei(self.lib_dir, "c.mp3")
+        self._dir = core.PLAYLISTS_DIR
+        core.PLAYLISTS_DIR = self.tmp
+        try:
+            self.pl.write_text(f"#EXTM3U\n#EXTINF:10,A\n{a}\n#EXTINF:20,B\n{b}\n{c}\n", encoding="utf-8")
+            ws = FakeWS()
+            self.run_async(main.handle_message(ws, {"type": "playlist_remove_track", "playlist": str(self.pl), "paths": [a, c]}))
+            r = [m for m in ws.sent if m["type"] == "playlist_content"][0]
+            self.assertEqual([t["path"] for t in r["tracks"]], [b])
+            self.assertEqual(r["removed"], [{"path": a, "title": "A", "duration_sec": 10}, {"path": c, "title": "", "duration_sec": 0}])
+            # Rueckgaengig: genau diese Liste wieder hinzufuegen
+            ws2 = FakeWS()
+            self.run_async(main.handle_message(ws2, {"type": "playlist_add_track", "playlist": str(self.pl), "tracks": r["removed"]}))
+            r2 = [m for m in ws2.sent if m["type"] == "playlist_content"][0]
+            self.assertEqual((sorted(t["path"] for t in r2["tracks"]), r2["added_paths"]), (sorted([a, b, c]), [a, c]))
+        finally:
+            core.PLAYLISTS_DIR = self._dir
