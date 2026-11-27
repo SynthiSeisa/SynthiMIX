@@ -12,6 +12,7 @@
            fpcalcInstalling, fpcalcInstallError,
            watchedFolders, watchedFolderImpact, ytdlpAutoupdate, excludedFolders, toolUpdates, servicesTest, setupOpen, changelog, followed, followedChannels, followTracks, playlistRenamed, dlParallel, relocateState } from '../stores/ws.js'
   import { infoHints } from '../lib/infohints.js'
+  import { wishHostMismatch } from '../lib/wishhost.js'
 
   let tab = $state('playback')
 
@@ -432,6 +433,41 @@
   }
   $effect(() => { malen(qrCanvas, $remoteStatus?.url) })
   $effect(() => { malen(wishQrCanvas, wishUrl) })
+
+  // Feste Adresse fuer den gedruckten Code: IP, Rechnername oder Link vom Zettel
+  let wishHostInput = $state('')
+  // Nur nachziehen, wenn sich die gespeicherte Adresse wirklich aendert, sonst
+  // verschwindet bei einer Fehlermeldung die falsche Eingabe aus dem Feld
+  let _lastWishHost = null
+  $effect(() => {
+    const h = $remoteStatus?.wish_host ?? ''
+    if (h !== _lastWishHost) { _lastWishHost = h; untrack(() => { wishHostInput = h }) }
+  })
+  const wishHostDirty = $derived(wishHostInput.trim() !== ($remoteStatus?.wish_host ?? ''))
+  const wishMismatch = $derived(wishHostMismatch($remoteStatus))
+  function setWishHost(v) { send({ type: 'set_wish_host', value: v }) }
+
+  let wishSaved = $state('')
+  // Druckvorlage: grosser Code mit Ueberschrift und Adresse darunter
+  async function saveWishPng() {
+    if (!wishUrl) return
+    const W = 1200, H = 1560, Q = 960
+    const c = document.createElement('canvas'); c.width = W; c.height = H
+    const g = c.getContext('2d')
+    g.fillStyle = '#ffffff'; g.fillRect(0, 0, W, H)
+    g.fillStyle = '#000000'; g.textAlign = 'center'
+    g.font = '700 110px "Segoe UI", system-ui, sans-serif'
+    g.fillText('Musikwunsch', W / 2, 170)
+    g.font = '400 48px "Segoe UI", system-ui, sans-serif'
+    g.fillText('Mit der Handy-Kamera scannen', W / 2, 250)
+    const q = document.createElement('canvas')
+    await QRCode.toCanvas(q, wishUrl, { width: Q, margin: 2, color: { dark: '#000000', light: '#ffffff' } })
+    g.drawImage(q, (W - Q) / 2, 300)
+    g.font = '400 40px "Segoe UI", system-ui, sans-serif'
+    g.fillText('Im WLAN vor Ort: ' + wishUrl, W / 2, 300 + Q + 90, W - 80)
+    const p = await window.electron?.savePng?.(c.toDataURL('image/png'), 'Musikwunsch-QR')
+    if (p) { wishSaved = p; setTimeout(() => wishSaved = '', 4000) }
+  }
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -1475,7 +1511,7 @@
                 {svcWishes ? 'Stoppen' : 'Starten'}
               </button>
             </div>
-            {#if svcWishes}
+            {#if wishUrl}
               <div class="remote-url">
                 <span class="url-val" ondblclick={() => window.electron?.openPath(wishUrl)}
                       title="Doppelklick: im Browser öffnen">{wishUrl}</span>
@@ -1486,11 +1522,31 @@
                 <button class="btn btn-icon btn-sm" onclick={() => window.electron?.openPath(wishUrl)}
                         title="Im Browser öffnen" aria-label="Im Browser öffnen"><i class="ti ti-external-link"></i></button>
               </div>
+              {#if wishMismatch}
+                <div class="notice">Der Code zeigt auf <b>{$remoteStatus.wish_host}</b>, der Laptop hat gerade <b>{$remoteStatus.ip}</b>. Gäste kommen so nicht auf die Seite. Im Router dem Laptop die feste IP {$remoteStatus.wish_host} geben, oder auf „Automatisch“ stellen und neu drucken.</div>
+              {/if}
               <div class="svc-qr">
                 <canvas bind:this={wishQrCanvas} class="qr-canvas"></canvas>
+                <button class="btn btn-sm" onclick={saveWishPng} title="Großer Code mit Überschrift zum Ausdrucken">
+                  <i class="ti {wishSaved ? 'ti-check' : 'ti-download'}"></i> {wishSaved ? 'Gespeichert' : 'Als Bild speichern'}
+                </button>
               </div>
             {/if}
-            <div class="hint">Den Code kann man ausdrucken und aufhängen. Damit er gültig bleibt, sollte der Rechner im Router eine feste IP bekommen. Ist die Seite aus, sehen Gäste „ausgeschaltet“.</div>
+            <div class="wish-host">
+              <label for="wish-host">Adresse im Code</label>
+              <div class="wish-host-row">
+                <input id="wish-host" class="field field-sm" type="text" spellcheck="false"
+                       placeholder="Automatisch ({$remoteStatus?.ip ?? 'aktuelle IP'})"
+                       bind:value={wishHostInput}
+                       onkeydown={(e) => { if (e.key === 'Enter') setWishHost(wishHostInput) }} />
+                <button class="btn btn-sm" disabled={!wishHostDirty} onclick={() => setWishHost(wishHostInput)}>Übernehmen</button>
+                {#if $remoteStatus?.wish_host}
+                  <button class="btn btn-sm" onclick={() => setWishHost('')}>Automatisch</button>
+                {/if}
+              </div>
+              {#if $remoteStatus?.wish_host_error}<div class="notice error">{$remoteStatus.wish_host_error}</div>{/if}
+            </div>
+            <div class="hint">Code vorab drucken: Hier die IP eintragen, die der Laptop am Veranstaltungsort bekommt (im dortigen Router fest vergeben), oder den Link von einem schon gedruckten Code einfügen. Gäste müssen im selben WLAN sein. Ist die Seite aus, sehen sie „ausgeschaltet“.</div>
           </div>
 
           <div class="group">
@@ -1760,6 +1816,10 @@
   .qr-hint { font-size: var(--fs-cap); font-weight: 700; letter-spacing: .08em; color: var(--c-tx3); }
   .svc-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
   .svc-qr { display: flex; align-items: flex-end; gap: var(--sp-3); flex-wrap: wrap; }
+  .wish-host { display: flex; flex-direction: column; gap: var(--sp-1); margin-top: var(--sp-3); }
+  .wish-host label { font-size: var(--fs-cap); font-weight: 700; letter-spacing: .06em; color: var(--c-tx3); text-transform: uppercase; }
+  .wish-host-row { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; }
+  .wish-host-row input { flex: 1 1 180px; min-width: 0; }
   .svc-card.on { border-left: 3px solid var(--c-green-tx); padding-left: var(--sp-3); }
   .info-row { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-body); color: var(--c-tx2); }
   .info-row .ti { font-size: 16px; color: var(--c-tx4); }

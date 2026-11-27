@@ -31,9 +31,40 @@ _remote_services: dict = {"remote": False, "wishes": False}
 def _remote_status_msg(**extra) -> dict:
     ip = _get_local_ip()
     running = _remote_server is not None
+    # Der Wunsch-Link kommt immer mit, auch bei ausgeschaltetem Server: den
+    # Code druckt man daheim vor dem Event aus.
+    host = _state.get("wish_host") or ip
     return {"type": "remote_status", "running": running, "services": dict(_remote_services),
-            **({"ip": ip, "port": _remote_port, **_remote_urls(ip)} if running else {}), **extra}
+            "ip": ip, "wish_host": _state.get("wish_host", ""),
+            "wish_url": f"http://{host}:{_remote_port}/wunsch",
+            **({"port": _remote_port, "url": _remote_urls(ip)["url"]} if running else {}), **extra}
 _remote_port = 8080
+
+# Feste Adresse fuer den gedruckten Wunsch-Code. Am Veranstaltungsort hat der
+# Laptop eine andere IP als daheim; wer weiss, welche er dort bekommt (feste
+# IP im Router), traegt sie vorab ein oder fuegt den Link vom Zettel ein.
+_HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+
+def parse_wish_host(text: str) -> tuple[str, str]:
+    """Aus IP, Rechnername oder ganzem Link die Adresse holen → (host, fehler)."""
+    s = (text or "").strip()
+    if not s:
+        return "", ""
+    s = re.sub(r"^[a-z]+://", "", s, flags=re.IGNORECASE).split("/", 1)[0].split("?", 1)[0]
+    host, _, port = s.partition(":")
+    if port and port != str(_remote_port):
+        return "", f"Der Port muss {_remote_port} sein, nicht {port}."
+    bad = "Das sieht nicht wie eine Adresse aus (z. B. 192.168.0.50)."
+    if not _HOST_RE.match(host):
+        return "", bad
+    # Nur Ziffern und Punkte: muss eine echte IP sein (nicht 192.168.0.500)
+    if re.fullmatch(r"[\d.]+", host):
+        import ipaddress
+        try:
+            ipaddress.IPv4Address(host)
+        except ValueError:
+            return "", bad
+    return host, ""
 
 def _get_local_ip() -> str:
     try:
@@ -322,7 +353,7 @@ async def wish_page():
 
 # Wie viele offene Wuensche ein Geraet gleichzeitig haben darf. Ohne Grenze
 # kippt ein einzelner Spassvogel die Liste voll.
-_WISH_LIMIT_PER_CLIENT = 3
+_WISH_LIMIT_PER_CLIENT = 3      # steht auch als Hinweis in web/wunsch.html
 
 @remote_app.websocket("/wunsch/ws")
 async def wish_ws(websocket: WebSocket):
@@ -362,15 +393,23 @@ async def wish_ws(websocket: WebSocket):
                     lib_entry = next((lt for lt in _state.get("library", [])
                                       if lt.get("path") and _lib_wish_id(lt["path"]) == lib_id), None)
                     if lib_entry is None:
+                        # Nicht still verwerfen: sonst steht beim Gast ein Haken
+                        # und er glaubt, der Wunsch sei angekommen
+                        await websocket.send_text(json.dumps({"type": "wish_deny",
+                            "text": "Diesen Titel gibt es nicht mehr. Bitte neu suchen."}))
                         continue
                     title = lib_entry.get("title", "") or title
-                elif not url.startswith("http"):
-                    continue
+                else:
+                    url = _wish_video_url(url)
+                    if not url:
+                        await websocket.send_text(json.dumps({"type": "wish_deny",
+                            "text": "Diesen Titel kann man hier leider nicht wünschen. Bitte über die Suche auswählen."}))
+                        continue
 
                 offen = [w for w in _state.get("wishes", []) if w.get("from") == who]
                 if len(offen) >= _WISH_LIMIT_PER_CLIENT:
                     await websocket.send_text(json.dumps({"type": "wish_deny",
-                        "text": f"Du hast schon {len(offen)} Wuensche offen. Warte, bis der DJ sie bearbeitet hat."}))
+                        "text": f"Du hast schon {len(offen)} Wünsche offen. Warte, bis der DJ sie bearbeitet hat."}))
                     continue
 
                 # Schon gewuenscht? Dann nur hochzaehlen — das zeigt dem DJ,
@@ -380,7 +419,12 @@ async def wish_ws(websocket: WebSocket):
                                   or (lib_entry and w.get("path") == lib_entry["path"])
                                   or _title_matches(title, w.get("title", ""))), None)
                 if vorhanden:
-                    vorhanden["count"] = vorhanden.get("count", 1) + 1
+                    # Je Geraet nur einmal zaehlen: sonst trieb ein Gast seinen
+                    # Wunsch durch wiederholtes Tippen beliebig nach oben
+                    voters = vorhanden.setdefault("voters", [vorhanden.get("from")])
+                    if who not in voters:
+                        voters.append(who)
+                        vorhanden["count"] = vorhanden.get("count", 1) + 1
                     _wish_sender(vorhanden, name, note)
                     save_wishes()
                     await push_wishes()
@@ -391,7 +435,7 @@ async def wish_ws(websocket: WebSocket):
 
                 _wish_counter += 1
                 wish = {"id": _wish_counter, "url": url, "title": title,
-                        "from": who, "count": 1, "status": "neu",
+                        "from": who, "voters": [who], "count": 1, "status": "neu",
                         "path": None, "error": "", "created_at": int(time.time())}
                 _wish_sender(wish, name, note)
                 if lib_entry is not None:
@@ -410,6 +454,21 @@ async def wish_ws(websocket: WebSocket):
         pass
     finally:
         _wish_clients.discard(websocket)
+
+# Gaeste duerfen nur einzelne YouTube-Titel wuenschen. Frueher reichte "http…":
+# eine Playlist, ein Mix oder ein Link auf eine beliebige Seite wurde sofort
+# heruntergeladen. Die Wunschseite selbst schickt nur music.youtube.com/watch?v=…
+_WISH_VIDEO_RE = re.compile(
+    r"^https?://(?:(?P<host>www\.|m\.|music\.)?youtube\.com/(?:watch\?(?:[^#]*&)?v=|shorts/)|youtu\.be/)"
+    r"(?P<id>[A-Za-z0-9_-]{11})(?![A-Za-z0-9_-])", re.IGNORECASE)
+
+def _wish_video_url(url: str) -> str:
+    """Link eines Gastes → sauberer Link auf genau einen Titel, sonst ""."""
+    m = _WISH_VIDEO_RE.match((url or "").strip())
+    if not m:
+        return ""
+    base = "music.youtube.com" if (m.group("host") or "").lower() == "music." else "www.youtube.com"
+    return f"https://{base}/watch?v={m.group('id')}"
 
 def _wish_text(v, limit: int) -> str:
     """Freitext vom Gast: nur druckbare Zeichen, Leerraum zusammengefasst, gekuerzt."""
@@ -571,9 +630,11 @@ async def remote_ws_endpoint(websocket: WebSocket):
                         idx = next((i for i, t in enumerate(q) if t.get("path") == path), -1)
                 if 0 <= idx < len(q):
                     q.pop(idx)
+                    # Wie im Fenster (main.py "queue_remove"): auch beim laufenden
+                    # Titel eins zurueck, damit "naechster" (Index + 1) der Titel
+                    # danach bleibt. Vorher wurde einer uebersprungen.
                     ci = _state.get("current_idx", -1)
-                    if idx < ci:   _state["current_idx"] = ci - 1
-                    elif idx == ci: _state["current_idx"] = min(ci, len(q) - 1)
+                    if idx <= ci: _state["current_idx"] = max(-1, ci - 1)
                     store.save_queue()
                     await core.push_queue()
             elif t == "queue_append":

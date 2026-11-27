@@ -11,7 +11,6 @@
 
 import { barLen, tempoMatch } from './beatsync.js'
 
-export const DJ_TYPES = ['doubledrop', 'eqmix', 'filter', 'echo', 'hall', 'roll', 'backspin']
 export const DJ_LABEL = { blend: 'Normal', doubledrop: 'Double Drop', eqmix: 'Langer EQ-Mix', filter: 'Filter', echo: 'Echo-Out',
                           hall: 'Hall-Ausklang', roll: 'Loop-Roll', backspin: 'Backspin' }
 /** Brauchen den Loop-Roll-Baustein (AudioWorklet) */

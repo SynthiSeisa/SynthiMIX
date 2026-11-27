@@ -1,4 +1,5 @@
 import { writable, get } from 'svelte/store'
+import { wishHostMismatch } from '../lib/wishhost.js'
 
 export const connected   = writable(false)
 // Paths that should have intro skipped on next playback (client-side one-shot flags)
@@ -163,6 +164,7 @@ export function importPlaylistFile(path) {
 // undoAction: { label, run } oder null — verschwindet nach ein paar Sekunden.
 export const undoAction = writable(null)
 let _noteTimer = null, _undoTimer = null
+let _wishWarned = ''
 export function notify(text, { undo = null, ms = 7000 } = {}) {
   scanStatus.set(text)
   clearTimeout(_noteTimer); clearTimeout(_undoTimer)
@@ -193,11 +195,9 @@ const APP_SETTINGS_DEFAULTS = {
   targetLUFS:      -10,
   bpmAnalysis:     true,
   smartFade:          true,
-  fadeAggressiveness: 3,   // legacy, kept for compat
   introAggressiveness: 3,
   outroAggressiveness: 3,
   cfCurve:            'cosine',
-  introSkipSec:       0,
   beatAlignCf:        true,
   tempoMatch:         true,    // Tempo des naechsten Titels im Uebergang angleichen
   phraseAlign:        true,    // Uebergang auf Phrasenanfang (16/8 Takte, hoechstens 8 Takte verschoben)
@@ -503,7 +503,16 @@ function connect() {
       case 'logs': backendLogs.set(msg.lines ?? []); break
       case 'notes': notes.set(msg.text ?? ''); break
       case 'favorites': favorites.set(msg.items ?? []); break
-      case 'remote_status': remoteStatus.set(msg); break
+      case 'remote_status': {
+        remoteStatus.set(msg)
+        // Gedruckter Wunsch-Code zeigt auf eine andere IP: einmal je Adresse melden
+        const key = msg.wish_host + '>' + msg.ip
+        if (wishHostMismatch(msg) && key !== _wishWarned) {
+          _wishWarned = key
+          notify(`Achtung: Der Musikwunsch-Code zeigt auf ${msg.wish_host}, der Laptop hat gerade ${msg.ip}. Gäste kommen so nicht auf die Seite.`, { ms: 15000 })
+        }
+        break
+      }
       case 'settings_export': {
         const blob = new Blob([JSON.stringify(msg.data, null, 2)], { type: 'application/json' })
         const a = document.createElement('a')

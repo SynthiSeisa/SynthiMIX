@@ -645,23 +645,6 @@ async def _auto_scan_loop():
         else:
             await asyncio.sleep(60)
 
-def _scan_sync(folder: str) -> list[dict]:
-    result = []
-    recursive = _state.get("scan_recursive", True)
-    if recursive:
-        iter_dirs = os.walk(folder)
-    else:
-        iter_dirs = [(folder, [], os.listdir(folder))]
-    for root, _, files in iter_dirs:
-        if _is_excluded(root):
-            continue
-        for f in files:
-            if _is_audio_file(f):
-                full = str(Path(os.path.join(root, f)))  # normalisiert Slashes auf Windows
-                probe = media._probe_sync(full)
-                result.append(media._make_library_entry(full, probe))
-    return result
-
 def _find_new_audio_paths(folder: str, existing: set[str], recursive: bool) -> list[str]:
     """Fast filesystem scan — returns only paths NOT already in the library (no ffprobe)."""
     new_paths = []

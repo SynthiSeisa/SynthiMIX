@@ -475,6 +475,20 @@ ipcMain.handle('pick-file', async (e, opts) => {
   })
   return res.canceled ? null : res.filePaths[0]
 })
+// QR-Code zum Ausdrucken als PNG speichern
+ipcMain.handle('save-png', async (e, dataUrl, name) => {
+  const m = /^data:image\/png;base64,([A-Za-z0-9+/=]+)$/.exec(String(dataUrl || ''))
+  if (!m) return null
+  const safe = String(name || 'Bild').replace(/[\\/:*?"<>|]/g, '_').slice(0, 80)
+  const res = await dialog.showSaveDialog(mainWindow, {
+    title: 'Bild speichern',
+    defaultPath: path.join(app.getPath('pictures'), `${safe}.png`),
+    filters: [{ name: 'PNG-Bild', extensions: ['png'] }],
+  })
+  if (res.canceled || !res.filePath) return null
+  await fs.promises.writeFile(res.filePath, Buffer.from(m[1], 'base64'))
+  return res.filePath
+})
 // Tragbarer Betrieb: liegen auf diesem PC eigene Daten, die man uebernehmen koennte?
 ipcMain.handle('portable-info', () => {
   if (!portableData || !pcDataDir) return { portable: false }

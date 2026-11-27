@@ -28,11 +28,6 @@ def parse(url: str) -> tuple[str, str] | None:
     return (m.group(1), m.group(2)) if m else None
 
 
-def is_list(url: str) -> bool:
-    p = parse(url)
-    return bool(p) and p[0] in ("album", "playlist")
-
-
 def _expand_sync(url: str) -> str:
     """Kurzlink (spotify.link/…) aufloesen."""
     if parse(url) or "spotify.link" not in url:

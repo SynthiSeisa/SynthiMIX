@@ -49,19 +49,6 @@ class KeyCompatTest(BackendTest):
         self.assertEqual(main._key_compat("Am", "G"), 0)        # 8A/9B
         self.assertEqual(main._key_compat("Am", ""), -1)
 
-    def test_harmonische_auswahl_bevorzugt_passende(self):
-        main._state["library"] = [{"path": "ref", "key": "Am"}]
-        passend = {"path": "p", "key": "Em"}
-        daneben = [{"path": f"d{i}", "key": "F♯m"} for i in range(20)]
-        random.seed(1)
-        for _ in range(30):
-            self.assertIs(main._pick_harmonic(daneben + [passend], "ref"), passend)
-
-    def test_harmonische_auswahl_ohne_passende_nimmt_irgendeinen(self):
-        main._state["library"] = [{"path": "ref", "key": "Am"}]
-        kandidaten = [{"path": "x", "key": "F♯m"}, {"path": "y", "key": ""}]
-        self.assertIn(main._pick_harmonic(kandidaten, "ref"), kandidaten)
-
 
 class FrontendAbgleichTest(BackendTest):
     """Die Vertraeglichkeit gibt es doppelt: in main.py fuer Radio und Auto-Mix,

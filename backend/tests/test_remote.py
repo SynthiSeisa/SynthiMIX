@@ -134,6 +134,8 @@ class WunschAusSammlungTest(RemoteTestBase):
         with c.websocket_connect("/wunsch/ws") as ws:
             ws.send_json({"type": "wish_add", "lib": "deadbeef0000", "path": "C:\\Windows\\x", "title": "x"})
             ws.send_json({"type": "wish_info", "ids": []})
+            # Der Gast erfaehrt, dass es nicht geklappt hat (frueher: gar keine Antwort)
+            self.assertEqual(json.loads(ws.receive_text())["type"], "wish_deny")
             self.assertEqual(json.loads(ws.receive_text())["type"], "wish_info")
         self.assertEqual(main._state["wishes"], [])
 

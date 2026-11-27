@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('electron', {
   toggleFullscreen: () => ipcRenderer.send('win-fullscreen'),
   pickFolder: () => ipcRenderer.invoke('pick-folder'),
   pickFile:   (opts) => ipcRenderer.invoke('pick-file', opts ?? null),
+  // Bild (data:image/png;base64,…) mit Speichern-Dialog ablegen → Pfad oder null
+  savePng:    (dataUrl, name) => ipcRenderer.invoke('save-png', dataUrl, name),
   // Dienst (Backend): Zustand fuer Meldungen, neu starten; Programm neu starten
   backendStatus:  () => ipcRenderer.invoke('backend-status'),
   backendRestart: () => ipcRenderer.invoke('backend-restart'),

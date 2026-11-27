@@ -71,21 +71,6 @@ def _ingest_similar_artists(results: list[dict], seed_artist: str) -> None:
             removed = _similar_artist_pool.pop(0)
             _similar_artist_set.discard(removed.lower())
 
-def _library_key(path: str) -> str:
-    lt = next((x for x in _state.get("library", []) if x.get("path") == path), None)
-    return (lt or {}).get("key", "") or ""
-
-def _pick_harmonic(candidates: list[dict], ref_path: str) -> dict:
-    """Zufaellig, aber bevorzugt unter den Titeln, deren Tonart zum Referenztitel
-    passt. Ohne bekannte Tonart oder ohne passenden Kandidaten wie bisher
-    zufaellig aus allen — bevorzugt, nicht ausgeschlossen."""
-    ref = _library_key(ref_path)
-    if ref:
-        passend = [c for c in candidates if keys._key_compat(ref, c.get("key")) >= 2]
-        if passend:
-            return random.choice(passend)
-    return random.choice(candidates)
-
 
 # ── Titel vergleichbar machen ────────────────────────────────────────────────
 _ARTIST_SPLIT = re.compile(r"\s*(?:,|&|\+|/|\bx\b|\band\b|\bvs\.?(?=\s)|\bfeat\.?|\bft\.?|\bfeaturing\b|\bwith\b)\s*", re.I)

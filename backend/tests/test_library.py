@@ -58,9 +58,8 @@ class ScanTest(BackendTest):
         folder = self.tmp / "Musik"
         self.make_audio(folder / "song.mp3", tags={
             "artist": "Camo & Krooked", "album": "Mosaik", "genre": "Drum & Bass", "key": "G♯m"})
-        entries = main._scan_sync(str(folder))
-        self.assertEqual(len(entries), 1)
-        e = entries[0]
+        f = str(folder / "song.mp3")
+        e = main._make_library_entry(f, main._probe_sync(f))
         self.assertEqual(e["artist"], "Camo & Krooked")
         self.assertEqual(e["album"], "Mosaik")
         self.assertEqual(e["genre"], "Drum & Bass")

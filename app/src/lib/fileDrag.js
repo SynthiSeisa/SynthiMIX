@@ -56,9 +56,6 @@ export function ownDrag(e) {
   return c
 }
 
-/** Nur fuer Tests */
-export function _setCurrent(c) { current = c }
-
 if (typeof window !== 'undefined') {
   // Ein neuer Klick beendet einen alten Zug (z. B. ausserhalb abgelegt)
   window.addEventListener('pointerdown', () => { current = null }, true)

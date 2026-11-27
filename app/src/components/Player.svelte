@@ -579,12 +579,8 @@
       const detected = _nextIntroLen() * INTRO_SKIP[4]
       return Math.min(0.45, Math.max(detected, INTRO_FRACS[4]))
     }
-    if ((cfg.introSkipSec ?? 0) > 0) {
-      const dur = nt?.duration_sec ?? 0
-      if (dur > 0) return Math.min(cfg.introSkipSec / dur, 0.45)
-    }
     if (!cfg.smartFade) return 0
-    const a = Math.max(0, Math.min(4, (cfg.introAggressiveness ?? cfg.fadeAggressiveness ?? 3) - 1))
+    const a = Math.max(0, Math.min(4, (cfg.introAggressiveness ?? 3) - 1))
     const detected = _nextIntroLen() * INTRO_SKIP[a]
     return Math.min(0.45, Math.max(detected, INTRO_FRACS[a]))
   }
@@ -600,7 +596,7 @@
     const sil    = _outroSilence()
     let trig
     if (sil >= 0) {
-      const a = Math.max(0, Math.min(4, (cfg.outroAggressiveness ?? cfg.fadeAggressiveness ?? 3) - 1))
+      const a = Math.max(0, Math.min(4, (cfg.outroAggressiveness ?? 3) - 1))
       trig = sil - OUTRO_EARLY[a] * cfFrac
     } else {
       trig = 1 - cfFrac
@@ -756,7 +752,7 @@
   //   Level 1 (soft) → bar at 0:00; Level 5 (aggressive) → bar before the drop
   const _baseIntroStart = $derived.by(() => {
     const sf = $appSettings.smartFade
-    const ia = $appSettings.introAggressiveness ?? $appSettings.fadeAggressiveness ?? 3
+    const ia = $appSettings.introAggressiveness ?? 3
     const wf = $waveformNext
     const nt = nextTrack
     if (nt && introOverride && introOverride.path === nt.path) return introOverride.frac
@@ -770,7 +766,7 @@
     const dur = t.duration_sec || 0
     let frac = 0
     if (cfg.smartFade) {
-      const a   = Math.max(0, Math.min(4, (cfg.introAggressiveness ?? cfg.fadeAggressiveness ?? 3) - 1))
+      const a   = Math.max(0, Math.min(4, (cfg.introAggressiveness ?? 3) - 1))
       const det = wf?.length > 0 ? _detectIntroLen(wf) * INTRO_SKIP[a] : 0
       frac = Math.min(0.45, Math.max(det, INTRO_FRACS[a]))
     }
@@ -786,7 +782,7 @@
     const cfg    = get(appSettings)
     const cfFrac = Math.min(0.9, cf / dur)
     const sil    = cfg.smartFade && wf?.length ? _detectOutroStart(wf) : -1
-    const a      = Math.max(0, Math.min(4, (cfg.outroAggressiveness ?? cfg.fadeAggressiveness ?? 3) - 1))
+    const a      = Math.max(0, Math.min(4, (cfg.outroAggressiveness ?? 3) - 1))
     let trig = sil >= 0 ? sil - OUTRO_EARLY[a] * cfFrac : 1 - cfFrac
     trig = Math.max(0.2, Math.min(trig, 1 - cfFrac))
     if (ovFrac != null) trig = Math.max(0.02, Math.min(ovFrac, 1 - cfFrac))   // selbst gezogen

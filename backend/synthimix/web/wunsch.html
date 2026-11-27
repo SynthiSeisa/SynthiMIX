@@ -78,6 +78,8 @@ h1{font-size:28px;line-height:1.15;font-weight:800;color:var(--tx1);margin-top:1
 .msg::before{content:"\2713";font-size:18px;line-height:1.1;font-weight:800}
 .msg.no{color:var(--red-tx);background:var(--red-bg);border-color:var(--red-br)}
 .msg.no::before{content:"!"}
+.off{margin-top:16px}
+.off[hidden]{display:none}
 
 /* Ergebnisse */
 .res{margin-top:14px;border-radius:var(--r-l);background:var(--surf);border:1px solid var(--br1);overflow:hidden}
@@ -145,11 +147,13 @@ textarea.f{min-height:76px;resize:none;line-height:1.4}
     <div class="np-n" id="npN"></div>
   </div>
 
+  <div class="msg no off" id="off" role="alert" hidden><span>Keine Verbindung. Bist du im WLAN vor Ort? Sonst hat der DJ die Wunschseite gerade ausgeschaltet. Die Seite verbindet sich von selbst wieder.</span></div>
+
   <div class="search">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="7"/><path d="M21 21l-6-6"/></svg>
     <input class="inp" id="q" type="search" placeholder="Titel oder K&#252;nstler" autocomplete="off" enterkeyhint="search" aria-label="Titel oder K&#252;nstler suchen">
   </div>
-  <div id="note" class="note" role="status">Titel mit &#8222;sofort da&#8220; kann der DJ gleich spielen.</div>
+  <div id="note" class="note" role="status">&#8222;Kann sofort laufen&#8220; hei&#223;t: Der DJ hat den Titel schon dabei. Du kannst bis zu 3 W&#252;nsche gleichzeitig offen haben.</div>
   <div id="res" class="res"></div>
 
   <div class="mine" id="mine"><div class="mine-h">Deine W&#252;nsche</div><div class="mine-l" id="mineL"></div></div>
@@ -203,11 +207,27 @@ function showInfo(m){
     return'<div class=mi><span class=mi-t>'+esc(w.title)+'</span><span class="pill '+c+'">'+t+'</span></div>'
   }).join('')
 }
+/* Ohne Verbindung (falsches WLAN, Seite ausgeschaltet) stand frueher ewig
+   "Suche…" da. Jetzt kommt nach 3 s ein Hinweis; kurze Aussetzer bleiben stumm. */
+var _offT=null,_retry=false
+function isOn(){return ws&&ws.readyState===1}
+function offSoon(){var o=document.getElementById('off');if(_offT||!o.hidden)return;_offT=setTimeout(function(){_offT=null;if(!isOn())o.hidden=false},3000)}
+function online(){clearTimeout(_offT);_offT=null;document.getElementById('off').hidden=true}
+function search(){
+  var v=document.getElementById('q').value.trim()
+  if(v.length<2){document.getElementById('res').innerHTML='';return}
+  _retry=!isOn()
+  if(_retry){document.getElementById('res').innerHTML='<div class=empty>Keine Verbindung &#8212; bist du im WLAN vor Ort?</div>';return}
+  document.getElementById('res').innerHTML='<div class=empty>Suche&#8230;</div>'
+  ws.send(JSON.stringify({type:'wish_search',query:v}))
+}
 function conn(){
   if(ws&&(ws.readyState===0||ws.readyState===1))return
+  offSoon()
   ws=new WebSocket('ws://'+location.host+'/wunsch/ws')
-  ws.onopen=info
-  ws.onclose=function(){setTimeout(conn,2000)}
+  // Wieder da: eine Suche, die ohne Verbindung nicht rausging, nachholen
+  ws.onopen=function(){online();info();if(_retry)search()}
+  ws.onclose=function(){offSoon();setTimeout(conn,2000)}
   ws.onerror=function(){ws.close()}
   ws.onmessage=function(e){
     var m=JSON.parse(e.data)
@@ -223,13 +243,9 @@ function conn(){
 }
 function note(h){document.getElementById('note').innerHTML=h}
 document.getElementById('q').oninput=function(){
-  var v=this.value.trim()
   clearTimeout(_t)
-  if(v.length<2){document.getElementById('res').innerHTML='';return}
-  _t=setTimeout(function(){
-    document.getElementById('res').innerHTML='<div class=empty>Suche&#8230;</div>'
-    if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'wish_search',query:v}))
-  },400)
+  if(this.value.trim().length<2){document.getElementById('res').innerHTML='';_rs=[];return}
+  _t=setTimeout(search,400)
 }
 function show(rs,final){
   _rs=rs
@@ -241,7 +257,7 @@ function show(rs,final){
     else if(s.state==='queued'){tag='<span class="tag t-queued">kommt um '+inClock(s.in_sec||0)+'</span>';dis=' disabled'}
     else if(s.state==='played'){tag='<span class="tag t-played">lief um '+clock(s.at||0)+'</span>'}
     else if(s.state==='wished'){tag='<span class="tag t-wished">schon gew&#252;nscht'+(s.count>1?' ('+s.count+'&#215;)':'')+'</span>';dis=' disabled'}
-    else if(r.lib)tag='<span class="tag t-lib">sofort da</span>'
+    else if(r.lib)tag='<span class="tag t-lib">kann sofort laufen</span>'
     var k=r.url||r.lib
     return'<div class=r><div class=r-i><div class=r-t>'+esc(r.title)+'</div><div class=r-s>'+tag+esc(r.uploader||'')+'</div></div>'+
       '<button class=b'+(dis||(_busy[k]?' disabled':''))+' onclick="ask('+i+')">'+(_busy[k]?'&#10003;':'W&#252;nschen')+'</button></div>'
@@ -260,12 +276,14 @@ function sendWish(e){
   e.preventDefault()
   var r=_pick;if(!r)return false
   var k=r.url||r.lib;if(_busy[k])return false
+  // Ohne Verbindung ging der Wunsch frueher still verloren, angezeigt wurde trotzdem ein Haken
+  if(!isOn()){closeAsk();note('<div class="msg no">Keine Verbindung &#8212; dein Wunsch wurde nicht gesendet. Bitte gleich nochmal versuchen.</div>');return false}
   var name=document.getElementById('nm').value.trim(),text=document.getElementById('nt').value.trim()
   try{localStorage.setItem('synthimix-name',name)}catch(x){}
   _busy[k]=1
   var msg=r.lib?{type:'wish_add',lib:r.lib,title:r.title}:{type:'wish_add',url:r.url,title:r.title}
   msg.name=name;msg.note=text
-  if(ws&&ws.readyState===1)ws.send(JSON.stringify(msg))
+  ws.send(JSON.stringify(msg))
   closeAsk();show(_rs,true)
   return false
 }

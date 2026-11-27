@@ -1411,6 +1411,16 @@ async def handle_message(ws: WebSocket, msg: dict):
         if remote._remote_server is not None:
             await core.broadcast(remote._remote_status_msg())
 
+    elif t == "set_wish_host":
+        # Leer = automatisch die aktuelle IP; sonst IP, Rechnername oder Link
+        host, err = remote.parse_wish_host(msg.get("value", ""))
+        if err:
+            await ws.send_text(json.dumps(remote._remote_status_msg(wish_host_error=err)))
+            return
+        _state["wish_host"] = host
+        store.save_settings()
+        await core.broadcast(remote._remote_status_msg())
+
     elif t == "set_ytdlp_autoupdate":
         _state["ytdlp_autoupdate"] = bool(msg.get("value", True))
         store.save_settings()
@@ -1509,8 +1519,25 @@ async def handle_message(ws: WebSocket, msg: dict):
 remote.handle_message = handle_message
 
 # ── WebSocket endpoint ────────────────────────────────────────────────────────
+# Nur das eigene Fenster darf steuern. Browser schicken bei WebSockets immer
+# einen Origin mit, und CORS gilt dafuer nicht: ohne diese Pruefung konnte jede
+# offene Webseite das Backend fernsteuern und z. B. die Schluessel auslesen.
+# Das gebaute Fenster kommt als "file://" (nachgemessen), die Vorschau von
+# localhost. "null" bleibt draussen, das schicken auch Sandbox-Iframes
+# fremder Seiten. Ohne Origin: kein Browser (Tests, Probelauf).
+_LOCAL_ORIGIN_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$", re.IGNORECASE)
+
+def _origin_ok(origin: str | None) -> bool:
+    if origin is None:
+        return True
+    return origin == "file://" or bool(_LOCAL_ORIGIN_RE.match(origin))
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
+    if not _origin_ok(ws.headers.get("origin")):
+        print(f"[ws] Verbindung abgelehnt, fremde Herkunft: {ws.headers.get('origin')!r}", flush=True)
+        await ws.close(code=1008)
+        return
     await ws.accept()
     clients.add(ws)
     try:

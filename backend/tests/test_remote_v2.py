@@ -79,10 +79,19 @@ class RemoteV2Test(RemoteTestBase):
         self.assertEqual(w["names"], ["Anna"])
         self.assertTrue(w["note"].startswith("Für das Brautpaar"))
         self.assertLessEqual(len(w["note"]), 80)
-        # Zweiter Gast wuenscht dasselbe: Name kommt dazu
+        # Vom selben Geraet nochmal: Name kommt dazu, gezaehlt wird aber nicht
+        # doppelt (sonst treibt ein Gast seinen Wunsch beliebig hoch)
         with c.websocket_connect("/wunsch/ws") as ws:
-            ws.send_json({"type": "wish_add", "lib": main._lib_wish_id(p), "title": "x", "name": "Tom"})
+            for _ in range(3):
+                ws.send_json({"type": "wish_add", "lib": main._lib_wish_id(p), "title": "x", "name": "Tom"})
+                json.loads(ws.receive_text())
+        self.assertEqual((w["count"], w["names"]), (1, ["Anna", "Tom"]))
+        # Ein anderes Geraet (TestClient hat immer dieselbe Adresse: der erste
+        # Wunsch kam hier also "von woanders") zaehlt mit
+        w["voters"] = ["192.168.0.20"]
+        with c.websocket_connect("/wunsch/ws") as ws:
+            ws.send_json({"type": "wish_add", "lib": main._lib_wish_id(p), "title": "x"})
             json.loads(ws.receive_text())
-        self.assertEqual((w["count"], w["names"]), (2, ["Anna", "Tom"]))
+        self.assertEqual(w["count"], 2)
         st = json.loads(main._remote_state_payload())
         self.assertEqual(st["wishes"][0]["names"], ["Anna", "Tom"])

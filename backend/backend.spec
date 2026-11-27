@@ -36,7 +36,11 @@ a = Analysis(
     hookspath=[],
     runtime_hooks=[],
     # numpy wird fuer die Tonart-Erkennung gebraucht (_detect_key_sync)
-    excludes=['tkinter', 'matplotlib', 'scipy', 'pandas'],
+    # Der Rest kommt nur aus der Python-Umgebung des Bau-PCs mit (optionale
+    # Importe von uvicorn/fastapi/logging) und wird vom Code nicht gebraucht.
+    excludes=['tkinter', 'matplotlib', 'scipy', 'pandas',
+              'lxml', 'Cython', 'tzdata', 'watchfiles', 'yaml', 'orjson',
+              'charset_normalizer', 'win32evtlogutil', 'win32evtlog'],
     noarchive=False,
 )
 
